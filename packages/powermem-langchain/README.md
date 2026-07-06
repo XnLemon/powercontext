@@ -1,21 +1,27 @@
 # powermem-langchain
 
-Standalone LangChain middleware package for the VLDB 2026 summer school branch. Its
-goal is to let LangChain v1 agents use PowerMem as a long-term memory layer
-through middleware.
+This package is the LangChain middleware exercise for the VLDB 2026 summer
+school branch. It provides a package skeleton, a no-op middleware scaffold,
+contract tests, and a runnable OpenAI example. It does not provide a complete
+PowerMem middleware implementation.
 
-This package currently provides only the package structure, public entry point,
-and contract tests. It does not provide a working middleware implementation.
-Students need to implement:
+The goal is to integrate PowerMem as a long-term memory layer for LangChain v1
+agents. The provided scaffold is intentionally small; you may adjust it as your
+implementation requires, but the memory retrieval, context injection, and
+write-back behavior should be implemented through LangChain middleware hooks.
+This is useful beyond a single `create_agent` example: LangChain middleware is
+the extension point for controlling agent execution, and related projects such
+as Deep Agents also compose capabilities through middleware.
+
+## Task
+
+Implement:
 
 ```python
 from powermem_langchain import PowerMemMiddleware
 ```
 
-## Expected Behavior
-
-`PowerMemMiddleware` should work as middleware passed to LangChain
-`create_agent`:
+The middleware should be usable with `create_agent`:
 
 ```python
 from langchain.agents import create_agent
@@ -38,16 +44,16 @@ agent = create_agent(
 )
 ```
 
-The student implementation must satisfy the following contract:
+At minimum, the implementation should:
 
-- Before a model call, call `memory.search(...)` with the latest user message.
-- Inject retrieved memories into the model-visible context.
-- After the agent run, call `memory.add(...)` when `save_interactions=True`.
-- Do not persist interactions when `save_interactions=False`.
-- Resolve `user_id` from the explicit constructor argument.
-- Keep the agent fail-open by default when PowerMem search fails.
+- Search PowerMem with the latest user message before the model call.
+- Add relevant memories to the model-visible context.
+- Save the user and assistant interaction to PowerMem when enabled.
+- Skip write-back when `save_interactions=False`.
+- Use the explicit `user_id` constructor argument.
+- Keep the agent usable when PowerMem search fails.
 
-## Local Tests
+## Tests
 
 Run from the repository root:
 
@@ -59,23 +65,23 @@ uv run --no-project \
   pytest packages/powermem-langchain/tests -q
 ```
 
-These tests validate only the public behavior of the `powermem-langchain`
-package. They use a local SQLite PowerMem instance with the noop LLM provider
-and mock embedder, so they do not require real API keys or OceanBase.
+The tests use a local SQLite PowerMem instance with the noop LLM provider and
+mock embedder. They do not require API keys or OceanBase.
 
-## OpenAI Demo
+The tests are a baseline, not a complete design specification. If your solution
+adds state fields or edge-case handling, add focused tests for those choices.
 
-The package includes a runnable OpenAI demo that exercises the expected
-middleware path end to end:
+## Example
 
-1. Create a PowerMem instance from the local environment.
-2. Seed PowerMem with one memory for the demo user.
+The OpenAI example is an end-to-end check for the expected flow:
+
+1. Create a PowerMem instance.
+2. Seed one memory for the demo user.
 3. Create a LangChain agent with `PowerMemMiddleware`.
-4. Invoke an OpenAI chat model through `langchain-openai`.
+4. Invoke an OpenAI chat model.
 5. Print memory search results before and after the agent run.
 
-Configure PowerMem and OpenAI first. A minimal local setup can use SQLite for
-storage and OpenAI for the agent model:
+Minimal environment:
 
 ```bash
 export OPENAI_API_KEY="..."
@@ -86,9 +92,7 @@ export DATABASE_PROVIDER=sqlite
 export SQLITE_PATH="./data/powermem_langchain_demo.db"
 ```
 
-The demo reads its own OpenAI and CLI defaults with `pydantic-settings` from
-environment variables and an optional `.env` file. Supported demo-specific
-variables include:
+Optional demo settings use the `POWERMEM_LANGCHAIN_` prefix:
 
 - `POWERMEM_LANGCHAIN_OPENAI_MODEL`
 - `POWERMEM_LANGCHAIN_TEMPERATURE`
@@ -97,7 +101,7 @@ variables include:
 - `POWERMEM_LANGCHAIN_PROMPT`
 - `POWERMEM_LANGCHAIN_SEED_MEMORY`
 
-Run the demo from the repository root:
+Run:
 
 ```bash
 uv run --no-project \
@@ -108,22 +112,6 @@ uv run --no-project \
     --user-id summer-school-demo
 ```
 
-Expected output shape after `PowerMemMiddleware` is correctly implemented:
-
-```text
-PowerMem LangChain OpenAI demo
-user_id: summer-school-demo
-model: gpt-4o-mini
-seed_memory: The user prefers concise answers with database-focused examples.
-memories_before_agent:
-  - The user prefers concise answers with database-focused examples.
-prompt: How should you answer my database engineering questions in future sessions?
-assistant:
-I should answer concisely and use database-focused examples when they help.
-memories_after_agent:
-  - The user prefers concise answers with database-focused examples.
-  - The user wants future database engineering answers to be concise...
-```
-
-If the placeholder middleware is still present, the command exits with a
-message saying `PowerMemMiddleware is not implemented yet`.
+With the placeholder middleware, the command can run but will not show the expected
+memory injection or write-back behavior. After implementation, the output should
+show seeded memories before the agent call and updated memories afterward.

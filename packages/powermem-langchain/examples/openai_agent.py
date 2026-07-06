@@ -140,15 +140,12 @@ def main() -> None:
     )
     print_search_results("memories_before_agent:", before)
 
-    try:
-        middleware = PowerMemMiddleware(
-            memory=memory,
-            user_id=args.user_id,
-            search_limit=args.search_limit,
-            save_interactions=not args.no_save,
-        )
-    except NotImplementedError as exc:
-        raise SystemExit(f"PowerMemMiddleware is not implemented yet: {exc}") from exc
+    middleware = PowerMemMiddleware(
+        memory=memory,
+        user_id=args.user_id,
+        search_limit=args.search_limit,
+        save_interactions=not args.no_save,
+    )
 
     agent = create_agent(
         model=create_openai_model(settings, args.model, args.temperature),
