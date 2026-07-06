@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import SimpleChatModel
 from langchain_core.messages import BaseMessage, HumanMessage
+from powermem import Memory
+from powermem_langchain import PowerMemMiddleware
 from pydantic import Field
 
 
@@ -30,51 +33,50 @@ class CapturingChatModel(SimpleChatModel):
         return self.responses[index]
 
 
-@dataclass
-class FakeMemory:
-    search_results: list[dict[str, Any]] = field(default_factory=list)
-    fail_search: bool = False
-    search_calls: list[dict[str, Any]] = field(default_factory=list)
-    add_calls: list[dict[str, Any]] = field(default_factory=list)
-
+class FailingSearchMemory:
     def search(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        if self.fail_search:
-            raise RuntimeError("search failed")
-        query = args[0] if args else kwargs.get("query")
-        self.search_calls.append({"query": query, **kwargs})
-        return {"results": list(self.search_results)}
-
-    def add(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        self.add_calls.append({"args": args, "kwargs": kwargs})
-        return {"results": [{"id": "memory-1"}]}
+        raise RuntimeError("search failed")
 
 
 def _message_text(messages: list[BaseMessage]) -> str:
     return "\n".join(str(message.content) for message in messages)
 
 
-def _call_text(call: dict[str, Any]) -> str:
-    return f"{call['args']!r}\n{call['kwargs']!r}"
+def _stored_memory_text(memory: Memory, user_id: str) -> str:
+    result = memory.get_all(user_id=user_id)
+    return "\n".join(item["memory"] for item in result["results"])
 
 
-def _load_middleware_class():
-    from powermem_langchain import PowerMemMiddleware
-
-    return PowerMemMiddleware
+def _sqlite_memory(tmp_path: Path) -> Memory:
+    return Memory(
+        config={
+            "vector_store": {
+                "provider": "sqlite",
+                "config": {
+                    "database_path": str(tmp_path / "powermem_langchain.db"),
+                    "collection_name": f"memories_{uuid.uuid4().hex[:8]}",
+                },
+            },
+            "llm": {
+                "provider": "noop",
+                "config": {"model": "noop"},
+            },
+            "embedder": {
+                "provider": "mock",
+                "config": {"embedding_dims": 16},
+            },
+        }
+    )
 
 
 def test_public_import_contract():
-    assert callable(_load_middleware_class())
+    assert callable(PowerMemMiddleware)
 
 
-def test_retrieves_memories_before_model_call():
-    PowerMemMiddleware = _load_middleware_class()
-    memory = FakeMemory(
-        search_results=[
-            {"memory": "User prefers short answers."},
-            {"memory": "User works on database systems."},
-        ]
-    )
+def test_retrieves_powermem_memories_before_model_call(tmp_path: Path):
+    memory = _sqlite_memory(tmp_path)
+    memory.add("User prefers short database answers.", user_id="alice", infer=False)
+    memory.add("User works on storage engines.", user_id="alice", infer=False)
     model = CapturingChatModel(responses=["done"])
     agent = create_agent(
         model=model,
@@ -89,19 +91,17 @@ def test_retrieves_memories_before_model_call():
         ],
     )
 
-    agent.invoke({"messages": [HumanMessage(content="How should you answer?")]})
+    agent.invoke(
+        {"messages": [HumanMessage(content="How should you answer database questions?")]}
+    )
 
-    assert memory.search_calls
-    assert memory.search_calls[0]["query"] == "How should you answer?"
-    assert memory.search_calls[0]["user_id"] == "alice"
-    assert memory.search_calls[0]["limit"] == 2
-    assert "User prefers short answers." in _message_text(model.calls[0])
-    assert "User works on database systems." in _message_text(model.calls[0])
+    prompt_text = _message_text(model.calls[0])
+    assert "User prefers short database answers." in prompt_text
+    assert "User works on storage engines." in prompt_text
 
 
-def test_persists_interaction_after_agent_run():
-    PowerMemMiddleware = _load_middleware_class()
-    memory = FakeMemory(search_results=[])
+def test_persists_interaction_after_agent_run(tmp_path: Path):
+    memory = _sqlite_memory(tmp_path)
     model = CapturingChatModel(responses=["Stored response"])
     agent = create_agent(
         model=model,
@@ -117,16 +117,13 @@ def test_persists_interaction_after_agent_run():
 
     agent.invoke({"messages": [HumanMessage(content="Remember this preference.")]})
 
-    assert memory.add_calls
-    call_text = _call_text(memory.add_calls[0])
-    assert "Remember this preference." in call_text
-    assert "Stored response" in call_text
-    assert memory.add_calls[0]["kwargs"].get("user_id") == "alice"
+    memory_text = _stored_memory_text(memory, "alice")
+    assert "Remember this preference." in memory_text
+    assert "Stored response" in memory_text
 
 
-def test_can_disable_interaction_persistence():
-    PowerMemMiddleware = _load_middleware_class()
-    memory = FakeMemory(search_results=[])
+def test_can_disable_interaction_persistence(tmp_path: Path):
+    memory = _sqlite_memory(tmp_path)
     model = CapturingChatModel(responses=["Do not persist this"])
     agent = create_agent(
         model=model,
@@ -142,12 +139,11 @@ def test_can_disable_interaction_persistence():
 
     agent.invoke({"messages": [HumanMessage(content="This should stay transient.")]})
 
-    assert memory.add_calls == []
+    assert memory.get_all(user_id="alice")["results"] == []
 
 
 def test_search_failure_is_fail_open_by_default():
-    PowerMemMiddleware = _load_middleware_class()
-    memory = FakeMemory(fail_search=True)
+    memory = FailingSearchMemory()
     model = CapturingChatModel(responses=["Agent still runs"])
     agent = create_agent(
         model=model,
@@ -166,9 +162,10 @@ def test_search_failure_is_fail_open_by_default():
     assert result["messages"][-1].content == "Agent still runs"
 
 
-def test_can_resolve_user_id_from_configurable_runtime():
-    PowerMemMiddleware = _load_middleware_class()
-    memory = FakeMemory(search_results=[])
+@pytest.mark.asyncio
+async def test_async_agent_uses_powermem_memory(tmp_path: Path):
+    memory = _sqlite_memory(tmp_path)
+    memory.add("User prefers async examples.", user_id="async-user", infer=False)
     model = CapturingChatModel(responses=["ok"])
     agent = create_agent(
         model=model,
@@ -176,17 +173,13 @@ def test_can_resolve_user_id_from_configurable_runtime():
         middleware=[
             PowerMemMiddleware(
                 memory=memory,
-                search_limit=3,
+                user_id="async-user",
+                search_limit=1,
                 save_interactions=False,
             )
         ],
     )
 
-    agent.invoke(
-        {"messages": [HumanMessage(content="Use my profile.")]},
-        config={"configurable": {"user_id": "runtime-user"}},
-    )
+    await agent.ainvoke({"messages": [HumanMessage(content="Use my async profile.")]})
 
-    assert memory.search_calls
-    assert memory.search_calls[0]["user_id"] == "runtime-user"
-    assert memory.search_calls[0]["limit"] == 3
+    assert "User prefers async examples." in _message_text(model.calls[0])

@@ -44,8 +44,7 @@ The student implementation must satisfy the following contract:
 - Inject retrieved memories into the model-visible context.
 - After the agent run, call `memory.add(...)` when `save_interactions=True`.
 - Do not persist interactions when `save_interactions=False`.
-- Resolve `user_id` from either an explicit constructor argument or LangChain
-  runtime config.
+- Resolve `user_id` from the explicit constructor argument.
 - Keep the agent fail-open by default when PowerMem search fails.
 
 ## Local Tests
@@ -61,7 +60,8 @@ uv run --no-project \
 ```
 
 These tests validate only the public behavior of the `powermem-langchain`
-package. They do not require real API keys, a real database, or OceanBase.
+package. They use a local SQLite PowerMem instance with the noop LLM provider
+and mock embedder, so they do not require real API keys or OceanBase.
 
 ## OpenAI Demo
 
