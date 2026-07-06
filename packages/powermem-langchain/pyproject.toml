@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "powermem-langchain"
+version = "0.0.0"
+description = "PowerMem LangChain middleware integration package."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    {name = "powermem Team", email = "open_oceanbase@oceanbase.com"}
+]
+requires-python = ">=3.11"
+dependencies = [
+    "powermem>=1.1.7",
+    "langchain>=1.1.0",
+    "langchain-core>=1.1.0",
+]
+
+[project.optional-dependencies]
+example = [
+    "langchain-openai>=1.1.0",
+    "pydantic-settings>=2.0.0",
+]
+test = [
+    "pytest>=8.2.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/oceanbase/powermem"
+Repository = "https://github.com/oceanbase/powermem.git"
+
+[tool.setuptools.packages.find]
+where = ["src"]
