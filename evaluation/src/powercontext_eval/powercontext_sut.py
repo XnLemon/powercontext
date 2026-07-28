@@ -616,6 +616,8 @@ class DockerSut:
             "/source",
             "--extra",
             "server",
+            "--extra",
+            "cli",
         )
         self._docker.run(command, cwd=paths.runtime, timeout=900)
         setup_common = (

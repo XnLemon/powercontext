@@ -335,7 +335,7 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
     prewarm_index = next(
         index
         for index, command in enumerate(transcript)
-        if command[-6:] == ("sync", "--frozen", "--project", "/source", "--extra", "server")
+        if command[-8:] == ("sync", "--frozen", "--project", "/source", "--extra", "server", "--extra", "cli")
     )
     chown = transcript[chown_index]
     assert chown_index < prewarm_index
