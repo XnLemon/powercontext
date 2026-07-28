@@ -1,0 +1,23 @@
+[Unit]
+Description=PowerContext evaluation console worker
+After=network.target powercontext-eval-web.service
+
+[Service]
+Type=simple
+User=rongfeng.frf
+Group=users
+SupplementaryGroups=docker
+WorkingDirectory=/data/powercontext-eval/deploy/powercontext
+EnvironmentFile=/data/powercontext-eval/config/evaluation-console.env
+ExecStart=/data/powercontext-eval/bin/uv run --project evaluation powercontext-eval worker
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWriteDirectories=/data/powercontext-eval
+
+[Install]
+WantedBy=multi-user.target
