@@ -628,10 +628,10 @@ Run:
 
 ```bash
 uv lock --project evaluation --locked
-uv run --project evaluation pytest -m "not live" -q
+uv run --project evaluation pytest -c evaluation/pyproject.toml evaluation/tests -m "not live" -q
 uv run --project evaluation ruff check evaluation
 uv run --project evaluation ruff format --check evaluation
-uv run --project evaluation ty check evaluation/src evaluation/tests
+uv run --directory evaluation ty check src tests
 ```
 
 Expected: every command exits zero.
@@ -669,7 +669,7 @@ eval-test:
 eval-check: eval-lock-check eval-test
 	@uv run --project evaluation ruff check evaluation
 	@uv run --project evaluation ruff format --check evaluation
-	@uv run --project evaluation ty check evaluation/src evaluation/tests
+	@uv run --directory evaluation ty check src tests
 ```
 
 The workflow runs `make eval-check` on Python 3.11 without Docker credentials or live tests.
