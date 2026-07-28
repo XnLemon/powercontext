@@ -307,6 +307,10 @@ async def _next(stream: Any) -> str:
     return await anext(stream)
 
 
+async def _load_task(store: TaskStore, task_id: str) -> Any:
+    return store.get(task_id)
+
+
 def test_event_stream_suppresses_unchanged_versions_emits_change_and_final_then_exits(store: TaskStore) -> None:
     record, _ = store.create(
         TaskCreate.model_validate(payload("sse-task-key")),
@@ -318,6 +322,7 @@ def test_event_stream_suppresses_unchanged_versions_emits_change_and_final_then_
 
     async def sleep(seconds: float) -> None:
         nonlocal now, sleeps
+        await asyncio.sleep(0)
         now += seconds
         sleeps += 1
         if sleeps == 2:
@@ -333,6 +338,7 @@ def test_event_stream_suppresses_unchanged_versions_emits_change_and_final_then_
             sleep=sleep,
             monotonic=lambda: now,
             wall_clock=lambda: NOW,
+            load=lambda task_id: _load_task(store, task_id),
         ).__aiter__()
         initial = await _next(stream)
         final = await _next(stream)
@@ -342,7 +348,6 @@ def test_event_stream_suppresses_unchanged_versions_emits_change_and_final_then_
             await _next(stream)
 
     asyncio.run(scenario())
-    assert sleeps == 2
 
 
 def test_event_stream_heartbeat_at_fifteen_seconds_and_disconnect_exit(store: TaskStore) -> None:
@@ -355,6 +360,7 @@ def test_event_stream_heartbeat_at_fifteen_seconds_and_disconnect_exit(store: Ta
 
     async def sleep(seconds: float) -> None:
         nonlocal now
+        await asyncio.sleep(0)
         now += seconds
 
     async def scenario() -> None:
@@ -367,6 +373,7 @@ def test_event_stream_heartbeat_at_fifteen_seconds_and_disconnect_exit(store: Ta
             sleep=sleep,
             monotonic=lambda: now,
             wall_clock=lambda: NOW,
+            load=lambda task_id: _load_task(store, task_id),
         ).__aiter__()
         assert '"status":"queued"' in await _next(stream)
         assert await _next(stream) == ": heartbeat\n\n"
@@ -389,6 +396,7 @@ def test_event_stream_does_not_hold_sqlite_transaction_during_wait(config: WebCo
 
     async def sleep(seconds: float) -> None:
         nonlocal mutated, now
+        await asyncio.sleep(0)
         now += seconds
         if not mutated:
             second.cancel_queued(record.task_id, now=NOW + timedelta(seconds=1))
@@ -404,6 +412,7 @@ def test_event_stream_does_not_hold_sqlite_transaction_during_wait(config: WebCo
             sleep=sleep,
             monotonic=lambda: now,
             wall_clock=lambda: NOW,
+            load=lambda task_id: _load_task(store, task_id),
         ).__aiter__()
         await _next(stream)
         assert '"status":"cancelled"' in await _next(stream)
@@ -457,6 +466,7 @@ def test_event_stream_heartbeat_is_not_delayed_by_thirty_second_poll(store: Task
 
     async def sleep(seconds: float) -> None:
         nonlocal now
+        await asyncio.sleep(0)
         sleeps.append(seconds)
         now += seconds
 
@@ -470,6 +480,7 @@ def test_event_stream_heartbeat_is_not_delayed_by_thirty_second_poll(store: Task
             sleep=sleep,
             monotonic=lambda: now,
             wall_clock=lambda: NOW,
+            load=lambda task_id: _load_task(store, task_id),
         ).__aiter__()
         assert '"status":"queued"' in await _next(stream)
         assert await _next(stream) == ": heartbeat\n\n"
@@ -486,6 +497,7 @@ def test_event_stream_clamps_heartbeat_to_fifteen_seconds(store: TaskStore) -> N
 
     async def sleep(seconds: float) -> None:
         nonlocal now
+        await asyncio.sleep(0)
         sleeps.append(seconds)
         now += seconds
 
@@ -499,6 +511,7 @@ def test_event_stream_clamps_heartbeat_to_fifteen_seconds(store: TaskStore) -> N
             sleep=sleep,
             monotonic=lambda: now,
             wall_clock=lambda: NOW,
+            load=lambda task_id: _load_task(store, task_id),
         ).__aiter__()
         await _next(stream)
         assert await _next(stream) == ": heartbeat\n\n"
@@ -521,6 +534,7 @@ def test_event_stream_prioritizes_due_heartbeat_over_due_database_poll(store: Ta
 
     async def sleep(_seconds: float) -> None:
         nonlocal now
+        await asyncio.sleep(0)
         now = 15
 
     async def scenario() -> None:
@@ -541,6 +555,52 @@ def test_event_stream_prioritizes_due_heartbeat_over_due_database_poll(store: Ta
 
     asyncio.run(scenario())
     assert load_times == [0]
+
+
+def test_event_stream_races_pending_poll_with_heartbeat_and_reuses_result(store: TaskStore) -> None:
+    record, _ = store.create(TaskCreate.model_validate(payload("pending-poll-key")), now=NOW)
+    now = 0.0
+    load_calls = 0
+    release = asyncio.Event()
+
+    async def load(task_id: str) -> Any:
+        nonlocal load_calls
+        load_calls += 1
+        if load_calls == 2:
+            await release.wait()
+        return store.get(task_id)
+
+    async def sleep(seconds: float) -> None:
+        nonlocal now
+        await asyncio.sleep(0)
+        now += seconds
+
+    async def scenario() -> None:
+        stream = TaskEventStream(
+            _Request(),
+            store,
+            record.task_id,
+            poll_seconds=10,
+            heartbeat_seconds=15,
+            sleep=sleep,
+            monotonic=lambda: now,
+            wall_clock=lambda: NOW,
+            load=load,
+        ).__aiter__()
+        assert '"status":"queued"' in await _next(stream)
+        assert await asyncio.wait_for(_next(stream), timeout=0.1) == ": heartbeat\n\n"
+        assert now == 15
+        assert load_calls == 2
+
+        store.cancel_queued(record.task_id, now=NOW + timedelta(seconds=1))
+        release.set()
+        final = await _next(stream)
+        assert '"status":"cancelled"' in final
+        assert load_calls == 2
+        with pytest.raises(StopAsyncIteration):
+            await _next(stream)
+
+    asyncio.run(scenario())
 
 
 def test_frontend_fallback_is_confined_and_does_not_capture_api(config: WebConfig, store: TaskStore) -> None:

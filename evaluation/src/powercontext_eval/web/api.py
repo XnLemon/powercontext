@@ -9,6 +9,7 @@ import os
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -92,18 +93,44 @@ class TaskEventStream:
         started = self._monotonic()
         next_poll = started
         next_heartbeat = started + self._heartbeat_seconds
-        while not await self._request.is_disconnected():
-            now = self._monotonic()
-            if now >= next_heartbeat:
-                yield ": heartbeat\n\n"
-                next_heartbeat = now + self._heartbeat_seconds
+        pending_load: asyncio.Task[TaskRecord] | None = None
+        heartbeat_timer: asyncio.Future[None] | None = None
+        try:
+            while not await self._request.is_disconnected():
                 now = self._monotonic()
-            if now >= next_poll:
-                record = (
-                    await self._load(self._task_id)
-                    if self._load is not None
-                    else await asyncio.to_thread(self._store.get, self._task_id)
-                )
+                if now >= next_heartbeat:
+                    yield ": heartbeat\n\n"
+                    next_heartbeat = now + self._heartbeat_seconds
+                    continue
+
+                if pending_load is None and now >= next_poll:
+                    pending_load = asyncio.create_task(self._load_record())
+                    await asyncio.sleep(0)
+
+                if pending_load is None:
+                    await self._sleep(max(0.0, min(next_poll, next_heartbeat) - now))
+                    continue
+
+                if not pending_load.done():
+                    heartbeat_timer = asyncio.ensure_future(self._sleep(max(0.0, next_heartbeat - now)))
+                    done, _ = await asyncio.wait(
+                        {pending_load, heartbeat_timer},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if pending_load not in done:
+                        await heartbeat_timer
+                        heartbeat_timer = None
+                        now = self._monotonic()
+                        yield ": heartbeat\n\n"
+                        next_heartbeat = now + self._heartbeat_seconds
+                        continue
+
+                    heartbeat_timer.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await heartbeat_timer
+                    heartbeat_timer = None
+                record = await pending_load
+                pending_load = None
                 now = self._monotonic()
                 next_poll = now + self._poll_seconds
                 if record.version != last_version:
@@ -120,12 +147,21 @@ class TaskEventStream:
                     next_heartbeat = now + self._heartbeat_seconds
                     if record.status in _TERMINAL:
                         return
-            now = self._monotonic()
-            if now >= next_heartbeat:
-                yield ": heartbeat\n\n"
-                next_heartbeat = now + self._heartbeat_seconds
-            now = self._monotonic()
-            await self._sleep(max(0.0, min(next_poll, next_heartbeat) - now))
+                elif now >= next_heartbeat:
+                    yield ": heartbeat\n\n"
+                    next_heartbeat = now + self._heartbeat_seconds
+        finally:
+            for task in (heartbeat_timer, pending_load):
+                if task is not None and not task.done():
+                    task.cancel()
+                if task is not None:
+                    with suppress(asyncio.CancelledError):
+                        await task
+
+    async def _load_record(self) -> TaskRecord:
+        if self._load is not None:
+            return await self._load(self._task_id)
+        return await asyncio.to_thread(self._store.get, self._task_id)
 
 
 def _safe_frontend(frontend: Path, root: Path) -> bool:
