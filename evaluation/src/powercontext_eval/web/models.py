@@ -8,6 +8,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
+from powercontext_eval.artifacts import ArmState
 from powercontext_eval.models import PowerContextRef
 from powercontext_eval.runner import INSTANCE_ID
 
@@ -192,7 +193,10 @@ class MetricValue(FrozenModel):
 
 class ArmResponse(FrozenModel):
     arm: Literal["off", "on"]
+    state: ArmState
     resolution: Literal["resolved", "unresolved"]
+    passed: bool | None
+    treatment_valid: bool
     input_tokens: Annotated[int, Field(ge=0)] | None = None
     output_tokens: Annotated[int, Field(ge=0)] | None = None
     elapsed_seconds: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None

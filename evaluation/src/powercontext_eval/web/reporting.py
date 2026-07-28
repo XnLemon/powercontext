@@ -173,7 +173,10 @@ def _validate_evidence(
 def _arm_response(arm: Literal["off", "on"], report: ArmReport) -> ArmResponse:
     return ArmResponse(
         arm=arm,
+        state=report.state,
         resolution="resolved" if report.resolved else "unresolved",
+        passed=report.passed,
+        treatment_valid=report.treatment_valid,
         input_tokens=report.metrics.input_tokens,
         output_tokens=report.metrics.output_tokens,
         elapsed_seconds=report.metrics.elapsed_seconds,

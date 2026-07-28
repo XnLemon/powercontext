@@ -87,8 +87,6 @@ export function ReportView({ api, taskId }: ReportViewProps) {
   if (report === null) return <section className="panel state-message">正在加载验收报告…</section>;
 
   const comparable = Object.values(report.comparison).some((metric) => metric !== null);
-  const validityDetail = report.acceptance_valid ? "有效" : "未确认";
-
   return (
     <article className={`report-view${report.acceptance_valid ? "" : " report-view--invalid"}`}>
       <header className="report-identity">
@@ -101,15 +99,7 @@ export function ReportView({ api, taskId }: ReportViewProps) {
         </span>
       </header>
 
-      <section className="report-section validity-section" aria-labelledby="validity-heading">
-        <h3 id="validity-heading">有效性判定</h3>
-        <dl className="validity-list">
-          <div><dt>生命周期</dt><dd>生命周期{validityDetail}</dd></div>
-          <div><dt>官方结果</dt><dd>官方结果{validityDetail}</dd></div>
-          <div><dt>处理证据</dt><dd>处理证据{validityDetail}</dd></div>
-        </dl>
-        {!report.acceptance_valid && <p className="invalid-note">报告保留实际结果，但不构成有效验收结论。</p>}
-      </section>
+      {!report.acceptance_valid && <p className="invalid-note">报告保留实际结果，但不构成有效验收结论。</p>}
 
       <section className="report-section" aria-labelledby="comparison-heading">
         <h3 id="comparison-heading">OFF / ON 指标对照</h3>
@@ -191,6 +181,9 @@ function ArmCard({ arm }: { arm: ArmResponse }) {
     <section className="arm-panel" aria-label={`${label} 评测臂`}>
       <h4>{label} · {arm.resolution.toUpperCase()}</h4>
       <dl className="arm-metrics">
+        <div><dt>生命周期</dt><dd>{arm.state.replaceAll("_", " ").toUpperCase()}</dd></div>
+        <div><dt>官方结果</dt><dd>{arm.passed === null ? "N/A" : arm.passed ? "PASS" : "FAIL"}</dd></div>
+        <div><dt>处理有效性</dt><dd>{arm.treatment_valid ? "VALID" : "INVALID"}</dd></div>
         <div><dt>补丁大小</dt><dd>{patchSize}</dd></div>
         <div><dt>输入 Token</dt><dd>{number(arm.input_tokens)}</dd></div>
         <div><dt>输出 Token</dt><dd>{number(arm.output_tokens)}</dd></div>

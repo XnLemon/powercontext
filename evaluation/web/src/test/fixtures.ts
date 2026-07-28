@@ -40,7 +40,10 @@ export const report: ReportResponse = {
   acceptance_valid: true,
   off: {
     arm: "off",
-    resolution: "unresolved",
+    state: "treatment_validated",
+    resolution: "resolved",
+    passed: true,
+    treatment_valid: true,
     input_tokens: 1_963_221,
     output_tokens: null,
     elapsed_seconds: 125.55,
@@ -48,7 +51,10 @@ export const report: ReportResponse = {
   },
   on: {
     arm: "on",
+    state: "treatment_validated",
     resolution: "resolved",
+    passed: true,
+    treatment_valid: true,
     input_tokens: 1_122_207,
     output_tokens: 12_345,
     elapsed_seconds: 100,

@@ -261,6 +261,17 @@ def test_structured_and_raw_reports_use_validated_artifacts(
     assert structured.status_code == 200
     assert structured.json()["task_id"] == task["task_id"]
     assert structured.json()["acceptance_valid"] is True
+    assert structured.json()["off"] == {
+        "arm": "off",
+        "state": "treatment_validated",
+        "resolution": "resolved",
+        "passed": True,
+        "treatment_valid": True,
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "elapsed_seconds": 1.5,
+        "patch_bytes": 20,
+    }
     assert raw.status_code == 200
     assert raw.text == "# Résumé\n"
     assert raw.headers["content-type"].startswith("text/plain")

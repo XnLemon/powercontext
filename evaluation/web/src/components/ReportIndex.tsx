@@ -17,7 +17,14 @@ export function ReportIndex({ api }: { api: EvaluationApi }) {
     api.listTasks({ status: "succeeded", limit: 50, offset: 0 }, nextController.signal)
       .then((nextTasks) => {
         if (!nextController.signal.aborted && requestGeneration === generation.current) {
-          setTasks(nextTasks.filter((task) => task.status === "succeeded"));
+          setTasks(
+            nextTasks
+              .filter((task) => task.status === "succeeded")
+              .sort(
+                (left, right) =>
+                  Date.parse(right.finished_at ?? right.created_at) - Date.parse(left.finished_at ?? left.created_at),
+              ),
+          );
         }
       })
       .catch(() => {
@@ -48,10 +55,10 @@ export function ReportIndex({ api }: { api: EvaluationApi }) {
     <section className="panel report-index" aria-labelledby="report-index-heading">
       <h2 id="report-index-heading">已完成报告</h2>
       <ul>
-        {tasks.map((task) => (
+        {tasks.map((task, index) => (
           <li key={task.task_id}>
             <div>
-              <strong>{task.task_id}</strong>
+              <strong>{task.task_id}{index === 0 && <span className="latest-label">最新报告</span>}</strong>
               <span>{task.powercontext_ref} · {task.model}</span>
             </div>
             <a

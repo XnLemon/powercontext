@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from powercontext_eval.artifacts import ArmState
 from powercontext_eval.runner import INSTANCE_ID
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.models import (
@@ -483,7 +484,14 @@ def test_task_record_rejects_inverted_timestamp_order(status: TaskStatus, fields
 )
 def test_report_arm_rejects_negative_or_non_finite_metrics(field: str, value: float) -> None:
     with pytest.raises(ValidationError):
-        ArmResponse(arm="off", resolution="resolved", **{field: value})  # ty: ignore[invalid-argument-type]
+        ArmResponse(
+            arm="off",
+            state=ArmState.TREATMENT_VALIDATED,
+            resolution="resolved",
+            passed=True,
+            treatment_valid=True,
+            **{field: value},
+        )  # ty: ignore[invalid-argument-type]
 
 
 def test_report_response_nested_mappings_are_immutable() -> None:
@@ -500,8 +508,20 @@ def test_report_response_nested_mappings_are_immutable() -> None:
     report = ReportResponse(
         task_id="run-123",
         acceptance_valid=False,
-        off=ArmResponse(arm="off", resolution="unresolved"),
-        on=ArmResponse(arm="on", resolution="unresolved"),
+        off=ArmResponse(
+            arm="off",
+            state=ArmState.TREATMENT_VALIDATED,
+            resolution="unresolved",
+            passed=False,
+            treatment_valid=True,
+        ),
+        on=ArmResponse(
+            arm="on",
+            state=ArmState.INVALID_TREATMENT,
+            resolution="unresolved",
+            passed=None,
+            treatment_valid=False,
+        ),
         comparison=ComparisonResponse(),
         evidence=EvidenceResponse(off=evidence, on=evidence),
         revisions={"powercontext": "0" * 40},
@@ -514,3 +534,14 @@ def test_report_response_nested_mappings_are_immutable() -> None:
     with pytest.raises(TypeError):
         report.configuration["model"] = "other"  # ty: ignore[invalid-assignment]
     assert ReportResponse.model_validate_json(report.model_dump_json()).revisions["powercontext"] == "0" * 40
+    assert report.model_dump(mode="json")["off"] == {
+        "arm": "off",
+        "state": "treatment_validated",
+        "resolution": "unresolved",
+        "passed": False,
+        "treatment_valid": True,
+        "input_tokens": None,
+        "output_tokens": None,
+        "elapsed_seconds": None,
+        "patch_bytes": None,
+    }

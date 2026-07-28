@@ -140,7 +140,10 @@ describe("EvaluationApi HTTP", () => {
       acceptance_valid: true,
       off: {
         arm: "off",
+        state: "treatment_validated",
         resolution: "unresolved",
+        passed: false,
+        treatment_valid: true,
         input_tokens: 10,
         output_tokens: 20,
         elapsed_seconds: 1.5,
@@ -148,7 +151,10 @@ describe("EvaluationApi HTTP", () => {
       },
       on: {
         arm: "on",
+        state: "treatment_validated",
         resolution: "resolved",
+        passed: true,
+        treatment_valid: true,
         input_tokens: 8,
         output_tokens: 12,
         elapsed_seconds: 1,
@@ -275,7 +281,10 @@ describe("EvaluationApi HTTP", () => {
       acceptance_valid: true,
       off: {
         arm: "off",
+        state: "treatment_validated",
         resolution: "unresolved",
+        passed: false,
+        treatment_valid: true,
         input_tokens: null,
         output_tokens: null,
         elapsed_seconds: null,
@@ -283,7 +292,10 @@ describe("EvaluationApi HTTP", () => {
       },
       on: {
         arm: "on",
+        state: "treatment_validated",
         resolution: "resolved",
+        passed: true,
+        treatment_valid: true,
         input_tokens: 1,
         output_tokens: 1,
         elapsed_seconds: 1,

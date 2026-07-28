@@ -115,7 +115,14 @@ function Workbench({ api, navigate }: { api: EvaluationApi; navigate(path: strin
   }, [loadOverview]);
 
   const running = tasks?.find((task) => task.status === "running");
-  const latestSucceeded = tasks?.find((task) => task.status === "succeeded");
+  const latestSucceeded = tasks
+    ?.filter((task) => task.status === "succeeded")
+    .reduce<TaskSummary | undefined>((latest, task) => {
+      if (latest === undefined) return task;
+      const taskTime = Date.parse(task.finished_at ?? task.created_at);
+      const latestTime = Date.parse(latest.finished_at ?? latest.created_at);
+      return taskTime > latestTime ? task : latest;
+    }, undefined);
   const selectedId = focusTask?.task_id ?? running?.task_id;
 
   return (

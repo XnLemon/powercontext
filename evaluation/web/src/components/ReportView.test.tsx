@@ -11,11 +11,11 @@ describe("ReportView", () => {
 
     expect(await screen.findByText("验收有效")).toBeVisible();
     expect(screen.getByRole("heading", { name: "task-report" })).toBeVisible();
-    expect(screen.getByText("OFF · UNRESOLVED")).toBeVisible();
+    expect(screen.getByText("OFF · RESOLVED")).toBeVisible();
     expect(screen.getByText("ON · RESOLVED")).toBeVisible();
-    expect(screen.getByText("处理证据有效")).toBeVisible();
-    expect(screen.getByText("生命周期有效")).toBeVisible();
-    expect(screen.getByText("官方结果有效")).toBeVisible();
+    expect(screen.getAllByText("TREATMENT VALIDATED")).toHaveLength(2);
+    expect(screen.getAllByText("PASS")).toHaveLength(2);
+    expect(screen.getAllByText("VALID")).toHaveLength(2);
     expect(screen.getByText("−841,014")).toBeVisible();
     expect(screen.getByText("−42.8%")).toBeVisible();
     expect(screen.getByText("+1,024")).toBeVisible();
@@ -42,18 +42,29 @@ describe("ReportView", () => {
     const invalid: ReportResponse = {
       ...report,
       acceptance_valid: false,
-      off: { ...report.off, resolution: "resolved" },
+      off: {
+        ...report.off,
+        state: "treatment_validated",
+        resolution: "unresolved",
+        passed: false,
+        treatment_valid: true,
+      },
       comparison: { input_tokens: null, output_tokens: null, elapsed_seconds: null, patch_bytes: null },
     };
     render(<ReportView api={apiStub({ getReport: vi.fn().mockResolvedValue(invalid) })} taskId="invalid" />);
 
     expect(await screen.findByText("验收无效")).toBeVisible();
-    expect(screen.getByText("OFF · RESOLVED")).toBeVisible();
+    expect(screen.getByText("OFF · UNRESOLVED")).toBeVisible();
     expect(screen.getByText("ON · RESOLVED")).toBeVisible();
+    expect(screen.getAllByText("TREATMENT VALIDATED")).toHaveLength(2);
+    expect(screen.getByText("FAIL")).toBeVisible();
+    expect(screen.getByText("PASS")).toBeVisible();
+    expect(screen.getAllByText("VALID")).toHaveLength(2);
     expect(screen.getByText("当前报告不具备有效的 OFF / ON 对照数据。")).toBeVisible();
     expect(screen.queryByText("验收有效")).not.toBeInTheDocument();
     expect(screen.queryByText("通过")).not.toBeInTheDocument();
     expect(screen.queryByText("−841,014")).not.toBeInTheDocument();
+    expect(screen.queryByText(/生命周期未确认|官方结果未确认|处理证据未确认/)).not.toBeInTheDocument();
   });
 
   it("shows safe loading, API error, and retry states", async () => {

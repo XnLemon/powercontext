@@ -149,7 +149,26 @@ export interface HealthResponse {
 
 export interface ArmResponse {
   arm: "off" | "on";
+  state:
+    | "created"
+    | "revisions_resolved"
+    | "configuration_error"
+    | "gold_verified"
+    | "gold_check_failed"
+    | "infrastructure_error"
+    | "environment_ready"
+    | "codex_running"
+    | "patch_captured"
+    | "codex_error"
+    | "codex_timeout"
+    | "evaluated"
+    | "evaluation_error"
+    | "treatment_validated"
+    | "invalid_treatment"
+    | "reported";
   resolution: "resolved" | "unresolved";
+  passed: boolean | null;
+  treatment_valid: boolean;
   input_tokens: number | null;
   output_tokens: number | null;
   elapsed_seconds: number | null;

@@ -88,6 +88,9 @@ def test_loads_validated_report_and_derives_exact_comparisons(tmp_path: Path) ->
     assert response.task_id == "run-123"
     assert response.acceptance_valid is True
     assert response.off.resolution == "resolved"
+    assert response.off.state is ArmState.TREATMENT_VALIDATED
+    assert response.off.passed is True
+    assert response.off.treatment_valid is True
     assert response.on.resolution == "resolved"
     assert response.off.input_tokens == 1_963_194
     assert response.on.input_tokens == 1_122_180
@@ -230,7 +233,13 @@ def test_acceptance_requires_both_official_arms_to_pass_and_resolve(tmp_path: Pa
 
     assert response.acceptance_valid is False
     assert response.off.resolution == "unresolved"
+    assert response.off.state is ArmState.TREATMENT_VALIDATED
+    assert response.off.passed is False
+    assert response.off.treatment_valid is True
     assert response.on.resolution == "unresolved"
+    assert response.on.state is ArmState.TREATMENT_VALIDATED
+    assert response.on.passed is False
+    assert response.on.treatment_valid is True
     assert response.comparison.input_tokens is not None
     assert response.comparison.input_tokens.delta == -841_014
 

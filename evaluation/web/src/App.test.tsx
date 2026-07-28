@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -35,8 +35,12 @@ describe("App", () => {
   });
 
   it("shows latest succeeded report boundary only when no task is running", async () => {
-    render(<App api={apiStub({ listTasks: vi.fn().mockResolvedValue([summary("succeeded", "task-latest")]) })} />);
+    render(<App api={apiStub({ listTasks: vi.fn().mockResolvedValue([
+      summary("succeeded", "task-old", { finished_at: "2026-07-29T01:02:00Z" }),
+      summary("succeeded", "task-latest", { finished_at: "2026-07-29T03:02:00Z" }),
+    ]) })} />);
     expect(await screen.findByRole("heading", { name: "最近完成" })).toBeVisible();
+    expect(screen.getByText("task-latest")).toBeVisible();
     expect(screen.getByRole("link", { name: "查看验收报告" })).toHaveAttribute("href", "/reports/task-latest");
     expect(screen.queryByText(/通过|未通过/)).not.toBeInTheDocument();
   });
@@ -53,7 +57,10 @@ describe("App", () => {
 
   it("loads a report route and exposes succeeded reports from the report index", async () => {
     const api = apiStub({
-      listTasks: vi.fn().mockResolvedValue([summary("succeeded", "task/report")]),
+      listTasks: vi.fn().mockResolvedValue([
+        summary("succeeded", "task-old", { finished_at: "2026-07-29T01:02:00Z" }),
+        summary("succeeded", "task/report", { finished_at: "2026-07-29T03:02:00Z" }),
+      ]),
     });
     window.history.replaceState({}, "", "/reports/task%2Freport");
     render(<App api={api} />);
@@ -61,6 +68,10 @@ describe("App", () => {
     expect(api.getReport).toHaveBeenCalledWith("task/report", expect.any(AbortSignal));
 
     actPop("/reports");
+    const latestItem = (await screen.findByText("最新报告")).closest("li");
+    expect(latestItem).not.toBeNull();
+    expect(within(latestItem!).getByText("task/report")).toBeVisible();
+    expect(within(latestItem!).getByRole("link", { name: "查看 task/report 的验收报告" })).toBeVisible();
     expect(await screen.findByRole("link", { name: "查看 task/report 的验收报告" })).toHaveAttribute(
       "href",
       "/reports/task%2Freport",
