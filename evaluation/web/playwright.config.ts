@@ -19,7 +19,7 @@ export default defineConfig({
   webServer: {
     command: "npm run build && exec ../.venv/bin/python ../tests/web/fake_runner_app.py",
     url: "http://localhost:4177/api/health",
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 120_000,
     gracefulShutdown: { signal: "SIGTERM", timeout: 15_000 },
   },

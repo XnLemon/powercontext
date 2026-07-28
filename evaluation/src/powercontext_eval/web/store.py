@@ -284,7 +284,15 @@ class TaskStore:
             started_at = _parse_optional_timestamp(row["started_at"])
             if started_at is None:
                 raise TaskConflict("Running task has no start time")
-            expires_at = _timestamp(max(now, started_at) + self._lease_duration)
+            lease = connection.execute("SELECT expires_at FROM worker_lease WHERE singleton = ?", (1,)).fetchone()
+            if lease is None:
+                raise TaskOwnershipError("Worker lease is not active")
+            expires_at = _timestamp(
+                max(
+                    _parse_timestamp(lease["expires_at"]),
+                    max(now, started_at) + self._lease_duration,
+                )
+            )
             connection.execute(
                 "UPDATE worker_lease SET expires_at = ? WHERE singleton = ?",
                 (expires_at, 1),

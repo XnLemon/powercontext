@@ -191,6 +191,19 @@ def test_heartbeat_requires_owner_and_increments_version(store: TaskStore) -> No
         store.heartbeat(queued.task_id, "worker-b", now=NOW + timedelta(seconds=3))
 
 
+def test_stale_heartbeat_cannot_shorten_an_existing_lease(store: TaskStore) -> None:
+    queued, _ = store.create(request("monotonic-heartbeat"), now=NOW)
+    running = store.claim_next("worker-a", now=NOW)
+    assert running is not None
+
+    renewed = store.heartbeat(queued.task_id, "worker-a", now=NOW + timedelta(seconds=30))
+    stale = store.heartbeat(queued.task_id, "worker-a", now=NOW + timedelta(seconds=10))
+
+    assert stale.version == renewed.version + 1
+    assert store.health_snapshot(now=NOW + timedelta(seconds=75))["worker_lease_active"] is True
+    assert store.health_snapshot(now=NOW + timedelta(seconds=91))["worker_lease_active"] is False
+
+
 def test_phase_success_and_lease_release(store: TaskStore) -> None:
     queued, _ = store.create(request("success-key"), now=NOW)
     next_queued, _ = store.create(request("success-key-2"), now=NOW)

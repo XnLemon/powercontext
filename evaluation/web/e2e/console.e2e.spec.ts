@@ -1,3 +1,5 @@
+import { copyFile } from "node:fs/promises";
+
 import { expect, test, type Page } from "@playwright/test";
 
 const submit = (page: Page) => page.getByRole("button", { name: "提交测试任务" }).click();
@@ -15,7 +17,7 @@ test.afterEach(async ({ page }) => {
   expect((page as Page & { browserErrors?: string[] }).browserErrors ?? []).toEqual([]);
 });
 
-test("submits a task and opens its generated report", async ({ page }) => {
+test("submits a task and opens its generated report", async ({ page }, testInfo) => {
   await page.goto("/");
   await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "评测工作台" })).toBeVisible();
@@ -26,11 +28,26 @@ test("submits a task and opens its generated report", async ({ page }) => {
   const taskId = (await submissionStatus.locator("strong").textContent())?.trim();
   expect(taskId).toMatch(/^run-/);
   await expect(submissionStatus.getByText(`已提交任务 ${taskId} · 队列位置：1`, { exact: true })).toBeVisible();
-  await expect(page.getByText(/准备环境|验证 Gold|OFF 执行|ON 执行|官方评测|生成报告/)).toBeVisible();
+  const observedPhases = new Set<string>();
+  const phaseLabels = new Set(["准备环境", "验证 Gold", "OFF 执行", "ON 执行", "官方评测", "生成报告"]);
+  const phaseValue = page.locator(".phase-value");
+  const reportLink = page.getByRole("link", { name: "查看验收报告" });
+  await expect
+    .poll(async () => {
+      if ((await phaseValue.count()) === 1) {
+        const phase = (await phaseValue.textContent())?.trim();
+        if (phase && phaseLabels.has(phase)) observedPhases.add(phase);
+      }
+      return reportLink.count();
+    }, { intervals: [40] })
+    .toBe(1);
+  expect([...observedPhases]).toEqual(
+    expect.arrayContaining(["OFF 执行", "ON 执行", "官方评测", "生成报告"]),
+  );
   await expect(page.locator("body")).not.toContainText("%");
-  await expect(page.getByRole("link", { name: "查看验收报告" })).toBeVisible();
+  await expect(reportLink).toBeVisible();
 
-  await page.getByRole("link", { name: "查看验收报告" }).click();
+  await reportLink.click();
   await expect(page).toHaveURL(`/reports/${taskId}`);
   await expect(page.getByText("验收有效")).toBeVisible();
   await expect(page.getByRole("heading", { name: /OFF · RESOLVED/ })).toBeVisible();
@@ -76,7 +93,9 @@ test("submits a task and opens its generated report", async ({ page }) => {
   });
   expect(narrowLayout.columns.trim().split(/\s+/)).toHaveLength(1);
   expect(narrowLayout.scroll).toBeLessThanOrEqual(narrowLayout.client);
-  await page.screenshot({ path: "/tmp/powercontext-evaluation-console.png", fullPage: true });
+  const reviewScreenshot = testInfo.outputPath("console-review.png");
+  await page.screenshot({ path: reviewScreenshot, fullPage: true });
+  await copyFile(reviewScreenshot, "/tmp/powercontext-evaluation-console.png");
 });
 
 test("keeps exactly one task running while a second task is queued and cancellable", async ({ page }) => {
