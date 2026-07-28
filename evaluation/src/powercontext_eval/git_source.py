@@ -33,6 +33,7 @@ class ResolvedGitSource:
     source: str
     requested: PowerContextRef
     sha: str
+    cache_root: Path
     cache_path: Path
 
     def __post_init__(self) -> None:
@@ -42,8 +43,14 @@ class ResolvedGitSource:
             raise TypeError("requested must be a PowerContextRef")
         if _FULL_LOWERCASE_SHA.fullmatch(self.sha) is None:
             raise ValueError("Resolved SHA must contain exactly 40 lowercase hexadecimal characters")
-        if not isinstance(self.cache_path, Path):
-            raise TypeError("cache_path must be a Path")
+        if not isinstance(self.cache_root, Path) or not isinstance(self.cache_path, Path):
+            raise TypeError("cache_root and cache_path must be Paths")
+        if not self.cache_root.is_absolute() or not self.cache_path.is_absolute():
+            raise ValueError("Resolved cache provenance must use absolute paths")
+        if self.cache_path.parent != self.cache_root:
+            raise ValueError("Resolved cache bucket must be a direct child of cache root")
+        if re.fullmatch(r"[0-9a-f]{64}", self.cache_path.name) is None:
+            raise ValueError("Resolved cache bucket must use its canonical SHA-256 name")
 
 
 @dataclass(frozen=True)
@@ -108,11 +115,14 @@ class GitSource:
             self._verify_exact_ref(cache_path, ref)
         sha = self._resolve_commit(cache_path, ref)
         self._pin_commit(cache_path, sha)
+        canonical_cache_root = self._cache_root.resolve(strict=True)
+        canonical_cache_path = cache_path.resolve(strict=True)
         return ResolvedGitSource(
             source=details.normalized,
             requested=requested,
             sha=sha,
-            cache_path=cache_path,
+            cache_root=canonical_cache_root,
+            cache_path=canonical_cache_path,
         )
 
     def _cache_path_for_normalized(self, normalized: str) -> Path:
@@ -124,6 +134,7 @@ class GitSource:
 
         if not isinstance(resolved, ResolvedGitSource):
             raise TypeError("resolved must be a ResolvedGitSource")
+        self._validate_resolved_cache_provenance(resolved)
         target_path = Path(os.path.abspath(Path(target).expanduser()))
         if os.path.lexists(target_path):
             raise GitSourceError(f"Materialization target must not exist: {target_path}")
@@ -159,6 +170,33 @@ class GitSource:
         finally:
             if not published:
                 _remove_owned_temporary_directory(temporary_path)
+
+    def _validate_resolved_cache_provenance(self, resolved: ResolvedGitSource) -> None:
+        configured_root = self._cache_root.resolve(strict=False)
+        if configured_root != resolved.cache_root:
+            raise GitSourceError("Resolved Git source belongs to a different cache root")
+        if resolved.cache_path.parent != resolved.cache_root:
+            raise GitSourceError("Resolved Git cache bucket is not a direct child of cache root")
+
+        if not os.path.lexists(self._cache_root):
+            raise GitSourceError("Resolved Git cache root no longer exists")
+        root_status = os.lstat(self._cache_root)
+        if stat.S_ISLNK(root_status.st_mode):
+            raise GitSourceError("Resolved Git cache root must not be a symlink")
+        if not stat.S_ISDIR(root_status.st_mode):
+            raise GitSourceError("Resolved Git cache root must be a directory")
+        if self._cache_root.resolve(strict=True) != resolved.cache_root:
+            raise GitSourceError("Resolved Git cache root provenance changed")
+
+        if not os.path.lexists(resolved.cache_path):
+            raise GitSourceError("Resolved Git cache bucket no longer exists")
+        cache_status = os.lstat(resolved.cache_path)
+        if stat.S_ISLNK(cache_status.st_mode):
+            raise GitSourceError("Resolved Git cache bucket must not be a symlink")
+        if not stat.S_ISDIR(cache_status.st_mode):
+            raise GitSourceError("Resolved Git cache bucket must be a directory")
+        if resolved.cache_path.resolve(strict=True).parent != resolved.cache_root:
+            raise GitSourceError("Resolved Git cache bucket escaped cache root")
 
     def _clean_local_head(self, details: _SourceDetails) -> str:
         assert details.local_path is not None

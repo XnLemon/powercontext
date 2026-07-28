@@ -265,25 +265,68 @@ def test_materialize_rejects_broken_symlink_target(
     assert not destination.exists()
 
 
-def test_materialize_checkout_failure_is_atomic_and_retryable(
+def test_materialize_revalidates_resolved_cache_provenance_before_any_git_command(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    runner = RecordingProcessRunner()
+    source = GitSource(cache_root=tmp_path / "cache", runner=runner)
+    resolved = source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+    calls_after_resolve = len(runner.calls)
+    external_root = tmp_path / "external"
+    external_root.mkdir()
+    external_mirror = external_root / "mirror.git"
+    resolved.cache_path.rename(external_mirror)
+    resolved.cache_path.symlink_to(external_mirror, target_is_directory=True)
+    config_before = (external_mirror / "config").read_bytes()
+    refs_before = git(external_mirror, "show-ref").stdout
+    target = tmp_path / "materialized"
+
+    with pytest.raises(GitSourceError, match="symlink"):
+        source.materialize(resolved, target)
+
+    assert len(runner.calls) == calls_after_resolve
+    assert not target.exists()
+    assert not target.is_symlink()
+    assert (external_mirror / "config").read_bytes() == config_before
+    assert git(external_mirror, "show-ref").stdout == refs_before
+
+
+def test_materialize_rejects_resolved_source_owned_by_different_cache_root(
     source: GitSource,
     git_fixture: GitFixture,
     tmp_path: Path,
 ) -> None:
     resolved = source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+    unrelated = GitSource(cache_root=tmp_path / "unrelated-cache", runner=FailIfProcessRuns())
+    target = tmp_path / "materialized"
+
+    with pytest.raises(GitSourceError, match="cache root"):
+        unrelated.materialize(resolved, target)
+
+    assert not target.exists()
+    assert not target.is_symlink()
+
+
+def test_materialize_checkout_failure_is_atomic_and_retryable(
+    git_fixture: GitFixture,
+    tmp_path: Path,
+) -> None:
+    runner = FailCheckoutOnceRunner()
+    source = GitSource(cache_root=tmp_path / "cache", runner=runner)
+    resolved = source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
     publish_root = tmp_path / "publish"
     publish_root.mkdir()
     target = publish_root / "checkout"
-    materializer = GitSource(cache_root=tmp_path / "unused-cache", runner=FailCheckoutOnceRunner())
 
     with pytest.raises(GitSourceError, match="check out"):
-        materializer.materialize(resolved, target)
+        source.materialize(resolved, target)
 
     assert not target.exists()
     assert not target.is_symlink()
     assert list(publish_root.iterdir()) == []
 
-    retried = materializer.materialize(resolved, target)
+    retried = source.materialize(resolved, target)
 
     assert retried == target
     assert git(target, "rev-parse", "HEAD").stdout.strip() == resolved.sha
@@ -363,6 +406,7 @@ class ControlledGitRunner(ProcessRunner):
         if "clone" in command:
             clone_index = command.index("clone")
             self.origin = command[clone_index + 2]
+            Path(command[-1]).mkdir()
         if command[1:4] == ("remote", "set-url", "origin"):
             self.origin = command[4]
         stdout = f"{self.sha}\n" if "rev-parse" in command and "--verify" in command else ""
@@ -526,5 +570,6 @@ def test_resolved_git_source_rejects_noncanonical_sha(tmp_path: Path) -> None:
             source="/source",
             requested=PowerContextRef(kind="latest"),
             sha="ABC",
-            cache_path=tmp_path / "cache",
+            cache_root=tmp_path / "cache",
+            cache_path=tmp_path / "cache" / ("a" * 64),
         )
