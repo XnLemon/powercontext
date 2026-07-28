@@ -149,6 +149,39 @@ def test_exclusive_create_does_not_replace_existing_artifact(tmp_path: Path) -> 
     assert [path.name for path in root.iterdir()] == ["state.json"]
 
 
+@pytest.mark.parametrize("replace_temp", [False, True])
+def test_exclusive_cleanup_never_removes_published_target_or_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace_temp: bool
+) -> None:
+    root = tmp_path / "artifacts"
+    store = ArtifactStore(root)
+    original_cleanup = store._cleanup_exclusive_temp
+    observed_temp: list[str] = []
+
+    def remove_or_replace_temp(parent_fd: int, temporary_name: str, target_name: str, expected: os.stat_result) -> None:
+        observed_temp.append(temporary_name)
+        os.unlink(temporary_name, dir_fd=parent_fd)
+        if replace_temp:
+            replacement_fd = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            os.write(replacement_fd, b"third-party")
+            os.close(replacement_fd)
+        original_cleanup(parent_fd, temporary_name, target_name, expected)
+
+    monkeypatch.setattr(store, "_cleanup_exclusive_temp", remove_or_replace_temp)
+    store.create_text("result.txt", "published")
+
+    assert (root / "result.txt").read_text() == "published"
+    if replace_temp:
+        assert (root / observed_temp[0]).read_text() == "third-party"
+    else:
+        assert sorted(path.name for path in root.iterdir()) == ["result.txt"]
+
+
 def test_directory_swap_after_preflight_rolls_back_and_leaves_no_payload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

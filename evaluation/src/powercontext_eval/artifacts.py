@@ -254,10 +254,19 @@ class ArtifactStore:
             raise UnsafeArtifactPath("Artifact temporary file identity changed")
 
     @classmethod
-    def _unlink_inode(cls, parent_fd: int, preferred_name: str, expected: os.stat_result) -> bool:
-        names = [preferred_name]
+    def _unlink_inode(
+        cls,
+        parent_fd: int,
+        preferred_name: str,
+        expected: os.stat_result,
+        *,
+        excluded_names: frozenset[str] = frozenset(),
+    ) -> bool:
+        names = [] if preferred_name in excluded_names else [preferred_name]
         try:
-            names.extend(name for name in os.listdir(parent_fd) if name != preferred_name)
+            names.extend(
+                name for name in os.listdir(parent_fd) if name != preferred_name and name not in excluded_names
+            )
         except OSError:
             pass
         for name in names:
@@ -273,6 +282,30 @@ class ArtifactStore:
                     continue
                 return True
         return False
+
+    def _cleanup_exclusive_temp(
+        self,
+        parent_fd: int,
+        temporary_name: str,
+        target_name: str,
+        expected: os.stat_result,
+    ) -> None:
+        """Remove only the exact publication temp link, never another link to its inode."""
+
+        target = os.stat(target_name, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(target.st_mode) or not self._same_inode(expected, target):
+            raise ArtifactDurabilityUnknown(target_name, temporary_name)
+        try:
+            temporary = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(temporary.st_mode) or not self._same_inode(expected, temporary):
+            return
+        os.unlink(temporary_name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        target = os.stat(target_name, dir_fd=parent_fd, follow_symlinks=False)
+        if not self._same_inode(expected, target):
+            raise ArtifactDurabilityUnknown(target_name)
 
     @classmethod
     def _unlink_name_if_inode(cls, parent_fd: int, name: str, expected: os.stat_result) -> bool:
@@ -365,7 +398,15 @@ class ArtifactStore:
                 if backup_name is not None:
                     os.unlink(backup_name, dir_fd=parent_fd)
                     os.fsync(parent_fd)
-                self._unlink_inode(parent_fd, temporary_name, temporary_metadata)
+                excluded = {target_name}
+                if backup_name is not None:
+                    excluded.add(backup_name)
+                self._unlink_inode(
+                    parent_fd,
+                    temporary_name,
+                    temporary_metadata,
+                    excluded_names=frozenset(excluded),
+                )
             except (ArtifactError, OSError):
                 raise ArtifactDurabilityUnknown(target_name, backup_name) from publish_error
             raise
@@ -375,7 +416,9 @@ class ArtifactStore:
                     os.unlink(backup_name, dir_fd=parent_fd)
                     os.fsync(parent_fd)
                 if exclusive:
-                    self._unlink_inode(parent_fd, temporary_name, temporary_metadata)
+                    self._cleanup_exclusive_temp(parent_fd, temporary_name, target_name, temporary_metadata)
+            except ArtifactDurabilityUnknown:
+                raise
             except BaseException as cleanup_error:
                 recovery_name = backup_name if self._name_exists(parent_fd, backup_name) else None
                 if exclusive and self._name_exists(parent_fd, temporary_name):
@@ -403,7 +446,12 @@ class ArtifactStore:
             raise
         except BaseException:
             if temporary_fd >= 0:
-                self._unlink_inode(parent_fd, temporary_name, os.fstat(temporary_fd))
+                self._unlink_inode(
+                    parent_fd,
+                    temporary_name,
+                    os.fstat(temporary_fd),
+                    excluded_names=frozenset({parts[-1]}),
+                )
             raise
         finally:
             if temporary_fd >= 0:
