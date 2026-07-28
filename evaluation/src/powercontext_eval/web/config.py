@@ -99,9 +99,9 @@ class WebConfig(BaseModel):
         )
 
     @classmethod
-    def from_environment(cls, environ: Mapping[str, str], *, root: Path | None = None) -> Self:
+    def from_environment(cls, environ: Mapping[str, str]) -> Self:
         prefix = "POWERCONTEXT_EVAL_"
-        configured_root = root if root is not None else Path(environ[f"{prefix}ROOT"])
+        root = Path(environ[f"{prefix}ROOT"])
 
         def path(name: str) -> Path | None:
             value = environ.get(f"{prefix}{name}")
@@ -116,7 +116,7 @@ class WebConfig(BaseModel):
         )
 
         return cls.for_root(
-            configured_root,
+            root,
             database_path=path("DATABASE_PATH"),
             run_root=path("RUN_ROOT"),
             frontend_dist=path("FRONTEND_DIST"),

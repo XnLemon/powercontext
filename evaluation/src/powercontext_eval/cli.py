@@ -44,7 +44,10 @@ def _web_config(root_path: Path | None) -> WebConfig:
     from powercontext_eval.web.config import WebConfig
 
     try:
-        return WebConfig.from_environment(os.environ, root=root_path)
+        environ = dict(os.environ)
+        if root_path is not None:
+            environ["POWERCONTEXT_EVAL_ROOT"] = os.fspath(root_path)
+        return WebConfig.from_environment(environ)
     except (KeyError, TypeError, ValueError, ValidationError):
         raise typer.BadParameter("Invalid evaluation configuration.", param_hint="--root") from None
 
@@ -85,7 +88,7 @@ def worker(root_path: Annotated[Path | None, typer.Option("--root")] = None) -> 
     store.initialize()
     service = EvaluationWorker(config, store, runner=run_minimal_swebench_pro)
     with _worker_signal_handlers(service):
-        service.run_forever(config.poll_seconds)
+        service.run_forever()
 
 
 @app.command("codex-contract-smoke")
