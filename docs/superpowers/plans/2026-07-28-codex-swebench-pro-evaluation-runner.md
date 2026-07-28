@@ -358,7 +358,9 @@ Expected: imports fail because artifact and report modules do not exist.
 - [ ] **Step 3: Implement atomic artifact and report primitives**
 
 Use same-directory temporary files plus `Path.replace()` for atomic writes. JSON is UTF-8, sorted, indented by two,
-and newline-terminated. Artifact relative paths reject absolute paths and `..`.
+and newline-terminated. Artifact relative paths reject absolute paths and `..`; the store validates every existing
+component from the filesystem anchor through its root and target parents, so an ancestor symlink cannot redirect
+creation outside the configured artifact path.
 
 Arm state transitions are validated against:
 
@@ -375,8 +377,11 @@ ALLOWED_TRANSITIONS = {
 }
 ```
 
-`render_report()` reads only retained manifest, metrics, and treatment evidence; it does not query Git, Docker,
-Codex, PowerContext, or the network.
+`render_report()` strictly revalidates its complete input at the rendering boundary, including objects produced
+through unchecked model-copy APIs. It reads only retained manifest, metrics, and treatment evidence; it does not
+query Git, Docker, Codex, PowerContext, or the network. Valid treatments remain comparable after either arm moves
+from `treatment_validated` to the terminal `reported` state, so the final retained bundle reproduces the same
+comparison.
 
 - [ ] **Step 4: Verify GREEN**
 

@@ -235,7 +235,10 @@ configuration rather than silently changing an existing run. The only treatment 
 `plugins` feature:
 
 - OFF passes `--disable plugins`.
-- ON passes `--enable plugins` and `--dangerously-bypass-hook-trust`.
+- ON passes `--enable plugins`.
+
+Both arms pass `--dangerously-bypass-hook-trust`; it has no effect when plugins are disabled, and keeping it in
+both commands ensures the only arm-specific argument is the `plugins` feature value.
 
 The isolated Codex environment contains no marketplace or plugin other than the resolved PowerContext checkout.
 This makes the global feature switch equivalent to a PowerContext switch.
@@ -417,6 +420,10 @@ runs/<run-id>/
 └── report.md
 ```
 
+Artifact creation validates every existing path component from the filesystem anchor through the configured run
+root and artifact parent. A symlink in the root's ancestry, not only at the final parent or file, is rejected
+before any directory or temporary file is created.
+
 `run-manifest.json` is canonical JSON and contains:
 
 - run ID and timestamps;
@@ -435,7 +442,9 @@ full environment dump.
 available from JSONL, and native compaction/subagent/tool events when present. Missing optional telemetry is
 represented as unavailable, never inferred.
 
-The report is reproducible from the manifest and retained arm artifacts without querying live services.
+The report strictly revalidates its complete retained input at the rendering boundary and is reproducible from the
+manifest and retained arm artifacts without querying live services. A valid arm remains comparable in both
+`treatment_validated` and terminal `reported` state so regeneration after final persistence is byte-equivalent.
 Neither `codex-home` nor `powercontext-home` is copied from `work/` into `runs/`.
 
 ## 12. m0 deployment and safety
