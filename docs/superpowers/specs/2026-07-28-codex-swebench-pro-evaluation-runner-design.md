@@ -132,6 +132,9 @@ The nested project uses small modules with explicit responsibilities:
 External commands are injected behind narrow protocol interfaces in unit tests. Tests validate observable command
 arguments, state transitions, artifacts, and failure behavior rather than private call counts.
 
+On POSIX, a timeout terminates and reaps the complete child process group, not only the direct child. Networked Git
+commands have a finite timeout and disable terminal/credential-manager prompts.
+
 ## 6. CLI contract
 
 The nested project installs one executable:
@@ -197,6 +200,11 @@ with the same name cannot be resolved accidentally.
 The run command never treats `latest` as provenance. It resolves it to a full Git SHA and records both the
 requested text and resolved SHA before launching an arm.
 
+Resolving a commit also creates an immutable private ref in the source mirror so a later branch move, fetch,
+reflog expiry, or garbage collection cannot remove an object needed by either arm. Materialization builds in a
+unique sibling temporary directory and publishes only a fully verified detached checkout; failed attempts leave
+the public target absent and retryable.
+
 ## 7. Codex isolation and treatment
 
 Each arm receives a fresh, disposable directory outside the retained run bundle:
@@ -209,6 +217,11 @@ Authentication is supplied from an operator-managed source outside the result tr
 minimum Codex auth material into the ephemeral home with owner-only permissions. It must never include that home
 in retained artifacts. Logs pass through exact-value redaction for any secret-bearing environment variables known
 to the runner.
+
+Credential-bearing proxy URLs are automatically treated as redaction inputs. Embedded Git passwords, query
+credentials, and fragments are rejected before cache creation; authenticated Git sources must use an external
+credential helper. Username-only SSH/SCP transports may use a command-scoped Git URL rewrite, but the cached
+mirror origin and provenance always contain only the sanitized source.
 
 Both homes receive the same pinned Codex CLI, authentication, model, reasoning level, prompt, task repository,
 shell environment policy, sandbox mode, time limit, and resource budget. The only treatment switch is the stable
@@ -436,6 +449,9 @@ The installed system Git on `m0` is 1.8.3.1. The runner therefore uses the conse
 `clone --mirror`/`fetch`/`rev-parse`/`checkout --detach` command family and subprocess `cwd`, not worktrees,
 partial clones, `switch`, or `git -C`. A future deployment may pin a newer Git, but the MVP does not require
 replacing the host Git.
+
+Mirror buckets are direct non-symlink children of the configured cache root. A pre-existing symlink or path that
+resolves outside that root is rejected before Git executes.
 
 Codex login is an operator action if device authorization or browser interaction is required. Credentials remain
 outside the repository and retained run tree.

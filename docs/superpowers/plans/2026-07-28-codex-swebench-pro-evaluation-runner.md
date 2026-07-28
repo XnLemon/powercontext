@@ -262,18 +262,26 @@ Expected: imports fail because process and Git adapters do not exist.
 
 - accept an argument sequence, explicit `cwd`, an environment allowlist/override, and a timeout;
 - capture bytes without invoking a shell;
+- run POSIX commands in a new session and terminate/reap the complete process group on timeout;
 - raise typed `CommandTimedOut`, `CommandNotFound`, or `CommandFailed`;
 - redact configured exact secret values from retained stdout, stderr, and exception text;
+- automatically redact complete proxy URLs and decoded proxy userinfo inherited from the environment;
 - never include the complete process environment in an error.
 
 `GitSource` must:
 
 - hash a credential-free normalized source string to choose its mirror cache;
+- reject password/query/fragment credentials before creating a cache and require a Git credential helper;
+- use command-scoped URL rewriting for username-only SSH/SCP transports so a raw transport is never persisted;
 - use only `clone --mirror`, `fetch --prune`, `ls-remote`, `rev-parse`, `clone --no-checkout`, and
-  `checkout --detach`;
+  `checkout --detach`, plus `update-ref` for immutable pins;
+- reject symlinked or out-of-root cache buckets before invoking Git;
 - resolve `latest`, typed branch, typed tag, or full commit once into `ResolvedGitSource(source, requested, sha)`;
+- pin each resolved SHA under `refs/powercontext-eval/pins/<sha>` so mirror refresh and GC cannot remove it;
 - reject dirty local sources for `latest`;
-- materialize only the already resolved full SHA;
+- materialize only the already resolved full SHA through a unique temporary sibling and atomically publish it;
+- remove only the exact temporary materialization on failure so the requested target remains retryable;
+- apply a finite timeout and non-interactive environment to every Git command;
 - work with Git 1.8.3.1 and avoid `git -C`, worktrees, partial clone, or `switch`.
 
 - [ ] **Step 4: Verify GREEN and compatibility**
