@@ -38,9 +38,27 @@ ${EDITOR:?set EDITOR} /data/powercontext-eval/config/evaluation-console.env
 test "$(stat -c %a /data/powercontext-eval/config/evaluation-console.env)" = 600
 ```
 
-The example has no credential values. Authentication is copied separately to
-`/data/powercontext-eval/codex-home/auth.json` with mode 0600. Never paste its contents into the environment file,
-terminal output, tickets, or logs.
+The example has no credential values. The Mac credential source is operator-supplied and must never enter Git or
+the environment file. From the operator's Mac, copy it only to the explicit staging path inside the protected
+configuration directory:
+
+```sh
+scp /operator/supplied/path/auth.json m0:/data/powercontext-eval/config/auth.json.staged
+```
+
+Then, on m0, install it without printing its contents and remove the staged file:
+
+```sh
+chmod 0600 /data/powercontext-eval/config/auth.json.staged
+install -d -o rongfeng.frf -g users -m 0700 /data/powercontext-eval/codex-home
+sudo install -o rongfeng.frf -g users -m 0600 \
+  /data/powercontext-eval/config/auth.json.staged /data/powercontext-eval/codex-home/auth.json
+unlink /data/powercontext-eval/config/auth.json.staged
+sudo -u rongfeng.frf test -r /data/powercontext-eval/codex-home/auth.json
+stat -c '%U:%G %a' /data/powercontext-eval/codex-home/auth.json | grep -qx 'rongfeng.frf:users 600'
+```
+
+Never paste authentication contents into terminal output, tickets, or logs.
 
 Verify units before installation:
 
@@ -53,10 +71,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now powercontext-eval-web.service powercontext-eval-worker.service
 ```
 
-The m0 host uses systemd 219, so the units use its legacy `ReadWriteDirectories=` spelling (the current spelling is
-`ReadWritePaths=`). It grants writes only under `/data/powercontext-eval`. `ProtectSystem=full` is the strongest
-compatible systemd-219 mode. The worker retains normal local networking for the loopback proxy and joins the
-`docker` group to reach `/var/run/docker.sock`; the web process does not receive Docker group access.
+The m0 host uses systemd 219, so the units use its legacy `ReadOnlyDirectories=` and `ReadWriteDirectories=`
+spellings (the current spellings are `ReadOnlyPaths=` and `ReadWritePaths=`). The filesystem namespace root is
+read-only except `/data/powercontext-eval` and the service's private temporary directory. `ProtectSystem=full`
+provides a second system-directory restriction compatible with systemd 219. The worker retains normal local
+networking for the loopback proxy and joins the `docker` group to connect to `/var/run/docker.sock`; the Docker
+daemon remains external to the namespace and is not managed by the unit. The web process does not receive Docker
+group access.
 
 ## Verify and operate
 

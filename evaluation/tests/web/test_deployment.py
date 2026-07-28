@@ -59,6 +59,7 @@ def test_systemd_units_enforce_role_appropriate_security_boundaries() -> None:
         "PrivateTmp=true",
         "ProtectSystem=full",
         "ProtectHome=read-only",
+        "ReadOnlyDirectories=/",
         "ReadWriteDirectories=/data/powercontext-eval",
     }
     assert common <= set(web.splitlines())
@@ -114,5 +115,19 @@ def test_operator_guide_documents_safety_acceptance_and_rollback_contracts() -> 
         '/data/powercontext-eval/bin/uv run --project evaluation pytest -c evaluation/pyproject.toml evaluation/tests -m "not live" -q',
         "/data/powercontext-eval/bin/uv run --directory evaluation ty check src tests",
         "evaluation/deploy/powercontext-eval.env.example",
+        "install -d -o rongfeng.frf -g users -m 0700 /data/powercontext-eval/codex-home",
+        "install -o rongfeng.frf -g users -m 0600",
+        "sudo -u rongfeng.frf test -r /data/powercontext-eval/codex-home/auth.json",
+        "operator-supplied",
+        "read-only except `/data/powercontext-eval` and the service's private temporary directory",
     }
     assert all(term.lower() in guide.lower() for term in required)
+
+
+def test_operator_guide_stages_auth_without_printing_or_committing_it() -> None:
+    guide = (EVALUATION / "README.md").read_text()
+    assert "/data/powercontext-eval/config/auth.json.staged" in guide
+    assert "unlink /data/powercontext-eval/config/auth.json.staged" in guide
+    assert "stat -c '%U:%G %a'" in guide
+    assert "cat " not in guide
+    assert "auth.json=" not in guide
