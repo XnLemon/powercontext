@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import signal
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -99,6 +102,68 @@ def test_run_raises_command_timed_out_with_partial_result(tmp_path: Path) -> Non
     assert captured.value.result.stderr == "waiting\n"
 
 
+def test_timeout_result_retains_and_redacts_partial_output(tmp_path: Path) -> None:
+    secret = "timeout-secret"
+
+    with pytest.raises(CommandTimedOut) as captured:
+        ProcessRunner().run(
+            [
+                sys.executable,
+                "-c",
+                "import sys, time; print(sys.argv[1], flush=True); print(sys.argv[1], file=sys.stderr, flush=True); time.sleep(5)",
+                secret,
+            ],
+            cwd=tmp_path,
+            timeout=0.1,
+            secrets=[secret],
+        )
+
+    rendered = repr(captured.value.result)
+    assert secret not in rendered
+    assert captured.value.result.stdout == "[REDACTED]\n"
+    assert captured.value.result.stderr == "[REDACTED]\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group behavior")
+def test_timeout_kills_grandchild_process_group_and_reaps_launcher(tmp_path: Path) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    grandchild_script = "import time; time.sleep(30)"
+    launcher_script = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen([sys.executable, '-c', sys.argv[2]]); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8'); "
+        "print('launcher-ready', flush=True); "
+        "time.sleep(30)"
+    )
+    grandchild_pid: int | None = None
+
+    try:
+        with pytest.raises(CommandTimedOut) as captured:
+            ProcessRunner().run(
+                [sys.executable, "-c", launcher_script, str(pid_file), grandchild_script],
+                cwd=tmp_path,
+                timeout=0.3,
+            )
+
+        assert captured.value.result.stdout == "launcher-ready\n"
+        grandchild_pid = int(pid_file.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail(f"grandchild process {grandchild_pid} survived timeout")
+    finally:
+        if grandchild_pid is not None:
+            try:
+                os.kill(grandchild_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def test_run_raises_command_not_found_with_result(tmp_path: Path) -> None:
     missing = "powercontext-command-that-does-not-exist"
 
@@ -177,7 +242,41 @@ def test_run_inherits_only_allowlisted_environment_and_allows_explicit_overrides
 
     assert result.stdout.splitlines() == [
         "<missing>",
-        "http://allowed.example",
+        "[REDACTED]",
         "allowed-locale",
         "added-by-caller",
     ]
+
+
+def test_run_automatically_redacts_proxy_credentials_from_output_and_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(key, raising=False)
+    proxy = "http://proxy-user:p%40ssword@proxy.example:7890"
+    monkeypatch.setenv("HTTP_PROXY", proxy)
+    script = (
+        "import os, sys; "
+        "from urllib.parse import unquote, urlsplit; "
+        "value = os.environ['HTTP_PROXY']; parsed = urlsplit(value); "
+        "print(value); print(unquote(parsed.username)); "
+        "print(unquote(parsed.password), file=sys.stderr); "
+        "raise SystemExit(5)"
+    )
+
+    with pytest.raises(CommandFailed) as captured:
+        ProcessRunner().run([sys.executable, "-c", script], cwd=tmp_path)
+
+    rendered = "\n".join(
+        [
+            str(captured.value),
+            repr(captured.value),
+            repr(captured.value.result),
+            captured.value.result.stdout,
+            captured.value.result.stderr,
+        ]
+    )
+    for secret in (proxy, "proxy-user", "p@ssword"):
+        assert secret not in rendered
+    assert "[REDACTED]" in rendered

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from powercontext_eval.errors import CommandFailed, CommandNotFound, CommandTimedOut
 
@@ -31,6 +33,16 @@ _INHERITED_ENVIRONMENT_KEYS = frozenset(
 )
 _NOT_FOUND_RETURN_CODE = 127
 _TIMEOUT_RETURN_CODE = 124
+_PROXY_ENVIRONMENT_KEYS = frozenset(
+    {
+        "ALL_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "all_proxy",
+        "https_proxy",
+        "http_proxy",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -64,16 +76,16 @@ class ProcessRunner:
         if "\0" in cwd_text:
             raise ValueError("cwd must not contain NUL")
         child_env = _build_environment(env)
-        redactor = _Redactor(secrets)
+        redactor = _Redactor((*secrets, *_proxy_secrets(child_env)))
 
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 validated_argv,
                 cwd=cwd_text,
                 env=child_env,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=os.name == "posix",
                 shell=False,
             )
         except FileNotFoundError as error:
@@ -86,16 +98,6 @@ class ProcessRunner:
                 str(error),
             )
             raise CommandNotFound(_failure_message("Command could not be started", result, redactor), result) from None
-        except subprocess.TimeoutExpired as error:
-            result = _result(
-                redactor,
-                validated_argv,
-                cwd_text,
-                _TIMEOUT_RETURN_CODE,
-                error.stdout,
-                error.stderr,
-            )
-            raise CommandTimedOut(_failure_message("Command timed out", result, redactor), result) from None
         except OSError as error:
             result = _result(
                 redactor,
@@ -107,17 +109,42 @@ class ProcessRunner:
             )
             raise CommandNotFound(_failure_message("Command could not be started", result, redactor), result) from None
 
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            _kill_process_tree(process)
+            final_stdout, final_stderr = process.communicate()
+            result = _result(
+                redactor,
+                validated_argv,
+                cwd_text,
+                _TIMEOUT_RETURN_CODE,
+                final_stdout or error.stdout,
+                final_stderr or error.stderr,
+            )
+            raise CommandTimedOut(_failure_message("Command timed out", result, redactor), result) from None
+
         result = _result(
             redactor,
             validated_argv,
             cwd_text,
-            completed.returncode,
-            completed.stdout,
-            completed.stderr,
+            process.returncode,
+            stdout,
+            stderr,
         )
         if check and result.returncode != 0:
             raise CommandFailed(_failure_message("Command failed", result, redactor), result)
         return result
+
+
+def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return
+    process.kill()
 
 
 class _Redactor:
@@ -157,6 +184,21 @@ def _build_environment(overrides: Mapping[str, str] | None) -> dict[str, str]:
             raise ValueError("environment overrides contain an invalid key or value")
         environment[key] = value
     return environment
+
+
+def _proxy_secrets(environment: Mapping[str, str]) -> tuple[str, ...]:
+    secrets: list[str] = []
+    for key in _PROXY_ENVIRONMENT_KEYS:
+        value = environment.get(key)
+        if not value:
+            continue
+        secrets.append(value)
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            continue
+        secrets.extend(unquote(credential) for credential in (parsed.username, parsed.password) if credential)
+    return tuple(secrets)
 
 
 def _decode_output(value: bytes | str | None) -> str:

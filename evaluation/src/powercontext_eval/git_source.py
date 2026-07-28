@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
+import shutil
+import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
@@ -16,6 +20,10 @@ from powercontext_eval.process import CommandResult, ProcessRunner
 _FULL_LOWERCASE_SHA = re.compile(r"[0-9a-f]{40}")
 _SUPPORTED_URL_SCHEMES = frozenset({"http", "https", "ssh"})
 _SCP_STYLE_URL = re.compile(r"^(?:(?P<user>[^/@:\s]+)@)?(?P<host>[^/:\s]+):(?P<path>.+)$")
+_GIT_ENVIRONMENT = {
+    "GCM_INTERACTIVE": "never",
+    "GIT_TERMINAL_PROMPT": "0",
+}
 
 
 @dataclass(frozen=True)
@@ -44,14 +52,29 @@ class _SourceDetails:
     transport: str
     local_path: Path | None
     secrets: tuple[str, ...]
+    has_embedded_credentials: bool
 
 
 class GitSource:
     """Resolve explicit Git refs into cached immutable commits."""
 
-    def __init__(self, *, cache_root: str | Path, runner: ProcessRunner | None = None) -> None:
-        self._cache_root = Path(cache_root).expanduser().resolve()
+    def __init__(
+        self,
+        *,
+        cache_root: str | Path,
+        runner: ProcessRunner | None = None,
+        command_timeout: float = 300.0,
+    ) -> None:
+        if (
+            isinstance(command_timeout, bool)
+            or not isinstance(command_timeout, (int, float))
+            or not math.isfinite(command_timeout)
+            or command_timeout <= 0
+        ):
+            raise ValueError("Git command timeout must be finite and greater than zero")
+        self._cache_root = Path(os.path.abspath(Path(cache_root).expanduser()))
         self._runner = runner or ProcessRunner()
+        self._command_timeout = float(command_timeout)
 
     def normalize_source(self, source: str | Path) -> str:
         """Return the credential-free source used for provenance and cache identity."""
@@ -70,7 +93,10 @@ class GitSource:
         if not isinstance(requested, PowerContextRef):
             raise TypeError("requested must be a PowerContextRef")
         details = _source_details(source)
+        if details.has_embedded_credentials:
+            raise GitSourceError("Embedded Git credentials are not allowed; configure a credential helper")
         cache_path = self._cache_path_for_normalized(details.normalized)
+        self._validate_cache_location(cache_path)
 
         local_head: str | None = None
         if requested.kind == "latest" and details.local_path is not None:
@@ -81,6 +107,7 @@ class GitSource:
         if requested.kind in {"branch", "tag"}:
             self._verify_exact_ref(cache_path, ref)
         sha = self._resolve_commit(cache_path, ref)
+        self._pin_commit(cache_path, sha)
         return ResolvedGitSource(
             source=details.normalized,
             requested=requested,
@@ -101,23 +128,37 @@ class GitSource:
         if os.path.lexists(target_path):
             raise GitSourceError(f"Materialization target must not exist: {target_path}")
         target_path.parent.mkdir(parents=True, exist_ok=True)
-
-        self._git(
-            ["git", "clone", "--no-checkout", str(resolved.cache_path), str(target_path)],
-            cwd=target_path.parent,
-            action="could not clone resolved Git source",
-        )
-        self._git(
-            ["git", "checkout", "--detach", resolved.sha],
-            cwd=target_path,
-            action="could not check out resolved Git commit",
-        )
-        actual = self._resolve_commit(target_path, "HEAD")
-        if actual != resolved.sha:
-            raise GitSourceError(
-                f"Materialized HEAD did not match resolved commit: expected {resolved.sha}, got {actual}"
+        temporary_path = Path(
+            tempfile.mkdtemp(
+                prefix=f".{target_path.name}.powercontext-eval-",
+                dir=target_path.parent,
             )
-        return target_path
+        )
+        published = False
+        try:
+            self._git(
+                ["git", "clone", "--no-checkout", str(resolved.cache_path), str(temporary_path)],
+                cwd=target_path.parent,
+                action="could not clone resolved Git source",
+            )
+            self._git(
+                ["git", "checkout", "--detach", resolved.sha],
+                cwd=temporary_path,
+                action="could not check out resolved Git commit",
+            )
+            actual = self._resolve_commit(temporary_path, "HEAD")
+            if actual != resolved.sha:
+                raise GitSourceError(
+                    f"Materialized HEAD did not match resolved commit: expected {resolved.sha}, got {actual}"
+                )
+            if os.path.lexists(target_path):
+                raise GitSourceError(f"Materialization target must not exist: {target_path}")
+            temporary_path.rename(target_path)
+            published = True
+            return target_path
+        finally:
+            if not published:
+                _remove_owned_temporary_directory(temporary_path)
 
     def _clean_local_head(self, details: _SourceDetails) -> str:
         assert details.local_path is not None
@@ -143,15 +184,17 @@ class GitSource:
         return self._resolve_commit(details.local_path, "HEAD", secrets=details.secrets)
 
     def _ensure_mirror(self, details: _SourceDetails, cache_path: Path) -> None:
-        self._cache_root.mkdir(parents=True, exist_ok=True)
-        if not cache_path.exists():
+        self._validate_cache_location(cache_path)
+        if not os.path.lexists(cache_path):
             self._git(
-                ["git", "clone", "--mirror", details.transport, str(cache_path)],
+                self._transport_command(
+                    details,
+                    ["clone", "--mirror", details.normalized, str(cache_path)],
+                ),
                 cwd=self._cache_root,
                 action="could not clone Git mirror",
                 secrets=details.secrets,
             )
-            self._set_origin_url(cache_path, details.normalized, secrets=details.secrets)
             return
 
         if not cache_path.is_dir():
@@ -164,16 +207,44 @@ class GitSource:
         if bare.stdout.strip() != "true":
             raise GitSourceError(f"Git cache path is not a bare mirror: {cache_path}")
 
-        self._set_origin_url(cache_path, details.transport, secrets=details.secrets)
-        try:
-            self._git(
-                ["git", "fetch", "--prune", "origin"],
-                cwd=cache_path,
-                action="could not refresh Git mirror",
-                secrets=details.secrets,
-            )
-        finally:
-            self._set_origin_url(cache_path, details.normalized, secrets=details.secrets)
+        self._git(
+            self._transport_command(
+                details,
+                [
+                    "fetch",
+                    "--prune",
+                    "origin",
+                    "+refs/heads/*:refs/heads/*",
+                    "+refs/tags/*:refs/tags/*",
+                ],
+            ),
+            cwd=cache_path,
+            action="could not refresh Git mirror",
+            secrets=details.secrets,
+        )
+
+    def _validate_cache_location(self, cache_path: Path) -> None:
+        if cache_path.parent != self._cache_root:
+            raise GitSourceError("Git cache bucket must be a direct child of cache root")
+
+        if os.path.lexists(self._cache_root):
+            root_status = os.lstat(self._cache_root)
+            if stat.S_ISLNK(root_status.st_mode):
+                raise GitSourceError("Git cache root must not be a symlink")
+            if not stat.S_ISDIR(root_status.st_mode):
+                raise GitSourceError("Git cache root must be a directory")
+        else:
+            self._cache_root.mkdir(parents=True)
+
+        resolved_root = self._cache_root.resolve(strict=True)
+        if os.path.lexists(cache_path):
+            cache_status = os.lstat(cache_path)
+            if stat.S_ISLNK(cache_status.st_mode):
+                raise GitSourceError("Git cache bucket must not be a symlink")
+            if cache_path.resolve(strict=True).parent != resolved_root:
+                raise GitSourceError("Git cache bucket escaped cache root")
+        elif cache_path.parent.resolve(strict=True) != resolved_root:
+            raise GitSourceError("Git cache bucket escaped cache root")
 
     def _ref_to_resolve(
         self,
@@ -192,16 +263,12 @@ class GitSource:
         if local_head is not None:
             return local_head
 
-        self._set_origin_url(cache_path, details.transport, secrets=details.secrets)
-        try:
-            remote_head = self._git(
-                ["git", "ls-remote", "origin", "HEAD"],
-                cwd=cache_path,
-                action="could not resolve remote HEAD",
-                secrets=details.secrets,
-            )
-        finally:
-            self._set_origin_url(cache_path, details.normalized, secrets=details.secrets)
+        remote_head = self._git(
+            self._transport_command(details, ["ls-remote", "origin", "HEAD"]),
+            cwd=cache_path,
+            action="could not resolve remote HEAD",
+            secrets=details.secrets,
+        )
         matches = [
             line.split()[0].lower()
             for line in remote_head.stdout.splitlines()
@@ -216,6 +283,8 @@ class GitSource:
             result = self._runner.run(
                 ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
                 cwd=cwd,
+                timeout=self._command_timeout,
+                env=_GIT_ENVIRONMENT,
                 secrets=secrets,
             )
         except CommandError as error:
@@ -235,13 +304,19 @@ class GitSource:
             action="Git reference could not resolve exactly",
         )
 
-    def _set_origin_url(self, cache_path: Path, url: str, *, secrets: tuple[str, ...]) -> None:
+    def _pin_commit(self, cache_path: Path, sha: str) -> None:
         self._git(
-            ["git", "remote", "set-url", "origin", url],
+            ["git", "update-ref", f"refs/powercontext-eval/pins/{sha}", sha],
             cwd=cache_path,
-            action="could not configure Git mirror origin",
-            secrets=secrets,
+            action="could not pin resolved Git commit",
         )
+
+    def _transport_command(self, details: _SourceDetails, arguments: list[str]) -> list[str]:
+        command = ["git"]
+        if details.transport != details.normalized:
+            command.extend(["-c", f"url.{details.transport}.insteadOf={details.normalized}"])
+        command.extend(arguments)
+        return command
 
     def _git(
         self,
@@ -252,7 +327,13 @@ class GitSource:
         secrets: tuple[str, ...] = (),
     ) -> CommandResult:
         try:
-            return self._runner.run(argv, cwd=cwd, secrets=secrets)
+            return self._runner.run(
+                argv,
+                cwd=cwd,
+                timeout=self._command_timeout,
+                env=_GIT_ENVIRONMENT,
+                secrets=secrets,
+            )
         except CommandError as error:
             raise GitSourceError(action) from error
 
@@ -267,7 +348,13 @@ def _source_details(source: str | Path) -> _SourceDetails:
         normalized = f"{scp_match.group('host')}:{scp_match.group('path')}"
         user = scp_match.group("user")
         secrets = tuple(secret for secret in (raw, unquote(user) if user else None) if secret)
-        return _SourceDetails(normalized=normalized, transport=raw, local_path=None, secrets=secrets)
+        return _SourceDetails(
+            normalized=normalized,
+            transport=raw,
+            local_path=None,
+            secrets=secrets,
+            has_embedded_credentials=False,
+        )
 
     parsed = urlsplit(raw)
     if parsed.scheme:
@@ -283,11 +370,23 @@ def _source_details(source: str | Path) -> _SourceDetails:
         netloc = f"{host}:{port}" if port is not None else host
         normalized = urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
         secrets = _url_secrets(raw, parsed.username, parsed.password, parsed.query, parsed.fragment)
-        return _SourceDetails(normalized=normalized, transport=raw, local_path=None, secrets=secrets)
+        return _SourceDetails(
+            normalized=normalized,
+            transport=raw,
+            local_path=None,
+            secrets=secrets,
+            has_embedded_credentials=parsed.password is not None or "?" in raw or "#" in raw,
+        )
 
     local_path = Path(source).expanduser().resolve()
     normalized = str(local_path)
-    return _SourceDetails(normalized=normalized, transport=normalized, local_path=local_path, secrets=())
+    return _SourceDetails(
+        normalized=normalized,
+        transport=normalized,
+        local_path=local_path,
+        secrets=(),
+        has_embedded_credentials=False,
+    )
 
 
 def _url_secrets(
@@ -303,6 +402,16 @@ def _url_secrets(
     if fragment:
         values.append(unquote(fragment))
     return tuple(dict.fromkeys(value for value in values if value))
+
+
+def _remove_owned_temporary_directory(path: Path) -> None:
+    if not os.path.lexists(path):
+        return
+    status = os.lstat(path)
+    if stat.S_ISDIR(status.st_mode) and not stat.S_ISLNK(status.st_mode):
+        shutil.rmtree(path)
+    else:
+        path.unlink()
 
 
 __all__ = ["GitSource", "ResolvedGitSource"]

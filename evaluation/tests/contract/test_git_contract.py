@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from powercontext_eval.errors import GitSourceError
+from powercontext_eval.errors import CommandFailed, GitSourceError
 from powercontext_eval.git_source import GitSource, ResolvedGitSource
 from powercontext_eval.models import PowerContextRef
 from powercontext_eval.process import CommandResult, ProcessRunner
@@ -114,6 +114,27 @@ def test_materialize_does_not_reresolve_branch_that_moved_after_resolution(
     assert git(target, "rev-parse", "HEAD").stdout.strip() == resolved.sha
 
 
+def test_resolve_pins_commit_so_old_resolution_survives_force_move_and_gc(
+    source: GitSource,
+    git_fixture: GitFixture,
+    tmp_path: Path,
+) -> None:
+    old = source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+    pin_ref = f"refs/powercontext-eval/pins/{old.sha}"
+
+    assert git(old.cache_path, "rev-parse", pin_ref).stdout.strip() == old.sha
+    git(git_fixture.work, "push", "--force", "origin", "main:feature")
+    current = source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+    assert current.sha == git_fixture.initial_sha
+    git(old.cache_path, "reflog", "expire", "--expire=now", "--all")
+    git(old.cache_path, "gc", "--prune=now")
+
+    target = source.materialize(old, tmp_path / "old-materialized")
+
+    assert git(target, "rev-parse", "HEAD").stdout.strip() == old.sha
+    assert git(old.cache_path, "rev-parse", pin_ref).stdout.strip() == old.sha
+
+
 def test_resolve_refreshes_an_existing_mirror(source: GitSource, git_fixture: GitFixture) -> None:
     original = source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
     moved_sha = git_fixture.commit_to_feature("refresh feature")
@@ -140,6 +161,79 @@ def test_resolve_rejects_nonbare_existing_cache(source: GitSource, git_fixture: 
 
     with pytest.raises(GitSourceError, match="not a bare mirror"):
         source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="main"))
+
+
+def test_resolve_rejects_cache_bucket_symlink_before_any_git_command(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    cache_root = tmp_path / "cache"
+    runner = RecordingProcessRunner()
+    source = GitSource(cache_root=cache_root, runner=runner)
+    expected_bucket = source.cache_path_for(git_fixture.remote)
+    cache_root.mkdir()
+    expected_bucket.symlink_to(git_fixture.remote, target_is_directory=True)
+    config_before = (git_fixture.remote / "config").read_bytes()
+    refs_before = git(git_fixture.remote, "show-ref").stdout
+
+    with pytest.raises(GitSourceError, match="symlink"):
+        source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+
+    assert runner.calls == []
+    assert (git_fixture.remote / "config").read_bytes() == config_before
+    assert git(git_fixture.remote, "show-ref").stdout == refs_before
+
+
+def test_local_latest_rejects_cache_bucket_symlink_before_inspecting_source(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    cache_root = tmp_path / "cache"
+    runner = RecordingProcessRunner()
+    source = GitSource(cache_root=cache_root, runner=runner)
+    expected_bucket = source.cache_path_for(git_fixture.work)
+    cache_root.mkdir()
+    expected_bucket.symlink_to(git_fixture.remote, target_is_directory=True)
+
+    with pytest.raises(GitSourceError, match="symlink"):
+        source.resolve(git_fixture.work, PowerContextRef(kind="latest"))
+
+    assert runner.calls == []
+
+
+def test_resolve_rejects_broken_cache_bucket_symlink_before_any_git_command(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    cache_root = tmp_path / "cache"
+    runner = RecordingProcessRunner()
+    source = GitSource(cache_root=cache_root, runner=runner)
+    expected_bucket = source.cache_path_for(git_fixture.remote)
+    cache_root.mkdir()
+    expected_bucket.symlink_to(tmp_path / "missing-bare-repository", target_is_directory=True)
+
+    with pytest.raises(GitSourceError, match="symlink"):
+        source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+
+    assert runner.calls == []
+
+
+def test_resolve_rejects_cache_root_symlink_before_any_git_command(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    actual_root = tmp_path / "actual-cache"
+    actual_root.mkdir()
+    cache_root = tmp_path / "cache-link"
+    cache_root.symlink_to(actual_root, target_is_directory=True)
+    runner = RecordingProcessRunner()
+    source = GitSource(cache_root=cache_root, runner=runner)
+
+    with pytest.raises(GitSourceError, match="root must not be a symlink"):
+        source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+
+    assert runner.calls == []
+    assert list(actual_root.iterdir()) == []
 
 
 def test_materialize_requires_nonexistent_target(
@@ -171,6 +265,31 @@ def test_materialize_rejects_broken_symlink_target(
     assert not destination.exists()
 
 
+def test_materialize_checkout_failure_is_atomic_and_retryable(
+    source: GitSource,
+    git_fixture: GitFixture,
+    tmp_path: Path,
+) -> None:
+    resolved = source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+    publish_root = tmp_path / "publish"
+    publish_root.mkdir()
+    target = publish_root / "checkout"
+    materializer = GitSource(cache_root=tmp_path / "unused-cache", runner=FailCheckoutOnceRunner())
+
+    with pytest.raises(GitSourceError, match="check out"):
+        materializer.materialize(resolved, target)
+
+    assert not target.exists()
+    assert not target.is_symlink()
+    assert list(publish_root.iterdir()) == []
+
+    retried = materializer.materialize(resolved, target)
+
+    assert retried == target
+    assert git(target, "rev-parse", "HEAD").stdout.strip() == resolved.sha
+    assert list(publish_root.iterdir()) == [target]
+
+
 def test_resolve_missing_exact_ref_raises_typed_error(source: GitSource, git_fixture: GitFixture) -> None:
     with pytest.raises(GitSourceError, match="could not resolve"):
         source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="missing"))
@@ -196,6 +315,156 @@ class FailIfProcessRuns(ProcessRunner):
         secrets: Sequence[str] = (),
     ) -> CommandResult:
         raise AssertionError("normalization and cache key calculation must not access the network")
+
+
+class RecordingProcessRunner(ProcessRunner):
+    def __init__(self) -> None:
+        self.calls: list[tuple[float | None, dict[str, str]]] = []
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: str | Path,
+        timeout: float | None = None,
+        env: Mapping[str, str] | None = None,
+        check: bool = True,
+        secrets: Sequence[str] = (),
+    ) -> CommandResult:
+        self.calls.append((timeout, dict(env or {})))
+        return super().run(
+            argv,
+            cwd=cwd,
+            timeout=timeout,
+            env=env,
+            check=check,
+            secrets=secrets,
+        )
+
+
+class ControlledGitRunner(ProcessRunner):
+    def __init__(self, sha: str) -> None:
+        self.sha = sha
+        self.calls: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+        self.origin: str | None = None
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: str | Path,
+        timeout: float | None = None,
+        env: Mapping[str, str] | None = None,
+        check: bool = True,
+        secrets: Sequence[str] = (),
+    ) -> CommandResult:
+        command = tuple(argv)
+        self.calls.append((command, tuple(secrets)))
+        if "clone" in command:
+            clone_index = command.index("clone")
+            self.origin = command[clone_index + 2]
+        if command[1:4] == ("remote", "set-url", "origin"):
+            self.origin = command[4]
+        stdout = f"{self.sha}\n" if "rev-parse" in command and "--verify" in command else ""
+        return CommandResult(command, str(cwd), 0, stdout, "")
+
+
+class FailCheckoutOnceRunner(ProcessRunner):
+    def __init__(self) -> None:
+        self.failed = False
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: str | Path,
+        timeout: float | None = None,
+        env: Mapping[str, str] | None = None,
+        check: bool = True,
+        secrets: Sequence[str] = (),
+    ) -> CommandResult:
+        if not self.failed and "checkout" in argv:
+            self.failed = True
+            result = CommandResult(tuple(argv), str(cwd), 73, "", "injected checkout failure\n")
+            raise CommandFailed("injected checkout failure", result)
+        return super().run(
+            argv,
+            cwd=cwd,
+            timeout=timeout,
+            env=env,
+            check=check,
+            secrets=secrets,
+        )
+
+
+def test_every_git_command_has_finite_timeout_and_noninteractive_environment(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    runner = RecordingProcessRunner()
+    source = GitSource(cache_root=tmp_path / "cache", runner=runner, command_timeout=12.5)
+
+    source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+
+    assert runner.calls
+    for timeout, env in runner.calls:
+        assert timeout == 12.5
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GCM_INTERACTIVE"] == "never"
+
+
+def test_git_command_timeout_defaults_to_300_seconds(tmp_path: Path, git_fixture: GitFixture) -> None:
+    runner = RecordingProcessRunner()
+    source = GitSource(cache_root=tmp_path / "cache", runner=runner)
+
+    source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+
+    assert runner.calls
+    assert {timeout for timeout, _env in runner.calls} == {300.0}
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_git_source_rejects_nonpositive_command_timeout(tmp_path: Path, timeout: float) -> None:
+    with pytest.raises(ValueError, match="greater than zero"):
+        GitSource(cache_root=tmp_path / "cache", command_timeout=timeout)
+
+
+def test_resolve_rejects_embedded_password_query_and_fragment_before_cache_creation(tmp_path: Path) -> None:
+    raw_source = "https://user:password@example.com/org/repo.git?access_token=query-secret#fragment-secret"
+    source = GitSource(cache_root=tmp_path / "cache", runner=FailIfProcessRuns())
+    expected_bucket = source.cache_path_for(raw_source)
+
+    with pytest.raises(GitSourceError, match="credential helper"):
+        source.resolve(raw_source, PowerContextRef(kind="commit", value="a" * 40))
+
+    assert not expected_bucket.exists()
+    assert not expected_bucket.is_symlink()
+    assert not (tmp_path / "cache").exists()
+
+
+def test_username_only_ssh_uses_command_scoped_rewrite_and_sanitized_origin(tmp_path: Path) -> None:
+    sha = "a" * 40
+    raw_source = "ssh://deploy@example.com/org/repo.git"
+    normalized = "ssh://example.com/org/repo.git"
+    runner = ControlledGitRunner(sha)
+    source = GitSource(cache_root=tmp_path / "cache", runner=runner)
+
+    resolved = source.resolve(raw_source, PowerContextRef(kind="commit", value=sha))
+
+    clone_call = next(call for call, _secrets in runner.calls if "clone" in call)
+    clone_index = clone_call.index("clone")
+    assert clone_call[clone_index + 2] == normalized
+    assert "-c" in clone_call
+    assert f"url.{raw_source}.insteadOf={normalized}" in clone_call
+    assert not any(call[1:4] == ("remote", "set-url", "origin") for call, _secrets in runner.calls)
+    assert runner.origin == normalized
+    assert resolved.source == normalized
+    assert "deploy" not in repr(resolved)
+    sensitive_calls = [
+        (call, secrets) for call, secrets in runner.calls if any(raw_source in argument for argument in call)
+    ]
+    assert sensitive_calls
+    assert all(raw_source in secrets and "deploy" in secrets for _call, secrets in sensitive_calls)
 
 
 @pytest.mark.parametrize(
