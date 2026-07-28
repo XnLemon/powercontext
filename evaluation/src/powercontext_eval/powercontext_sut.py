@@ -535,6 +535,7 @@ class DockerSut:
         paths: Mapping[Arm, ArmPaths],
         prompts: Mapping[Arm, bytes],
         stores: Mapping[Arm, ArtifactStore],
+        before_arm: Callable[[Arm], None] | None = None,
     ) -> Mapping[Arm, SutOutcome]:
         """Run OFF then ON serially through one exact network and relay URL."""
 
@@ -549,6 +550,8 @@ class DockerSut:
         with self._run_network(config, config.source_checkout) as (network, relay_url):
             outcomes: dict[Arm, SutOutcome] = {}
             for arm in (Arm.OFF, Arm.ON):
+                if before_arm is not None:
+                    before_arm(arm)
                 outcomes[arm] = self._execute_arm(
                     config,
                     arm,

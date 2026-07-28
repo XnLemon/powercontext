@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 from powercontext_eval.artifacts import ArmState, ArtifactStore
@@ -31,6 +32,20 @@ from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, render_
 INSTANCE_ID = "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"
 TASK_IMAGE = "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"
 IMAGE_MANIFEST_DIGEST = "sha256:d2c9d5460c479cb257a0588a603021f4e83e31f2614146728336689854f52803"
+
+
+class RunPhase(StrEnum):
+    """Stable observable phases of a minimal evaluation run."""
+
+    PREPARING = "preparing"
+    VALIDATING_GOLD = "validating_gold"
+    RUNNING_OFF = "running_off"
+    RUNNING_ON = "running_on"
+    OFFICIAL_EVALUATION = "official_evaluation"
+    GENERATING_REPORT = "generating_report"
+
+
+PhaseCallback = Callable[[RunPhase], None]
 
 
 @dataclass(frozen=True)
@@ -60,13 +75,19 @@ class MinimalRunResult:
     on_resolved: bool
 
 
-def run_minimal_swebench_pro(config: MinimalRunConfig) -> MinimalRunResult:
+def run_minimal_swebench_pro(
+    config: MinimalRunConfig,
+    *,
+    on_phase: PhaseCallback | None = None,
+) -> MinimalRunResult:
     """Resolve PowerContext once, run Gold then OFF/ON, and render a report."""
 
+    emit_phase = on_phase or (lambda phase: None)
     run_id = config.run_id or datetime.now(UTC).strftime("run-%Y%m%d-%H%M%S")
     layout = EvaluationPaths(config.root.absolute(), run_id)
     if os.path.lexists(layout.run_artifacts) or os.path.lexists(config.root / "work" / run_id):
         raise ValueError(f"Run already exists: {run_id}")
+    emit_phase(RunPhase.PREPARING)
     raw = _read_one_jsonl(config.raw_sample_path)
     instance = SweBenchProInstance.from_raw(raw, docker_manifest_digest=IMAGE_MANIFEST_DIGEST)
     if instance.instance_id != INSTANCE_ID:
@@ -100,6 +121,7 @@ def run_minimal_swebench_pro(config: MinimalRunConfig) -> MinimalRunResult:
         "gold/predictions.json",
         encode_predictions(INSTANCE_ID, instance.patch, "gold"),
     )
+    emit_phase(RunPhase.VALIDATING_GOLD)
     gold = evaluator.evaluate(
         harness_root=config.harness_root,
         raw_sample_path=raw_copy,
@@ -138,9 +160,11 @@ def run_minimal_swebench_pro(config: MinimalRunConfig) -> MinimalRunResult:
             paths=arm_paths,
             prompts={Arm.OFF: instance.codex_prompt().encode(), Arm.ON: instance.codex_prompt().encode()},
             stores=stores,
+            before_arm=lambda arm: emit_phase(RunPhase.RUNNING_OFF if arm is Arm.OFF else RunPhase.RUNNING_ON),
         )
         official: dict[Arm, OfficialEvaluation] = {}
         patch_sizes: dict[Arm, int] = {}
+        emit_phase(RunPhase.OFFICIAL_EVALUATION)
         for arm in (Arm.OFF, Arm.ON):
             patch = process.run(
                 ("git", "diff", "--binary", "--full-index", instance.base_commit, "--"),
@@ -167,6 +191,7 @@ def run_minimal_swebench_pro(config: MinimalRunConfig) -> MinimalRunResult:
     )
     off_outcome = outcomes[Arm.OFF]
     on_outcome = outcomes[Arm.ON]
+    emit_phase(RunPhase.GENERATING_REPORT)
     report = ReportBundle(
         title="PowerContext Codex SWE-bench Pro comparison",
         revisions={
@@ -187,6 +212,7 @@ def run_minimal_swebench_pro(config: MinimalRunConfig) -> MinimalRunResult:
     if render_report(report) != rendered:
         raise RuntimeError("Report rendering is not deterministic")
     report_path = run_store.create_text("report.md", rendered)
+    run_store.create_json("report.json", report.model_dump(mode="json"))
     return MinimalRunResult(run_id, report_path, off_eval.resolved, on_eval.resolved)
 
 

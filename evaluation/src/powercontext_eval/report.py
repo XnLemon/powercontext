@@ -39,6 +39,15 @@ class ArmReport(BaseModel):
     failure_status: str | None = None
     invalid_reason: str | None = None
 
+    @field_validator("state", mode="before")
+    @classmethod
+    def parse_serialized_state(cls, value: object) -> object:
+        """Accept the exact enum value emitted by JSON serialization."""
+
+        if isinstance(value, str):
+            return ArmState(value)
+        return value
+
 
 class ReportBundle(BaseModel):
     """Complete, side-effect-free input to report rendering."""

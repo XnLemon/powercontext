@@ -413,6 +413,7 @@ def test_pair_reuses_one_relay_and_network_and_runs_off_then_on(tmp_path: Path) 
     config.uv_binary.write_text("binary")
     docker = TranscriptDocker()
     relay = FakeRelay()
+    started_arms: list[Arm] = []
 
     outcomes = DockerSut(docker, relay_factory=lambda: relay).run_pair(
         config,
@@ -422,9 +423,11 @@ def test_pair_reuses_one_relay_and_network_and_runs_off_then_on(tmp_path: Path) 
             Arm.OFF: ArtifactStore(off_paths.result_root),
             Arm.ON: ArtifactStore(on_paths.result_root),
         },
+        before_arm=started_arms.append,
     )
 
     assert set(outcomes) == {Arm.OFF, Arm.ON}
+    assert started_arms == [Arm.OFF, Arm.ON]
     assert sum(command[:3] == ("docker", "network", "create") for command in docker.commands) == 1
     assert sum(command[:3] == ("docker", "network", "rm") for command in docker.commands) == 1
     assert relay.events == [("start", "172.29.0.1"), ("stop", "exact")]
