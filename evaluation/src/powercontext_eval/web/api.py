@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from stat import S_ISDIR, S_ISREG
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -338,10 +338,11 @@ def create_app(config: WebConfig, store: TaskStore | None = None) -> FastAPI:
     @app.get("/api/tasks")
     def list_tasks(
         status: TaskStatus | None = None,
+        order: Literal["oldest", "newest"] = "oldest",
         limit: Annotated[int, Query(ge=1, le=100)] = 100,
         offset: Annotated[int, Query(ge=0)] = 0,
     ) -> Response:
-        items = task_store.list_tasks(status=status, limit=limit, offset=offset)
+        items = task_store.list_tasks(status=status, order=order, limit=limit, offset=offset)
         return JSONResponse(content=[_summary_payload(item, task_store) for item in items], headers=_NO_STORE)
 
     @app.get("/api/tasks/{task_id}")

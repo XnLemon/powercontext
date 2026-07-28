@@ -14,17 +14,10 @@ export function ReportIndex({ api }: { api: EvaluationApi }) {
     controller.current = nextController;
     const requestGeneration = ++generation.current;
     setError(false);
-    api.listTasks({ status: "succeeded", limit: 50, offset: 0 }, nextController.signal)
+    api.listTasks({ status: "succeeded", order: "newest", limit: 50, offset: 0 }, nextController.signal)
       .then((nextTasks) => {
         if (!nextController.signal.aborted && requestGeneration === generation.current) {
-          setTasks(
-            nextTasks
-              .filter((task) => task.status === "succeeded")
-              .sort(
-                (left, right) =>
-                  Date.parse(right.finished_at ?? right.created_at) - Date.parse(left.finished_at ?? left.created_at),
-              ),
-          );
+          setTasks(nextTasks.filter((task) => task.status === "succeeded"));
         }
       })
       .catch(() => {

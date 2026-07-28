@@ -35,14 +35,19 @@ describe("App", () => {
   });
 
   it("shows latest succeeded report boundary only when no task is running", async () => {
-    render(<App api={apiStub({ listTasks: vi.fn().mockResolvedValue([
-      summary("succeeded", "task-old", { finished_at: "2026-07-29T01:02:00Z" }),
+    const api = apiStub({ listTasks: vi.fn().mockResolvedValue([
       summary("succeeded", "task-latest", { finished_at: "2026-07-29T03:02:00Z" }),
-    ]) })} />);
+      summary("succeeded", "task-old", { finished_at: "2026-07-29T01:02:00Z" }),
+    ]) });
+    render(<App api={api} />);
     expect(await screen.findByRole("heading", { name: "最近完成" })).toBeVisible();
     expect(screen.getByText("task-latest")).toBeVisible();
     expect(screen.getByRole("link", { name: "查看验收报告" })).toHaveAttribute("href", "/reports/task-latest");
     expect(screen.queryByText(/通过|未通过/)).not.toBeInTheDocument();
+    expect(api.listTasks).toHaveBeenCalledWith(
+      { order: "newest", limit: 50, offset: 0 },
+      expect.any(AbortSignal),
+    );
   });
 
   it("routes task details and the report index without preloading conclusions", async () => {
@@ -58,8 +63,8 @@ describe("App", () => {
   it("loads a report route and exposes succeeded reports from the report index", async () => {
     const api = apiStub({
       listTasks: vi.fn().mockResolvedValue([
-        summary("succeeded", "task-old", { finished_at: "2026-07-29T01:02:00Z" }),
         summary("succeeded", "task/report", { finished_at: "2026-07-29T03:02:00Z" }),
+        summary("succeeded", "task-old", { finished_at: "2026-07-29T01:02:00Z" }),
       ]),
     });
     window.history.replaceState({}, "", "/reports/task%2Freport");
@@ -72,6 +77,10 @@ describe("App", () => {
     expect(latestItem).not.toBeNull();
     expect(within(latestItem!).getByText("task/report")).toBeVisible();
     expect(within(latestItem!).getByRole("link", { name: "查看 task/report 的验收报告" })).toBeVisible();
+    expect(api.listTasks).toHaveBeenCalledWith(
+      { status: "succeeded", order: "newest", limit: 50, offset: 0 },
+      expect.any(AbortSignal),
+    );
     expect(await screen.findByRole("link", { name: "查看 task/report 的验收报告" })).toHaveAttribute(
       "href",
       "/reports/task%2Freport",

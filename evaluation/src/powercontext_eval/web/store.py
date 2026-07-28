@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from powercontext_eval.paths import EvaluationPaths
 from powercontext_eval.web.models import (
@@ -152,20 +152,24 @@ class TaskStore:
         self,
         *,
         status: TaskStatus | None,
+        order: Literal["oldest", "newest"] = "oldest",
         limit: int = 100,
         offset: int = 0,
     ) -> list[TaskSummary]:
-        """List tasks in stable FIFO creation order."""
+        """List tasks in a stable requested creation order."""
         if limit < 1:
             raise ValueError("limit must be positive")
         if offset < 0:
             raise ValueError("offset must not be negative")
+        if order not in ("oldest", "newest"):
+            raise ValueError("order must be oldest or newest")
         sql = "SELECT * FROM tasks"
         parameters: list[object] = []
         if status is not None:
             sql += " WHERE status = ?"
             parameters.append(status.value)
-        sql += " ORDER BY queue_seq ASC LIMIT ? OFFSET ?"
+        sql += " ORDER BY queue_seq ASC" if order == "oldest" else " ORDER BY queue_seq DESC"
+        sql += " LIMIT ? OFFSET ?"
         parameters.extend((limit, offset))
         with self._connection() as connection:
             return [self._summary(self._record(row)) for row in connection.execute(sql, parameters).fetchall()]

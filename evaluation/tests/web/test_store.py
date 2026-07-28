@@ -91,6 +91,16 @@ def test_fifo_order_stable_pagination_and_status_filtering(store: TaskStore) -> 
     assert store.list_tasks(status=TaskStatus.CANCELLED, limit=10, offset=0)[0].task_id == second.task_id
 
 
+def test_newest_order_is_applied_before_stable_pagination(store: TaskStore) -> None:
+    created = [store.create(request(f"newest-key-{index:02d}"), now=NOW)[0] for index in range(55)]
+
+    newest_page = store.list_tasks(status=None, order="newest", limit=50, offset=0)
+    oldest_page = store.list_tasks(status=None, limit=50, offset=0)
+
+    assert [item.task_id for item in newest_page] == [item.task_id for item in reversed(created[-50:])]
+    assert [item.task_id for item in oldest_page] == [item.task_id for item in created[:50]]
+
+
 def test_get_returns_record_and_unknown_task_raises(store: TaskStore) -> None:
     created, _ = store.create(request("lookup-key"), now=NOW)
 

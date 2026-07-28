@@ -98,7 +98,7 @@ function Workbench({ api, navigate }: { api: EvaluationApi; navigate(path: strin
     const generation = ++overviewGeneration.current;
     setOverviewError(false);
     api
-      .listTasks({ limit: 50, offset: 0 }, controller.signal)
+      .listTasks({ order: "newest", limit: 50, offset: 0 }, controller.signal)
       .then((nextTasks) => {
         if (!controller.signal.aborted && generation === overviewGeneration.current) setTasks(nextTasks);
       })

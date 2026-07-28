@@ -78,13 +78,13 @@ describe("EvaluationApi HTTP", () => {
 
     await expect(api.getCapabilities()).resolves.toEqual(capabilities);
     await expect(api.getHealth()).resolves.toEqual(health);
-    await expect(api.listTasks({ status: "queued", limit: 25, offset: 0 })).resolves.toEqual([summary]);
+    await expect(api.listTasks({ status: "queued", order: "newest", limit: 25, offset: 0 })).resolves.toEqual([summary]);
     await expect(api.getTask("task-1")).resolves.toEqual(queuedTask);
 
     expect(fetch.mock.calls.map(([url]) => url)).toEqual([
       "/api/capabilities",
       "/api/health",
-      "/api/tasks?status=queued&limit=25&offset=0",
+      "/api/tasks?status=queued&order=newest&limit=25&offset=0",
       "/api/tasks/task-1",
     ]);
   });

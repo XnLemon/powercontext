@@ -82,6 +82,32 @@ def test_health_and_capabilities_are_server_owned_and_secret_free(client: TestCl
     assert_safe(capabilities)
 
 
+def test_newest_succeeded_query_orders_before_limit_and_default_remains_fifo(
+    client: TestClient, store: TaskStore
+) -> None:
+    result = TaskResult(
+        artifact_dir="/safe/artifacts",
+        report_path="/safe/report.md",
+        off_resolved=False,
+        on_resolved=True,
+    )
+    succeeded_ids: list[str] = []
+    for index in range(55):
+        created, _ = store.create(TaskCreate.model_validate(payload(f"succeeded-{index:02d}")), now=NOW)
+        claimed = store.claim_next("worker", now=NOW + timedelta(seconds=index + 1))
+        assert claimed is not None and claimed.task_id == created.task_id
+        store.succeed(created.task_id, "worker", result, now=NOW + timedelta(seconds=index + 2))
+        succeeded_ids.append(created.task_id)
+
+    newest = client.get("/api/tasks?status=succeeded&order=newest&limit=50&offset=0")
+    oldest = client.get("/api/tasks?status=succeeded&limit=50&offset=0")
+    invalid = client.get("/api/tasks?order=sideways")
+
+    assert [item["task_id"] for item in newest.json()] == list(reversed(succeeded_ids[-50:]))
+    assert [item["task_id"] for item in oldest.json()] == succeeded_ids[:50]
+    assert invalid.status_code == 422
+
+
 def test_create_replay_and_task_detail_have_truthful_queue_positions(client: TestClient) -> None:
     first = client.post("/api/tasks", json=payload("create-key-1"))
     second = client.post("/api/tasks", json=payload("create-key-2"))

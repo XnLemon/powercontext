@@ -350,6 +350,7 @@ export class EvaluationApi {
   listTasks(options: TaskListOptions = {}, signal?: AbortSignal): Promise<TaskSummary[]> {
     const query = new URLSearchParams();
     if (options.status !== undefined) query.set("status", options.status);
+    if (options.order !== undefined) query.set("order", options.order);
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     if (options.offset !== undefined) query.set("offset", String(options.offset));
     const suffix = query.size === 0 ? "" : `?${query.toString()}`;

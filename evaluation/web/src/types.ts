@@ -219,6 +219,7 @@ export interface ReportResponse {
 
 export interface TaskListOptions {
   status?: TaskStatus;
+  order?: "oldest" | "newest";
   limit?: number;
   offset?: number;
 }
