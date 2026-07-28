@@ -202,8 +202,9 @@ requested text and resolved SHA before launching an arm.
 
 Resolving a commit also creates an immutable private ref in the source mirror so a later branch move, fetch,
 reflog expiry, or garbage collection cannot remove an object needed by either arm. Materialization builds in a
-unique sibling temporary directory and publishes only a fully verified detached checkout; failed attempts leave
-the public target absent and retryable.
+unique sibling temporary directory and publishes only a fully verified detached checkout with an OS-level atomic
+no-replace rename. A concurrent creator is never overwritten, and an unsupported no-replace primitive fails
+closed; failed attempts leave the public target absent and retryable.
 
 ## 7. Codex isolation and treatment
 
@@ -218,10 +219,11 @@ minimum Codex auth material into the ephemeral home with owner-only permissions.
 in retained artifacts. Logs pass through exact-value redaction for any secret-bearing environment variables known
 to the runner.
 
-Credential-bearing proxy URLs are automatically treated as redaction inputs. Embedded Git passwords, query
-credentials, and fragments are rejected before cache creation; authenticated Git sources must use an external
-credential helper. Username-only SSH/SCP transports may use a command-scoped Git URL rewrite, but the cached
-mirror origin and provenance always contain only the sanitized source.
+Credential-bearing proxy URLs, their raw percent-encoded userinfo components, and their decoded userinfo are
+automatically treated as redaction inputs. Embedded Git passwords, query credentials, and fragments are rejected
+before cache creation; authenticated Git sources must use an external credential helper. Username-only SSH/SCP
+transports may use a command-scoped Git URL rewrite, but the cached mirror origin and provenance always contain
+only the sanitized source.
 
 Both homes receive the same pinned Codex CLI, authentication, model, reasoning level, prompt, task repository,
 shell environment policy, sandbox mode, time limit, and resource budget. The first paid experiment pins Codex CLI
