@@ -164,6 +164,56 @@ def test_timeout_kills_grandchild_process_group_and_reaps_launcher(tmp_path: Pat
                 pass
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descendant discovery behavior")
+@pytest.mark.parametrize("stdio_mode", ["inherit", "devnull"])
+def test_timeout_kills_descendant_that_escaped_into_new_session(
+    tmp_path: Path,
+    stdio_mode: str,
+) -> None:
+    pid_file = tmp_path / f"escaped-{stdio_mode}.pid"
+    descendant_script = "import time; time.sleep(4)"
+    launcher_script = (
+        "import pathlib, subprocess, sys, time; "
+        "kwargs = {} if sys.argv[3] == 'inherit' else "
+        "{'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}; "
+        "child = subprocess.Popen([sys.executable, '-c', sys.argv[2]], start_new_session=True, **kwargs); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8'); "
+        "print('escaped-ready', flush=True); "
+        "time.sleep(30)"
+    )
+    descendant_pid: int | None = None
+    started = time.monotonic()
+
+    try:
+        with pytest.raises(CommandTimedOut) as captured:
+            ProcessRunner().run(
+                [sys.executable, "-c", launcher_script, str(pid_file), descendant_script, stdio_mode],
+                cwd=tmp_path,
+                timeout=0.3,
+                secrets=["escaped-ready"],
+            )
+
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.5
+        assert captured.value.result.stdout == "[REDACTED]\n"
+        descendant_pid = int(pid_file.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                os.kill(descendant_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail(f"escaped descendant {descendant_pid} survived timeout")
+    finally:
+        if descendant_pid is not None:
+            try:
+                os.kill(descendant_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def test_run_raises_command_not_found_with_result(tmp_path: Path) -> None:
     missing = "powercontext-command-that-does-not-exist"
 
@@ -254,14 +304,14 @@ def test_run_automatically_redacts_proxy_credentials_from_output_and_failure(
 ) -> None:
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         monkeypatch.delenv(key, raising=False)
-    proxy = "http://proxy-user:p%40ssword@proxy.example:7890"
+    proxy = "http://proxy%2Duser:p%40ssword@proxy.example:7890"
     monkeypatch.setenv("HTTP_PROXY", proxy)
     script = (
         "import os, sys; "
         "from urllib.parse import unquote, urlsplit; "
         "value = os.environ['HTTP_PROXY']; parsed = urlsplit(value); "
-        "print(value); print(unquote(parsed.username)); "
-        "print(unquote(parsed.password), file=sys.stderr); "
+        "print(value); print(parsed.username); print(parsed.password); "
+        "print(unquote(parsed.username)); print(unquote(parsed.password), file=sys.stderr); "
         "raise SystemExit(5)"
     )
 
@@ -277,6 +327,30 @@ def test_run_automatically_redacts_proxy_credentials_from_output_and_failure(
             captured.value.result.stderr,
         ]
     )
-    for secret in (proxy, "proxy-user", "p@ssword"):
+    for secret in (proxy, "proxy%2Duser", "p%40ssword", "proxy-user", "p@ssword"):
         assert secret not in rendered
     assert "[REDACTED]" in rendered
+
+
+def test_run_automatically_redacts_encoded_and_decoded_proxy_credentials_on_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(key, raising=False)
+    proxy = "http://proxy%2Duser:p%40ssword@proxy.example:7890"
+    monkeypatch.setenv("https_proxy", proxy)
+    script = (
+        "import os; "
+        "from urllib.parse import unquote, urlsplit; "
+        "value = os.environ['https_proxy']; parsed = urlsplit(value); "
+        "print(value); print(parsed.username); print(parsed.password); "
+        "print(unquote(parsed.username)); print(unquote(parsed.password))"
+    )
+
+    result = ProcessRunner().run([sys.executable, "-c", script], cwd=tmp_path)
+
+    rendered = repr(result)
+    for secret in (proxy, "proxy%2Duser", "p%40ssword", "proxy-user", "p@ssword"):
+        assert secret not in rendered
+    assert result.stdout.splitlines() == ["[REDACTED]"] * 5

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from powercontext_eval import git_source as git_source_module
 from powercontext_eval.errors import CommandFailed, GitSourceError
 from powercontext_eval.git_source import GitSource, ResolvedGitSource
 from powercontext_eval.models import PowerContextRef
@@ -308,6 +309,76 @@ def test_materialize_rejects_resolved_source_owned_by_different_cache_root(
     assert not target.is_symlink()
 
 
+def test_materialize_rejects_cache_bucket_from_a_different_source_before_any_git_command(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    second_fixture_root = tmp_path / "second-fixture"
+    second_fixture_root.mkdir()
+    second_fixture = create_git_fixture(second_fixture_root)
+    runner = RecordingProcessRunner()
+    source = GitSource(cache_root=tmp_path / "cache", runner=runner)
+    resolved = source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+    unrelated = source.resolve(second_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+    forged = ResolvedGitSource(
+        source=resolved.source,
+        requested=resolved.requested,
+        sha=resolved.sha,
+        cache_root=resolved.cache_root,
+        cache_path=unrelated.cache_path,
+    )
+    calls_after_resolve = len(runner.calls)
+    target = tmp_path / "materialized"
+
+    with pytest.raises(GitSourceError, match="source identity"):
+        source.materialize(forged, target)
+
+    assert len(runner.calls) == calls_after_resolve
+    assert not target.exists()
+    assert not target.is_symlink()
+
+
+def test_materialize_rejects_missing_pin_before_clone(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    runner = RecordingProcessRunner()
+    source = GitSource(cache_root=tmp_path / "cache", runner=runner)
+    resolved = source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+    pin_ref = f"refs/powercontext-eval/pins/{resolved.sha}"
+    git(resolved.cache_path, "update-ref", "-d", pin_ref)
+    calls_after_resolve = len(runner.calls)
+    target = tmp_path / "materialized"
+
+    with pytest.raises(GitSourceError, match="pin"):
+        source.materialize(resolved, target)
+
+    assert not any("clone" in command for command in runner.commands[calls_after_resolve:])
+    assert not target.exists()
+    assert not target.is_symlink()
+
+
+def test_materialize_rejects_pin_that_points_to_a_different_commit_before_clone(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    runner = RecordingProcessRunner()
+    source = GitSource(cache_root=tmp_path / "cache", runner=runner)
+    resolved = source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+    assert resolved.sha != git_fixture.initial_sha
+    pin_ref = f"refs/powercontext-eval/pins/{resolved.sha}"
+    git(resolved.cache_path, "update-ref", pin_ref, git_fixture.initial_sha)
+    calls_after_resolve = len(runner.calls)
+    target = tmp_path / "materialized"
+
+    with pytest.raises(GitSourceError, match="pin"):
+        source.materialize(resolved, target)
+
+    assert not any("clone" in command for command in runner.commands[calls_after_resolve:])
+    assert not target.exists()
+    assert not target.is_symlink()
+
+
 def test_materialize_checkout_failure_is_atomic_and_retryable(
     git_fixture: GitFixture,
     tmp_path: Path,
@@ -333,9 +404,102 @@ def test_materialize_checkout_failure_is_atomic_and_retryable(
     assert list(publish_root.iterdir()) == [target]
 
 
+def test_atomic_publish_directory_never_replaces_existing_target(tmp_path: Path) -> None:
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    (temporary / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+    marker = target / "owner.txt"
+    marker.write_text("competitor\n", encoding="utf-8")
+    original_inode = target.stat().st_ino
+
+    with pytest.raises(FileExistsError):
+        git_source_module._atomic_publish_directory(temporary, target)
+
+    assert target.stat().st_ino == original_inode
+    assert marker.read_text(encoding="utf-8") == "competitor\n"
+    assert temporary.is_dir()
+    assert (temporary / "candidate.txt").read_text(encoding="utf-8") == "candidate\n"
+
+
+def test_materialize_atomic_publish_race_preserves_competing_target(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = GitSource(cache_root=tmp_path / "cache")
+    resolved = source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+    publish_root = tmp_path / "publish"
+    publish_root.mkdir()
+    target = publish_root / "checkout"
+    state: dict[str, int] = {}
+    real_publish = git_source_module._atomic_publish_directory
+
+    def publish_after_competitor_arrives(temporary: Path, destination: Path) -> None:
+        destination.mkdir()
+        (destination / "owner.txt").write_text("competitor\n", encoding="utf-8")
+        state["inode"] = destination.stat().st_ino
+        real_publish(temporary, destination)
+
+    monkeypatch.setattr(git_source_module, "_atomic_publish_directory", publish_after_competitor_arrives)
+
+    with pytest.raises(GitSourceError, match="already exists"):
+        source.materialize(resolved, target)
+
+    assert target.stat().st_ino == state["inode"]
+    assert (target / "owner.txt").read_text(encoding="utf-8") == "competitor\n"
+    assert list(publish_root.iterdir()) == [target]
+
+
 def test_resolve_missing_exact_ref_raises_typed_error(source: GitSource, git_fixture: GitFixture) -> None:
     with pytest.raises(GitSourceError, match="could not resolve"):
         source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="missing"))
+
+
+def test_resolve_rejects_existing_mirror_for_a_different_origin_without_fetching(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    second_fixture_root = tmp_path / "second-fixture"
+    second_fixture_root.mkdir()
+    second_fixture = create_git_fixture(second_fixture_root)
+    runner = RejectFetchRunner()
+    source = GitSource(cache_root=tmp_path / "cache", runner=runner)
+    cache_path = source.cache_path_for(git_fixture.remote)
+    cache_path.parent.mkdir()
+    git(tmp_path, "clone", "--mirror", str(second_fixture.remote), str(cache_path))
+    config_before = (cache_path / "config").read_bytes()
+    refs_before = git(cache_path, "show-ref").stdout
+
+    with pytest.raises(GitSourceError, match="origin"):
+        source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+
+    assert not any("fetch" in command for command in runner.commands)
+    assert (cache_path / "config").read_bytes() == config_before
+    assert git(cache_path, "show-ref").stdout == refs_before
+
+
+def test_origin_mismatch_error_does_not_retain_existing_origin_credentials(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    runner = RejectFetchRunner()
+    source = GitSource(cache_root=tmp_path / "cache", runner=runner)
+    cache_path = source.cache_path_for(git_fixture.remote)
+    cache_path.parent.mkdir()
+    git(tmp_path, "clone", "--mirror", str(git_fixture.remote), str(cache_path))
+    credential_origin = "https://encoded%2Duser:decoded%40secret@example.invalid/org/repo.git"
+    git(cache_path, "config", "remote.origin.url", credential_origin)
+
+    with pytest.raises(GitSourceError, match="origin") as caught:
+        source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+
+    retained = f"{caught.value!s}\n{caught.value!r}\n{caught.value.__cause__!r}"
+    for secret in (credential_origin, "encoded%2Duser", "decoded%40secret", "encoded-user", "decoded@secret"):
+        assert secret not in retained
+    assert caught.value.__cause__ is None
+    assert not any("fetch" in command for command in runner.commands)
 
 
 def test_resolve_does_not_interpret_revision_syntax_as_part_of_exact_ref(
@@ -363,6 +527,7 @@ class FailIfProcessRuns(ProcessRunner):
 class RecordingProcessRunner(ProcessRunner):
     def __init__(self) -> None:
         self.calls: list[tuple[float | None, dict[str, str]]] = []
+        self.commands: list[tuple[str, ...]] = []
 
     def run(
         self,
@@ -375,6 +540,31 @@ class RecordingProcessRunner(ProcessRunner):
         secrets: Sequence[str] = (),
     ) -> CommandResult:
         self.calls.append((timeout, dict(env or {})))
+        self.commands.append(tuple(argv))
+        return super().run(
+            argv,
+            cwd=cwd,
+            timeout=timeout,
+            env=env,
+            check=check,
+            secrets=secrets,
+        )
+
+
+class RejectFetchRunner(RecordingProcessRunner):
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: str | Path,
+        timeout: float | None = None,
+        env: Mapping[str, str] | None = None,
+        check: bool = True,
+        secrets: Sequence[str] = (),
+    ) -> CommandResult:
+        if "fetch" in argv:
+            self.commands.append(tuple(argv))
+            raise AssertionError("an unvalidated existing mirror must never be fetched")
         return super().run(
             argv,
             cwd=cwd,

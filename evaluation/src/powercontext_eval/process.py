@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,8 @@ _INHERITED_ENVIRONMENT_KEYS = frozenset(
 )
 _NOT_FOUND_RETURN_CODE = 127
 _TIMEOUT_RETURN_CODE = 124
+_TERMINATION_GRACE_SECONDS = 1.5
+_DESCENDANT_SCAN_ATTEMPTS = 3
 _PROXY_ENVIRONMENT_KEYS = frozenset(
     {
         "ALL_PROXY",
@@ -112,8 +115,7 @@ class ProcessRunner:
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as error:
-            _kill_process_tree(process)
-            final_stdout, final_stderr = process.communicate()
+            final_stdout, final_stderr = _terminate_timed_out_process(process)
             result = _result(
                 redactor,
                 validated_argv,
@@ -137,14 +139,132 @@ class ProcessRunner:
         return result
 
 
-def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
-    if os.name == "posix":
+def _terminate_timed_out_process(process: subprocess.Popen[bytes]) -> tuple[bytes | None, bytes | None]:
+    deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
+    if os.name != "posix":
+        process.kill()
+        return _bounded_communicate(process, deadline)
+
+    _signal_process(process.pid, signal.SIGSTOP)
+    descendants: set[int] = set()
+    # Descendants which already reparented before the launcher is frozen cannot
+    # be attributed safely. Repeated bounded scans close the spawn race for the
+    # live descendant tree that still belongs to the timed-out launcher.
+    for _attempt in range(_DESCENDANT_SCAN_ATTEMPTS):
+        scanned = _descendant_processes(process.pid, deadline)
+        new_descendants = scanned - descendants
+        descendants.update(scanned)
+        for pid in scanned:
+            _signal_process(pid, signal.SIGSTOP)
+        if not new_descendants:
+            break
+
+    for pid in sorted(descendants, reverse=True):
+        _signal_process(pid, signal.SIGKILL)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return _bounded_communicate(process, deadline)
+
+
+def _signal_process(pid: int, signal_number: int) -> None:
+    try:
+        os.kill(pid, signal_number)
+    except ProcessLookupError:
+        pass
+
+
+def _descendant_processes(root_pid: int, deadline: float) -> set[int]:
+    parent_map = _process_parent_map(deadline)
+    children: dict[int, list[int]] = {}
+    for pid, parent_pid in parent_map.items():
+        children.setdefault(parent_pid, []).append(pid)
+
+    descendants: set[int] = set()
+    frontier = list(children.get(root_pid, ()))
+    while frontier:
+        pid = frontier.pop()
+        if pid in descendants:
+            continue
+        descendants.add(pid)
+        frontier.extend(children.get(pid, ()))
+    return descendants
+
+
+def _process_parent_map(deadline: float) -> dict[int, int]:
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        return _linux_process_parent_map(proc_root)
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return {}
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,ppid="],
+            capture_output=True,
+            timeout=remaining,
+            check=False,
+            shell=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+
+    parent_map: dict[int, int] = {}
+    for line in completed.stdout.decode("utf-8", errors="replace").splitlines():
+        fields = line.split()
+        if len(fields) != 2:
+            continue
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            pid, parent_pid = (int(field) for field in fields)
+        except ValueError:
+            continue
+        parent_map[pid] = parent_pid
+    return parent_map
+
+
+def _linux_process_parent_map(proc_root: Path) -> dict[int, int]:
+    parent_map: dict[int, int] = {}
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat_line = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+            remainder = stat_line.rsplit(")", maxsplit=1)[1].split()
+            parent_map[int(entry.name)] = int(remainder[1])
+        except (IndexError, OSError, ValueError):
+            continue
+    return parent_map
+
+
+def _bounded_communicate(
+    process: subprocess.Popen[bytes],
+    deadline: float,
+) -> tuple[bytes | None, bytes | None]:
+    remaining = max(deadline - time.monotonic(), 0.01)
+    try:
+        return process.communicate(timeout=remaining)
+    except subprocess.TimeoutExpired as error:
+        _close_controller_pipes(process)
+        try:
+            process.kill()
         except ProcessLookupError:
             pass
-        return
-    process.kill()
+        remaining = max(deadline - time.monotonic(), 0.01)
+        try:
+            process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            pass
+        return error.stdout, error.stderr
+    finally:
+        _close_controller_pipes(process)
+
+
+def _close_controller_pipes(process: subprocess.Popen[bytes]) -> None:
+    for pipe in (process.stdout, process.stderr):
+        if pipe is not None and not pipe.closed:
+            pipe.close()
 
 
 class _Redactor:
@@ -197,7 +317,9 @@ def _proxy_secrets(environment: Mapping[str, str]) -> tuple[str, ...]:
             parsed = urlsplit(value)
         except ValueError:
             continue
-        secrets.extend(unquote(credential) for credential in (parsed.username, parsed.password) if credential)
+        for credential in (parsed.username, parsed.password):
+            if credential:
+                secrets.extend((credential, unquote(credential)))
     return tuple(secrets)
 
 

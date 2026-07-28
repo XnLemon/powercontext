@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import math
 import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -135,6 +138,7 @@ class GitSource:
         if not isinstance(resolved, ResolvedGitSource):
             raise TypeError("resolved must be a ResolvedGitSource")
         self._validate_resolved_cache_provenance(resolved)
+        self._verify_resolved_pin(resolved)
         target_path = Path(os.path.abspath(Path(target).expanduser()))
         if os.path.lexists(target_path):
             raise GitSourceError(f"Materialization target must not exist: {target_path}")
@@ -162,9 +166,12 @@ class GitSource:
                 raise GitSourceError(
                     f"Materialized HEAD did not match resolved commit: expected {resolved.sha}, got {actual}"
                 )
-            if os.path.lexists(target_path):
-                raise GitSourceError(f"Materialization target must not exist: {target_path}")
-            temporary_path.rename(target_path)
+            try:
+                _atomic_publish_directory(temporary_path, target_path)
+            except FileExistsError as error:
+                raise GitSourceError(f"Materialization target already exists: {target_path}") from error
+            except OSError as error:
+                raise GitSourceError("Could not atomically publish materialized Git source") from error
             published = True
             return target_path
         finally:
@@ -177,6 +184,9 @@ class GitSource:
             raise GitSourceError("Resolved Git source belongs to a different cache root")
         if resolved.cache_path.parent != resolved.cache_root:
             raise GitSourceError("Resolved Git cache bucket is not a direct child of cache root")
+        expected_bucket_name = hashlib.sha256(resolved.source.encode("utf-8")).hexdigest()
+        if resolved.cache_path.name != expected_bucket_name:
+            raise GitSourceError("Resolved Git cache bucket does not match its source identity")
 
         if not os.path.lexists(self._cache_root):
             raise GitSourceError("Resolved Git cache root no longer exists")
@@ -244,6 +254,16 @@ class GitSource:
         )
         if bare.stdout.strip() != "true":
             raise GitSourceError(f"Git cache path is not a bare mirror: {cache_path}")
+
+        origin = self._git(
+            ["git", "config", "--get", "remote.origin.url"],
+            cwd=cache_path,
+            action="could not inspect existing Git mirror origin",
+            secrets=details.secrets,
+        )
+        origin_lines = origin.stdout.splitlines()
+        if len(origin_lines) != 1 or origin_lines[0] != details.normalized:
+            raise GitSourceError("Existing Git mirror origin did not match normalized source")
 
         self._git(
             self._transport_command(
@@ -349,6 +369,15 @@ class GitSource:
             action="could not pin resolved Git commit",
         )
 
+    def _verify_resolved_pin(self, resolved: ResolvedGitSource) -> None:
+        pin_ref = f"refs/powercontext-eval/pins/{resolved.sha}"
+        try:
+            actual = self._resolve_commit(resolved.cache_path, pin_ref)
+        except GitSourceError as error:
+            raise GitSourceError("Resolved Git pin is missing or invalid") from error
+        if actual != resolved.sha:
+            raise GitSourceError("Resolved Git pin did not match the resolved commit")
+
     def _transport_command(self, details: _SourceDetails, arguments: list[str]) -> list[str]:
         command = ["git"]
         if details.transport != details.normalized:
@@ -450,6 +479,53 @@ def _remove_owned_temporary_directory(path: Path) -> None:
         shutil.rmtree(path)
     else:
         path.unlink()
+
+
+def _atomic_publish_directory(source: Path, target: Path) -> None:
+    """Atomically publish ``source`` without ever replacing ``target``."""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    encoded_source = os.fsencode(source)
+    encoded_target = os.fsencode(target)
+
+    if sys.platform.startswith("linux"):
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise OSError(errno.ENOTSUP, "renameat2 is unavailable; refusing a non-atomic publication")
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(-100, encoded_source, -100, encoded_target, 1)
+    elif sys.platform == "darwin":
+        renamex_np = getattr(libc, "renamex_np", None)
+        if renamex_np is not None:
+            renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            renamex_np.restype = ctypes.c_int
+            result = renamex_np(encoded_source, encoded_target, 0x00000004)
+        else:
+            renameatx_np = getattr(libc, "renameatx_np", None)
+            if renameatx_np is None:
+                raise OSError(errno.ENOTSUP, "exclusive rename is unavailable; refusing a non-atomic publication")
+            renameatx_np.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            renameatx_np.restype = ctypes.c_int
+            result = renameatx_np(-2, encoded_source, -2, encoded_target, 0x00000004)
+    else:
+        raise OSError(errno.ENOTSUP, "exclusive rename is unsupported on this platform")
+
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), target)
 
 
 __all__ = ["GitSource", "ResolvedGitSource"]
