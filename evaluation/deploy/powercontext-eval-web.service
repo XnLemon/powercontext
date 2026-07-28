@@ -8,6 +8,7 @@ User=rongfeng.frf
 Group=users
 WorkingDirectory=/data/powercontext-eval/deploy/powercontext
 EnvironmentFile=/data/powercontext-eval/config/evaluation-console.env
+Environment=UV_CACHE_DIR=/data/powercontext-eval/cache/uv
 ExecStart=/data/powercontext-eval/bin/uv run --project evaluation powercontext-eval web
 Restart=on-failure
 RestartSec=5s

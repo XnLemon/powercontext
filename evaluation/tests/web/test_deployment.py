@@ -50,6 +50,12 @@ def test_systemd_units_run_the_pinned_checkout_as_the_m0_operator() -> None:
         ) in unit
 
 
+def test_systemd_units_keep_uv_cache_inside_the_writable_evaluation_root() -> None:
+    for unit_name in ("powercontext-eval-web.service", "powercontext-eval-worker.service"):
+        unit = (DEPLOY / unit_name).read_text()
+        assert "Environment=UV_CACHE_DIR=/data/powercontext-eval/cache/uv" in unit.splitlines()
+
+
 def test_systemd_units_enforce_role_appropriate_security_boundaries() -> None:
     web = _unit("powercontext-eval-web.service")
     worker = _unit("powercontext-eval-worker.service")
