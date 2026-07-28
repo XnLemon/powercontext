@@ -173,6 +173,36 @@ def test_render_rejects_nested_model_copy_extra_without_leaking_value() -> None:
     assert "nested-do-not-leak" not in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    "sensitive_key",
+    [
+        "apiKey",
+        "APIKey",
+        "accessToken",
+        "authToken",
+        "clientSecret",
+        "refresh_token",
+        "Authorization",
+    ],
+)
+def test_render_rejects_camel_case_sensitive_configuration_without_leaking_value(sensitive_key: str) -> None:
+    secret_value = "camel-case-do-not-leak"
+    bundle = _valid_bundle().model_copy(update={"configuration": {sensitive_key: secret_value}})
+    with pytest.raises(InvalidReportBundle) as caught:
+        render_report(bundle)
+    assert secret_value not in str(caught.value)
+    assert secret_value not in render_report(_valid_bundle())
+
+
+def test_similar_non_sensitive_configuration_names_remain_reportable() -> None:
+    bundle = _valid_bundle().model_copy(
+        update={"configuration": {"tokenizer_version": "v2", "environmental_mode": "controlled"}}
+    )
+    report = render_report(bundle)
+    assert "tokenizer_version" in report
+    assert "environmental_mode" in report
+
+
 def test_renderer_has_no_process_network_time_or_filesystem_side_effects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

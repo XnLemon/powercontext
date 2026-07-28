@@ -55,7 +55,7 @@ class ReportBundle(BaseModel):
     def reject_sensitive_mapping_keys(cls, values: Mapping[str, str]) -> Mapping[str, str]:
         """Keep credential-shaped fields and environment dumps out of retained reports."""
 
-        forbidden_segments = {
+        forbidden_words = {
             "api_key",
             "authorization",
             "cookie",
@@ -68,10 +68,30 @@ class ReportBundle(BaseModel):
             "secret",
             "token",
         }
+        forbidden_compounds = {
+            "accesskey",
+            "accesstoken",
+            "apikey",
+            "authkey",
+            "authtoken",
+            "clientsecret",
+            "privatekey",
+            "refreshtoken",
+            "secretkey",
+        }
         for key in values:
-            normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
-            segments = set(normalized.split("_"))
-            if normalized in forbidden_segments or segments & forbidden_segments:
+            words = [
+                word.casefold()
+                for chunk in re.split(r"[^A-Za-z0-9]+", key)
+                for word in re.findall(r"[A-Z]+(?=[A-Z][a-z]|[0-9]|$)|[A-Z]?[a-z]+|[0-9]+", chunk)
+            ]
+            collapsed = "".join(words)
+            adjacent_compounds = {words[index] + words[index + 1] for index in range(len(words) - 1)}
+            if (
+                set(words) & forbidden_words
+                or collapsed in forbidden_compounds
+                or adjacent_compounds & forbidden_compounds
+            ):
                 raise ValueError("Report mapping contains a forbidden field name")
         return values
 
