@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
+import stat
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
@@ -73,21 +77,31 @@ class EvaluationWorker:
 
     def run_once(self) -> bool:
         """Run the next task, returning whether one was claimed."""
-        task = self._store.claim_next(self._worker_id, now=self._clock())
-        if task is None:
-            return False
+        with _nonblocking_worker_lock(self._config.database_path) as locked:
+            if not locked:
+                return False
+            now = self._clock()
+            self._store.recover_expired(now=now)
+            task = self._store.claim_next(self._worker_id, now=now)
+            if task is None:
+                return False
+            return self._run_claimed(task)
 
+    def _run_claimed(self, task: TaskRecord) -> bool:
         ownership_lost = threading.Event()
         heartbeat_stop = threading.Event()
-        heartbeat = self._thread_factory(
-            target=self._heartbeat,
-            daemon=True,
-            name=f"evaluation-heartbeat-{task.task_id}",
-            args=(task.task_id, heartbeat_stop, ownership_lost),
-        )
-        heartbeat.start()
+        heartbeat: ThreadLike | None = None
+        heartbeat_started = False
         phase: TaskPhase | None = None
         try:
+            heartbeat = self._thread_factory(
+                target=self._heartbeat,
+                daemon=True,
+                name=f"evaluation-heartbeat-{task.task_id}",
+                args=(task.task_id, heartbeat_stop, ownership_lost),
+            )
+            heartbeat.start()
+            heartbeat_started = True
             layout = EvaluationPaths(self._config.run_root, task.task_id)
             work_dir = self._config.run_root / "work" / task.task_id
             if os.path.lexists(layout.run_artifacts) or os.path.lexists(work_dir):
@@ -123,12 +137,12 @@ class EvaluationWorker:
             self._fail(task, _safe_failure(error, phase), ownership_lost)
         finally:
             heartbeat_stop.set()
-            heartbeat.join()
+            if heartbeat_started and heartbeat is not None:
+                heartbeat.join()
         return True
 
     def run_forever(self) -> None:
-        """Recover a dead predecessor once, then poll until stopped."""
-        self._store.recover_expired(now=self._clock())
+        """Poll until stopped, recovering an expired predecessor before each claim."""
         while not self._stop.is_set():
             if not self.run_once():
                 self._sleep(self._config.poll_seconds)
@@ -169,15 +183,26 @@ class EvaluationWorker:
         layout = EvaluationPaths(self._config.run_root, task.task_id)
         if result.run_id != task.task_id:
             raise InvalidReportBundle("Runner returned a mismatched run ID")
+        expected_report = layout.run_artifacts / "report.md"
         try:
-            run_dir = layout.run_artifacts.resolve(strict=True)
-            report = result.report_path.resolve(strict=True)
-            report.relative_to(run_dir)
-        except (FileNotFoundError, OSError, RuntimeError, ValueError):
+            if result.report_path != expected_report:
+                raise InvalidReportBundle("Runner returned an unexpected report path")
+            metadata = expected_report.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                raise InvalidReportBundle("Runner report is not a regular file")
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            descriptor = os.open(expected_report, flags)
+            try:
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                    raise InvalidReportBundle("Runner report changed during validation")
+            finally:
+                os.close(descriptor)
+        except (FileNotFoundError, OSError, RuntimeError, ValueError, InvalidReportBundle):
             raise InvalidReportBundle("Runner returned an unsafe report path") from None
         return TaskResult(
             artifact_dir=os.fspath(layout.run_artifacts.relative_to(self._config.run_root)),
-            report_path=os.fspath(report.relative_to(self._config.run_root.resolve())),
+            report_path=os.fspath(expected_report.relative_to(self._config.run_root)),
             off_resolved=result.off_resolved,
             on_resolved=result.on_resolved,
         )
@@ -189,6 +214,35 @@ class EvaluationWorker:
             self._store.fail(task.task_id, self._worker_id, failure, now=self._clock())
         except (TaskOwnershipError, TaskConflict):
             ownership_lost.set()
+
+
+@contextmanager
+def _nonblocking_worker_lock(database_path: Path) -> Iterator[bool]:
+    lock_path = database_path.with_name(f"{database_path.name}.worker.lock")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    locked = False
+    try:
+        metadata = lock_path.lstat()
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino)
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise RuntimeError("Evaluation worker lock is unsafe")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        locked = True
+        yield True
+    finally:
+        if locked:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def _safe_failure(error: Exception, phase: TaskPhase | None) -> SafeFailure:

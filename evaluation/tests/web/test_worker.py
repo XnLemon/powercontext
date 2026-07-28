@@ -268,6 +268,11 @@ class RecordingThread:
         self.joined = True
 
 
+class StartFailingThread(RecordingThread):
+    def start(self) -> None:
+        raise RuntimeError("thread start leaked-secret")
+
+
 @pytest.mark.parametrize("succeeds", [True, False])
 def test_heartbeat_thread_stops_and_joins(succeeds: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
@@ -298,6 +303,43 @@ def test_heartbeat_thread_stops_and_joins(succeeds: bool, monkeypatch: pytest.Mo
     assert threads[0].args[1].is_set()
 
 
+def test_heartbeat_start_failure_is_safely_persisted_and_run_forever_continues(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    task = _create(store)
+    waits = []
+    runner_calls = []
+    worker: EvaluationWorker
+
+    def runner(config: Any, *, on_phase: Any) -> MinimalRunResult:
+        runner_calls.append(config)
+        pytest.fail("runner should not run")
+
+    def thread_factory(**kwargs: Any) -> StartFailingThread:
+        return StartFailingThread(**kwargs)
+
+    def wait(seconds: float) -> None:
+        waits.append(seconds)
+        worker.stop()
+
+    worker = EvaluationWorker(
+        config,
+        store,
+        runner=runner,
+        thread_factory=thread_factory,
+        clock=lambda: NOW,
+        sleep=wait,
+    )
+    worker.run_forever()
+
+    failed = store.get(task.task_id)
+    assert failed.status is TaskStatus.FAILED
+    assert failed.failure_category is FailureCategory.INTERNAL
+    assert failed.failure_summary == "The evaluation worker failed unexpectedly. Inspect the retained m0 logs."
+    assert runner_calls == []
+    assert waits == [config.poll_seconds]
+
+
 def test_ownership_loss_prevents_stale_worker_mutation(tmp_path: Path) -> None:
     config = _config(tmp_path, lease_seconds=1)
     store = _store(config)
@@ -315,6 +357,62 @@ def test_ownership_loss_prevents_stale_worker_mutation(tmp_path: Path) -> None:
     assert record.status is TaskStatus.INTERRUPTED
     assert record.phase is None
     assert record.result is None
+
+
+def test_host_lock_prevents_recovery_and_second_runner_until_stale_process_releases(tmp_path: Path) -> None:
+    config = _config(tmp_path, lease_seconds=1)
+    store = _store(config)
+    first_task = _create(store, key="first-task")
+    second_task = _create(store, key="second-task")
+    later = NOW + timedelta(seconds=2)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def stale_runner(run_config: Any, *, on_phase: Any) -> MinimalRunResult:
+        calls.append(("first", run_config.run_id))
+        entered.set()
+        assert release.wait(timeout=2)
+        raise RuntimeError("stale runner returned")
+
+    def successor_runner(run_config: Any, *, on_phase: Any) -> MinimalRunResult:
+        calls.append(("second", run_config.run_id))
+        raise RuntimeError("successor ran")
+
+    def no_heartbeat(**kwargs: Any) -> RecordingThread:
+        return RecordingThread(**kwargs)
+
+    first_times = iter((NOW, later))
+    first = EvaluationWorker(
+        config,
+        store,
+        runner=stale_runner,
+        worker_id="first",
+        clock=lambda: next(first_times),
+        thread_factory=no_heartbeat,
+    )
+    successor = EvaluationWorker(
+        config,
+        store,
+        runner=successor_runner,
+        worker_id="successor",
+        clock=lambda: later,
+        sleep=lambda seconds: successor.stop(),
+    )
+    thread = threading.Thread(target=first.run_once)
+    thread.start()
+    assert entered.wait(timeout=2)
+
+    successor.run_forever()
+    assert store.get(first_task.task_id).status is TaskStatus.RUNNING
+    assert calls == [("first", first_task.task_id)]
+
+    release.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert successor.run_once() is True
+    assert store.get(first_task.task_id).status is TaskStatus.INTERRUPTED
+    assert calls == [("first", first_task.task_id), ("second", second_task.task_id)]
 
 
 @pytest.mark.parametrize(
@@ -339,6 +437,41 @@ def test_invalid_runner_result_fails_safely(
 
     assert EvaluationWorker(config, store, runner=lambda *args, **kwargs: actual, clock=lambda: NOW).run_once() is True
     failed = store.get(task.task_id)
+    assert failed.failure_category is FailureCategory.REPORT_GENERATION
+    assert failed.failure_summary == "Evaluation report validation failed."
+
+
+@pytest.mark.parametrize("invalid_kind", ["directory", "unrelated", "symlink"])
+def test_runner_report_must_be_exact_regular_canonical_report(
+    invalid_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    task = _create(store)
+
+    def runner(run_config: Any, *, on_phase: Any) -> MinimalRunResult:
+        run_dir = config.run_root / "runs" / task.task_id
+        run_dir.mkdir(parents=True)
+        expected = run_dir / "report.md"
+        if invalid_kind == "directory":
+            expected.mkdir()
+            returned = expected
+        elif invalid_kind == "unrelated":
+            returned = run_dir / "other.md"
+            returned.write_text("other")
+        else:
+            target = run_dir / "actual.md"
+            target.write_text("actual")
+            expected.symlink_to(target)
+            returned = expected
+        return MinimalRunResult(task.task_id, returned, True, True)
+
+    monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
+    assert EvaluationWorker(config, store, runner=runner, clock=lambda: NOW).run_once() is True
+    failed = store.get(task.task_id)
+    assert failed.status is TaskStatus.FAILED
     assert failed.failure_category is FailureCategory.REPORT_GENERATION
     assert failed.failure_summary == "Evaluation report validation failed."
 
