@@ -7,6 +7,7 @@ import errno
 import hashlib
 import math
 import os
+import platform
 import re
 import shutil
 import stat
@@ -26,6 +27,12 @@ _SCP_STYLE_URL = re.compile(r"^(?:(?P<user>[^/@:\s]+)@)?(?P<host>[^/:\s]+):(?P<p
 _GIT_ENVIRONMENT = {
     "GCM_INTERACTIVE": "never",
     "GIT_TERMINAL_PROMPT": "0",
+}
+_LINUX_RENAMEAT2_SYSCALLS = {
+    "aarch64": 276,
+    "amd64": 316,
+    "arm64": 276,
+    "x86_64": 316,
 }
 
 
@@ -255,15 +262,7 @@ class GitSource:
         if bare.stdout.strip() != "true":
             raise GitSourceError(f"Git cache path is not a bare mirror: {cache_path}")
 
-        origin = self._git(
-            ["git", "config", "--get", "remote.origin.url"],
-            cwd=cache_path,
-            action="could not inspect existing Git mirror origin",
-            secrets=details.secrets,
-        )
-        origin_lines = origin.stdout.splitlines()
-        if len(origin_lines) != 1 or origin_lines[0] != details.normalized:
-            raise GitSourceError("Existing Git mirror origin did not match normalized source")
+        self._validate_mirror_origin(details, cache_path)
 
         self._git(
             self._transport_command(
@@ -280,6 +279,32 @@ class GitSource:
             action="could not refresh Git mirror",
             secrets=details.secrets,
         )
+
+    def _validate_mirror_origin(self, details: _SourceDetails, cache_path: Path) -> None:
+        try:
+            result = self._runner.run(
+                ["git", "config", "--get-all", "remote.origin.url"],
+                cwd=cache_path,
+                timeout=self._command_timeout,
+                env=_GIT_ENVIRONMENT,
+                secrets=details.secrets,
+            )
+        except CommandError:
+            raise GitSourceError("Existing Git mirror origin was missing or invalid") from None
+
+        origin_lines = result.stdout.splitlines()
+        if len(origin_lines) != 1 or not origin_lines[0]:
+            raise GitSourceError("Existing Git mirror origin was missing or invalid")
+        try:
+            origin_details = _source_details(origin_lines[0])
+        except GitSourceError:
+            raise GitSourceError("Existing Git mirror origin was missing or invalid") from None
+        if (
+            origin_details.transport != origin_details.normalized
+            or origin_details.has_embedded_credentials
+            or origin_details.normalized != details.normalized
+        ):
+            raise GitSourceError("Existing Git mirror origin did not match normalized source")
 
     def _validate_cache_location(self, cache_path: Path) -> None:
         if cache_path.parent != self._cache_root:
@@ -490,17 +515,31 @@ def _atomic_publish_directory(source: Path, target: Path) -> None:
 
     if sys.platform.startswith("linux"):
         renameat2 = getattr(libc, "renameat2", None)
-        if renameat2 is None:
-            raise OSError(errno.ENOTSUP, "renameat2 is unavailable; refusing a non-atomic publication")
-        renameat2.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        renameat2.restype = ctypes.c_int
-        result = renameat2(-100, encoded_source, -100, encoded_target, 1)
+        if renameat2 is not None:
+            renameat2.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            renameat2.restype = ctypes.c_int
+            result = renameat2(-100, encoded_source, -100, encoded_target, 1)
+        else:
+            syscall_number = _LINUX_RENAMEAT2_SYSCALLS.get(platform.machine().lower())
+            syscall = getattr(libc, "syscall", None)
+            if syscall_number is None or syscall is None:
+                raise OSError(errno.ENOTSUP, "renameat2 is unavailable; refusing a non-atomic publication")
+            syscall.argtypes = [
+                ctypes.c_long,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            syscall.restype = ctypes.c_long
+            result = syscall(syscall_number, -100, encoded_source, -100, encoded_target, 1)
     elif sys.platform == "darwin":
         renamex_np = getattr(libc, "renamex_np", None)
         if renamex_np is not None:

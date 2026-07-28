@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import errno
+import os
+import platform
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -423,6 +426,111 @@ def test_atomic_publish_directory_never_replaces_existing_target(tmp_path: Path)
     assert (temporary / "candidate.txt").read_text(encoding="utf-8") == "candidate\n"
 
 
+@pytest.mark.parametrize(
+    ("architecture", "syscall_number"),
+    [
+        ("x86_64", 316),
+        ("amd64", 316),
+        ("aarch64", 276),
+        ("arm64", 276),
+    ],
+)
+def test_linux_atomic_publish_falls_back_to_raw_renameat2_syscall(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    architecture: str,
+    syscall_number: int,
+) -> None:
+    temporary = tmp_path / "temporary"
+    target = tmp_path / "target"
+    libc = FakeLibcWithoutRenameat2()
+    monkeypatch.setattr(git_source_module.sys, "platform", "linux")
+    monkeypatch.setattr(platform, "machine", lambda: architecture)
+    monkeypatch.setattr(git_source_module.ctypes, "CDLL", lambda *_args, **_kwargs: libc)
+
+    git_source_module._atomic_publish_directory(temporary, target)
+
+    assert libc.syscall.calls == [
+        (
+            syscall_number,
+            -100,
+            os.fsencode(temporary),
+            -100,
+            os.fsencode(target),
+            1,
+        )
+    ]
+    assert libc.syscall.argtypes == [
+        git_source_module.ctypes.c_long,
+        git_source_module.ctypes.c_int,
+        git_source_module.ctypes.c_char_p,
+        git_source_module.ctypes.c_int,
+        git_source_module.ctypes.c_char_p,
+        git_source_module.ctypes.c_uint,
+    ]
+    assert libc.syscall.restype is git_source_module.ctypes.c_long
+
+
+def test_linux_raw_renameat2_syscall_preserves_existing_target_on_eexist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    (temporary / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+    marker = target / "owner.txt"
+    marker.write_text("competitor\n", encoding="utf-8")
+    original_inode = target.stat().st_ino
+    libc = FakeLibcWithoutRenameat2(returncode=-1, error_number=errno.EEXIST)
+    monkeypatch.setattr(git_source_module.sys, "platform", "linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(git_source_module.ctypes, "CDLL", lambda *_args, **_kwargs: libc)
+
+    with pytest.raises(FileExistsError):
+        git_source_module._atomic_publish_directory(temporary, target)
+
+    assert target.stat().st_ino == original_inode
+    assert marker.read_text(encoding="utf-8") == "competitor\n"
+    assert temporary.is_dir()
+    assert (temporary / "candidate.txt").read_text(encoding="utf-8") == "candidate\n"
+
+
+@pytest.mark.parametrize("error_number", [errno.ENOSYS, errno.EINVAL])
+def test_linux_raw_renameat2_syscall_fails_closed_on_kernel_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+) -> None:
+    libc = FakeLibcWithoutRenameat2(returncode=-1, error_number=error_number)
+    monkeypatch.setattr(git_source_module.sys, "platform", "linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(git_source_module.ctypes, "CDLL", lambda *_args, **_kwargs: libc)
+
+    with pytest.raises(OSError) as caught:
+        git_source_module._atomic_publish_directory(tmp_path / "temporary", tmp_path / "target")
+
+    assert caught.value.errno == error_number
+    assert len(libc.syscall.calls) == 1
+
+
+def test_linux_raw_renameat2_syscall_fails_closed_on_unknown_architecture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    libc = FakeLibcWithoutRenameat2()
+    monkeypatch.setattr(git_source_module.sys, "platform", "linux")
+    monkeypatch.setattr(platform, "machine", lambda: "mystery-cpu")
+    monkeypatch.setattr(git_source_module.ctypes, "CDLL", lambda *_args, **_kwargs: libc)
+
+    with pytest.raises(OSError) as caught:
+        git_source_module._atomic_publish_directory(tmp_path / "temporary", tmp_path / "target")
+
+    assert caught.value.errno == errno.ENOTSUP
+    assert libc.syscall.calls == []
+
+
 def test_materialize_atomic_publish_race_preserves_competing_target(
     tmp_path: Path,
     git_fixture: GitFixture,
@@ -477,6 +585,54 @@ def test_resolve_rejects_existing_mirror_for_a_different_origin_without_fetching
 
     assert not any("fetch" in command for command in runner.commands)
     assert (cache_path / "config").read_bytes() == config_before
+    assert git(cache_path, "show-ref").stdout == refs_before
+
+
+def test_resolve_rejects_existing_mirror_with_multiple_origins_without_fetching(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    second_fixture_root = tmp_path / "second-fixture"
+    second_fixture_root.mkdir()
+    second_fixture = create_git_fixture(second_fixture_root)
+    runner = RejectFetchRunner()
+    source = GitSource(cache_root=tmp_path / "cache", runner=runner)
+    cache_path = source.cache_path_for(git_fixture.remote)
+    cache_path.parent.mkdir()
+    git(tmp_path, "clone", "--mirror", str(second_fixture.remote), str(cache_path))
+    git(cache_path, "config", "--add", "remote.origin.url", str(git_fixture.remote.resolve()))
+    config_before = (cache_path / "config").read_bytes()
+    refs_before = git(cache_path, "show-ref").stdout
+
+    with pytest.raises(GitSourceError, match="origin") as caught:
+        source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+
+    assert caught.value.__cause__ is None
+    assert ("git", "config", "--get-all", "remote.origin.url") in runner.commands
+    assert not any("fetch" in command for command in runner.commands)
+    assert (cache_path / "config").read_bytes() == config_before
+    assert git(cache_path, "show-ref").stdout == refs_before
+
+
+def test_resolve_rejects_existing_mirror_without_an_origin_and_discards_command_result(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+) -> None:
+    runner = RejectFetchRunner()
+    source = GitSource(cache_root=tmp_path / "cache", runner=runner)
+    cache_path = source.cache_path_for(git_fixture.remote)
+    cache_path.parent.mkdir()
+    git(tmp_path, "clone", "--mirror", str(git_fixture.remote), str(cache_path))
+    git(cache_path, "config", "--unset-all", "remote.origin.url")
+    refs_before = git(cache_path, "show-ref").stdout
+
+    with pytest.raises(GitSourceError, match="origin") as caught:
+        source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+
+    assert caught.value.__cause__ is None
+    assert not hasattr(caught.value, "result")
+    assert ("git", "config", "--get-all", "remote.origin.url") in runner.commands
+    assert not any("fetch" in command for command in runner.commands)
     assert git(cache_path, "show-ref").stdout == refs_before
 
 
@@ -573,6 +729,25 @@ class RejectFetchRunner(RecordingProcessRunner):
             check=check,
             secrets=secrets,
         )
+
+
+class FakeCFunction:
+    def __init__(self, *, returncode: int = 0, error_number: int = 0) -> None:
+        self._returncode = returncode
+        self._error_number = error_number
+        self.calls: list[tuple[object, ...]] = []
+        self.argtypes: list[object] | None = None
+        self.restype: object | None = None
+
+    def __call__(self, *arguments: object) -> int:
+        self.calls.append(arguments)
+        git_source_module.ctypes.set_errno(self._error_number)
+        return self._returncode
+
+
+class FakeLibcWithoutRenameat2:
+    def __init__(self, *, returncode: int = 0, error_number: int = 0) -> None:
+        self.syscall = FakeCFunction(returncode=returncode, error_number=error_number)
 
 
 class ControlledGitRunner(ProcessRunner):
