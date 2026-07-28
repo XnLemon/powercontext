@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePath
 from types import MappingProxyType
-from typing import Any
+from typing import Any, BinaryIO
 
 from powercontext_eval.models import Arm
 
@@ -641,6 +641,63 @@ class ArtifactStore:
                 os.close(temporary_fd)
             os.close(parent_fd)
         return self.root.joinpath(*parts)
+
+    def write_stream(
+        self,
+        relative_path: str | os.PathLike[str],
+        source: BinaryIO,
+        *,
+        chunk_size: int = 64 * 1024,
+    ) -> Path:
+        """Atomically publish a bounded-memory stream after incremental secret scanning."""
+
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        parent_fd, parts = self._open_parent(relative_path, create=True)
+        temporary_fd = -1
+        temporary_name = ""
+        overlap = max((len(value) for value in self._forbidden), default=1) - 1
+        tail = b""
+        try:
+            temporary_fd, temporary_name = self._create_temp(parent_fd, parts[-1])
+            while True:
+                chunk = source.read(chunk_size)
+                if not chunk:
+                    break
+                if not isinstance(chunk, bytes):
+                    raise TypeError("Artifact stream must yield bytes")
+                scanned = tail + chunk
+                self._reject_secrets(scanned)
+                self._write_all_unflushed(temporary_fd, chunk)
+                tail = scanned[-overlap:] if overlap else b""
+            os.fsync(temporary_fd)
+            self._publish(parent_fd, parts, temporary_fd, temporary_name, exclusive=False)
+        except ArtifactDurabilityUnknown:
+            raise
+        except BaseException:
+            if temporary_fd >= 0:
+                self._unlink_inode(
+                    parent_fd,
+                    temporary_name,
+                    os.fstat(temporary_fd),
+                    excluded_names=frozenset({parts[-1]}),
+                )
+            raise
+        finally:
+            if temporary_fd >= 0:
+                os.close(temporary_fd)
+            os.close(parent_fd)
+        return self.root.joinpath(*parts)
+
+    @staticmethod
+    def _write_all_unflushed(descriptor: int, data: bytes) -> None:
+        view = memoryview(data)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise OSError("Artifact stream write made no progress")
+            written += count
 
     def write_bytes(self, relative_path: str | os.PathLike[str], data: bytes) -> Path:
         """Atomically write exact bytes after path and secret validation."""

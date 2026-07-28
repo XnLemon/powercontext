@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, BinaryIO, Protocol
 
 from powercontext_eval.artifacts import ArtifactStore
 from powercontext_eval.errors import CommandError, PowerContextEvalError
@@ -91,6 +92,7 @@ class CodexProcessRunner(Protocol):
         check: bool = True,
         secrets: Sequence[str] = (),
         input_bytes: bytes | None = None,
+        stdout_sink: BinaryIO | None = None,
     ) -> CommandResult: ...
 
 
@@ -115,34 +117,58 @@ class CodexRunner:
 
         if not isinstance(prompt, bytes):
             raise TypeError("prompt must be exact bytes")
-        try:
-            result = self._runner.run(
-                invocation.argv(),
-                cwd=cwd,
-                timeout=timeout,
-                env=env,
-                secrets=secrets,
-                input_bytes=prompt,
-            )
-        except CommandError as error:
-            self._retain_process_result(store, error.result)
-            raise CodexInfrastructureError(_command_error_kind(error)) from None
+        with tempfile.TemporaryFile("w+b") as event_stream:
+            try:
+                result = self._runner.run(
+                    invocation.argv(),
+                    cwd=cwd,
+                    timeout=timeout,
+                    env=env,
+                    secrets=secrets,
+                    input_bytes=prompt,
+                    stdout_sink=event_stream,
+                )
+            except CommandError as error:
+                self._append_compat_stdout(event_stream, error.result.stdout, secrets)
+                self._retain_process_result(store, error.result, event_stream, secrets)
+                raise CodexInfrastructureError(_command_error_kind(error)) from None
 
-        self._retain_process_result(store, result)
-        try:
-            events = _parse_jsonl(result.stdout)
-            last_message = _last_agent_message(events)
-            usage = _last_usage(events)
-        except (ValueError, TypeError) as error:
-            raise CodexInfrastructureError(f"Codex JSONL is malformed: {error}") from None
+            self._append_compat_stdout(event_stream, result.stdout, secrets)
+            self._retain_process_result(store, result, event_stream, secrets)
+            try:
+                event_stream.seek(0)
+                last_message, usage = _summarize_jsonl_stream(event_stream)
+            except (ValueError, TypeError) as error:
+                raise CodexInfrastructureError(f"Codex JSONL is malformed: {error}") from None
 
         store.write_text("codex/last-message.txt", last_message)
         store.write_json("codex/usage.json", dict(usage) if usage is not None else {"status": "N/A"})
         return CodexOutcome(last_message, usage)
 
     @staticmethod
-    def _retain_process_result(store: ArtifactStore, result: CommandResult) -> None:
-        store.write_bytes("codex/events.jsonl", result.stdout.encode("utf-8"))
+    def _append_compat_stdout(event_stream: BinaryIO, stdout: str, secrets: Sequence[str]) -> None:
+        encoded = stdout.encode("utf-8")
+        if _contains_secret(encoded, secrets):
+            raise CodexInfrastructureError("Codex output contained an unredacted secret")
+        if encoded:
+            event_stream.write(encoded)
+
+    @staticmethod
+    def _retain_process_result(
+        store: ArtifactStore,
+        result: CommandResult,
+        event_stream: BinaryIO,
+        secrets: Sequence[str],
+    ) -> None:
+        stderr = result.stderr.encode("utf-8")
+        if _contains_secret(stderr, secrets):
+            raise CodexInfrastructureError("Codex output contained an unredacted secret")
+        event_stream.flush()
+        event_stream.seek(0)
+        if _stream_contains_secret(event_stream, secrets):
+            raise CodexInfrastructureError("Codex output contained an unredacted secret")
+        event_stream.seek(0)
+        store.write_stream("codex/events.jsonl", event_stream)
         store.write_bytes("codex/stderr.txt", result.stderr.encode("utf-8"))
 
 
@@ -167,6 +193,71 @@ def _parse_jsonl(raw: str) -> tuple[dict[str, Any], ...]:
     if not events:
         raise ValueError("empty stream")
     return tuple(events)
+
+
+def _summarize_jsonl_stream(stream: BinaryIO) -> tuple[str, Mapping[str, int] | None]:
+    last_message: str | None = None
+    usage: Mapping[str, int] | None = None
+    saw_event = False
+    for line_number, raw_line in enumerate(stream, start=1):
+        saw_event = True
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(f"invalid UTF-8 on line {line_number}") from None
+        if not line.endswith("\n") or not line.rstrip("\n"):
+            raise ValueError(f"invalid line framing on line {line_number}")
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            raise ValueError(f"invalid JSON on line {line_number}") from None
+        if not isinstance(value, dict):
+            raise TypeError(f"line {line_number} is not an object")
+        direct_message = value.get("message")
+        if value.get("type") == "agent_message" and isinstance(direct_message, str):
+            last_message = direct_message
+        item = value.get("item")
+        if (
+            value.get("type") == "item.completed"
+            and isinstance(item, dict)
+            and item.get("type") == "agent_message"
+            and isinstance(item.get("text"), str)
+        ):
+            last_message = item["text"]
+        if value.get("type") == "turn.completed":
+            raw_usage = value.get("usage")
+            if raw_usage is None:
+                usage = None
+            elif not isinstance(raw_usage, dict):
+                raise TypeError("turn.completed usage is not an object")
+            else:
+                parsed: dict[str, int] = {}
+                for key, count in raw_usage.items():
+                    if not isinstance(key, str) or isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                        raise ValueError("turn.completed usage must contain non-negative integer values")
+                    parsed[key] = count
+                usage = MappingProxyType(parsed)
+    if not saw_event:
+        raise ValueError("empty stream")
+    if last_message is None:
+        raise ValueError("no completed agent message")
+    return last_message, usage
+
+
+def _contains_secret(data: bytes, secrets: Sequence[str]) -> bool:
+    return any(secret and secret.encode("utf-8") in data for secret in secrets)
+
+
+def _stream_contains_secret(stream: BinaryIO, secrets: Sequence[str], *, chunk_size: int = 64 * 1024) -> bool:
+    encoded = tuple(secret.encode("utf-8") for secret in secrets if secret)
+    overlap = max((len(secret) for secret in encoded), default=1) - 1
+    tail = b""
+    while chunk := stream.read(chunk_size):
+        scanned = tail + chunk
+        if any(secret in scanned for secret in encoded):
+            return True
+        tail = scanned[-overlap:] if overlap else b""
+    return False
 
 
 def _last_agent_message(events: tuple[dict[str, Any], ...]) -> str:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import signal
 import sys
+import tempfile
 import time
 from collections.abc import Sequence
 from dataclasses import FrozenInstanceError
@@ -95,6 +96,19 @@ def test_run_writes_exact_input_bytes_to_stdin(tmp_path: Path) -> None:
     )
 
     assert result.stdout.encode("utf-8") == payload
+
+
+def test_run_streams_stdout_to_binary_sink_without_retaining_it_in_memory(tmp_path: Path) -> None:
+    payload_size = 2 * 1024 * 1024
+    with tempfile.TemporaryFile("w+b") as sink:
+        result = ProcessRunner().run(
+            [sys.executable, "-c", f"import sys; sys.stdout.buffer.write(b'x' * {payload_size})"],
+            cwd=tmp_path,
+            stdout_sink=sink,
+        )
+        sink.seek(0, os.SEEK_END)
+        assert sink.tell() == payload_size
+    assert result.stdout == ""
 
 
 def test_command_result_is_frozen() -> None:

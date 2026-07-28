@@ -9,6 +9,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import unquote, urlsplit
 
 from powercontext_eval.errors import CommandFailed, CommandNotFound, CommandTimedOut
@@ -72,12 +73,15 @@ class ProcessRunner:
         check: bool = True,
         secrets: Sequence[str] = (),
         input_bytes: bytes | None = None,
+        stdout_sink: BinaryIO | None = None,
     ) -> CommandResult:
         """Execute a command without a shell and return redacted output."""
 
         validated_argv = _validate_argv(argv)
         if input_bytes is not None and not isinstance(input_bytes, bytes):
             raise TypeError("input_bytes must be bytes or None")
+        if stdout_sink is not None and not hasattr(stdout_sink, "write"):
+            raise TypeError("stdout_sink must be a writable binary file or None")
         cwd_text = os.fspath(cwd)
         if "\0" in cwd_text:
             raise ValueError("cwd must not contain NUL")
@@ -89,7 +93,7 @@ class ProcessRunner:
                 validated_argv,
                 cwd=cwd_text,
                 env=child_env,
-                stdout=subprocess.PIPE,
+                stdout=stdout_sink if stdout_sink is not None else subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.PIPE if input_bytes is not None else None,
                 start_new_session=os.name == "posix",

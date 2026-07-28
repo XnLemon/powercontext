@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import ipaddress
 import json
 import os
@@ -16,10 +18,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import quote, quote_plus, urlsplit
 
 from powercontext_eval.artifacts import ArtifactStore
-from powercontext_eval.codex import EXPECTED_CODEX_VERSION, CodexInvocation, CodexOutcome, CodexRunner
+from powercontext_eval.codex import (
+    EXPECTED_CODEX_VERSION,
+    CodexInfrastructureError,
+    CodexInvocation,
+    CodexOutcome,
+    CodexRunner,
+)
 from powercontext_eval.errors import PowerContextEvalError
 from powercontext_eval.models import Arm
 from powercontext_eval.process import CommandResult, ProcessRunner
@@ -28,6 +36,8 @@ PLUGIN_ID = "powercontext@powercontext"
 _SAFE_RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _CONTAINER_UID_GID = "2950:100"
+LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
+_PLUGIN_RELATIVE = Path("integrations/codex/plugins/powercontext")
 
 
 class InvalidTreatment(PowerContextEvalError):
@@ -36,6 +46,80 @@ class InvalidTreatment(PowerContextEvalError):
 
 class UnsafeSutConfiguration(PowerContextEvalError):
     """A SUT value could escape its owned resource boundary."""
+
+
+@dataclass(frozen=True)
+class SourceProvenance:
+    checkout_sha: str
+    plugin_version: str
+    plugin_manifest_sha256: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "checkout_sha": self.checkout_sha,
+            "plugin_version": self.plugin_version,
+            "plugin_manifest_sha256": self.plugin_manifest_sha256,
+        }
+
+
+def loopback_proxy_environment(relay_url: str) -> dict[str, str]:
+    """Return the exact case-balanced proxy environment for every container phase."""
+
+    return {
+        "HTTPS_PROXY": relay_url,
+        "HTTP_PROXY": relay_url,
+        "https_proxy": relay_url,
+        "http_proxy": relay_url,
+        "NO_PROXY": LOOPBACK_NO_PROXY,
+        "no_proxy": LOOPBACK_NO_PROXY,
+    }
+
+
+def auth_secret_variants(auth_json: Path) -> tuple[str, ...]:
+    """Extract nested scalar credentials and conservative encoded derivatives without logging them."""
+
+    try:
+        descriptor = os.open(auth_json, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise UnsafeSutConfiguration("Auth source must be a regular file")
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                value = json.load(stream)
+        finally:
+            os.close(descriptor)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise UnsafeSutConfiguration("Auth JSON is not a safe JSON file") from error
+
+    raw_values: set[str] = set()
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+        elif item is not None and isinstance(item, (str, int, float, bool)):
+            text = item if isinstance(item, str) else json.dumps(item, ensure_ascii=False, allow_nan=False)
+            if text:
+                raw_values.add(text)
+
+    visit(value)
+    variants: set[str] = set()
+    for raw in raw_values:
+        encoded = raw.encode("utf-8")
+        variants.update(
+            {
+                raw,
+                quote(raw, safe=""),
+                quote_plus(raw, safe=""),
+                base64.b64encode(encoded).decode("ascii"),
+                base64.urlsafe_b64encode(encoded).decode("ascii"),
+                encoded.hex(),
+            }
+        )
+    return tuple(sorted(variants, key=lambda item: (-len(item), item)))
 
 
 @dataclass(frozen=True)
@@ -218,8 +302,15 @@ class ArmPaths:
             raise UnsafeSutConfiguration("Private homes must remain within the ephemeral runtime")
 
     def prepare(self) -> None:
-        for path in (self.workspace, self.runtime, self.codex_home, self.pc_home):
-            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for root in (self.workspace, self.runtime):
+            try:
+                root.mkdir(parents=True, exist_ok=False, mode=0o700)
+            except FileExistsError as error:
+                raise UnsafeSutConfiguration("Arm workspace and runtime must be fresh") from error
+            if root.is_symlink():
+                raise UnsafeSutConfiguration("Arm workspace and runtime must be fresh directories")
+        for path in (self.codex_home, self.pc_home):
+            path.mkdir(mode=0o700)
 
     def copy_auth(self) -> Path:
         """Copy only auth.json through no-follow descriptors at mode 0600."""
@@ -248,10 +339,6 @@ class ArmPaths:
                 os.close(destination_fd)
         os.chmod(destination, 0o600, follow_symlinks=False)
         return destination
-
-
-class CommandRunner(Protocol):
-    def run(self, argv: tuple[str, ...], **kwargs: Any) -> CommandResult: ...
 
 
 class ProxyRelay(Protocol):
@@ -336,12 +423,19 @@ class SutOutcome:
 
 
 class _DockerExecRunner(ProcessRunner):
-    def __init__(self, runner: CommandRunner, container: str) -> None:
+    def __init__(self, runner: Any, container: str) -> None:
         self._delegate = runner
         self._container = container
 
     def run(self, argv: Any, **kwargs: Any) -> CommandResult:
-        return self._delegate.run(("docker", "exec", "-i", self._container, *tuple(argv)), **kwargs)
+        environment = kwargs.pop("env", None)
+        docker_environment: tuple[str, ...] = ()
+        if environment:
+            docker_environment = tuple(part for item in environment.items() for part in ("-e", f"{item[0]}={item[1]}"))
+        return self._delegate.run(
+            ("docker", "exec", "-i", *docker_environment, self._container, *tuple(argv)),
+            **kwargs,
+        )
 
 
 class DockerSut:
@@ -349,7 +443,7 @@ class DockerSut:
 
     def __init__(
         self,
-        docker: CommandRunner,
+        docker: Any,
         *,
         relay_factory: Callable[[], ProxyRelay] = SocatProxyRelay,
     ) -> None:
@@ -372,6 +466,56 @@ class DockerSut:
             raise UnsafeSutConfiguration("Docker network inspect did not provide one gateway") from error
         return _validated_gateway(gateway)
 
+    def _verify_source(self, config: SutConfig) -> SourceProvenance:
+        """Verify immutable checkout and plugin manifest before creating resources."""
+
+        result = self._docker.run(
+            ("git", "-C", os.fspath(config.source_checkout), "rev-parse", "--verify", "HEAD^{commit}"),
+            cwd=config.source_checkout.parent,
+            timeout=30,
+        )
+        actual_sha = result.stdout.strip()
+        if _SHA.fullmatch(actual_sha) is None or actual_sha != config.plugin_checkout_sha:
+            raise InvalidTreatment("PowerContext source HEAD does not match the configured commit")
+        status = self._docker.run(
+            (
+                "git",
+                "-C",
+                os.fspath(config.source_checkout),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ),
+            cwd=config.source_checkout.parent,
+            timeout=30,
+        )
+        if status.stdout:
+            raise InvalidTreatment("PowerContext source checkout must be clean")
+        manifest = config.source_checkout / _PLUGIN_RELATIVE / ".codex-plugin/plugin.json"
+        try:
+            descriptor = os.open(manifest, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+            try:
+                with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                    manifest_bytes = stream.read()
+                    value = json.loads(manifest_bytes)
+            finally:
+                os.close(descriptor)
+            version = value["version"]
+            if not isinstance(version, str) or not version or value.get("name") != "powercontext":
+                raise TypeError
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+            raise InvalidTreatment("PowerContext plugin manifest is invalid") from error
+        if version != config.plugin_version:
+            raise InvalidTreatment("PowerContext plugin manifest version does not match configuration")
+        lockfile = config.source_checkout / _PLUGIN_RELATIVE / "uv.lock"
+        try:
+            metadata = lockfile.stat(follow_symlinks=False)
+        except OSError as error:
+            raise InvalidTreatment("PowerContext plugin lockfile is missing") from error
+        if not stat.S_ISREG(metadata.st_mode):
+            raise InvalidTreatment("PowerContext plugin lockfile is invalid")
+        return SourceProvenance(actual_sha, version, hashlib.sha256(manifest_bytes).hexdigest())
+
     def run_arm(
         self,
         config: SutConfig,
@@ -380,8 +524,9 @@ class DockerSut:
         prompt: bytes,
         store: ArtifactStore,
     ) -> SutOutcome:
-        with self._run_network(config, paths.runtime) as (network, relay_url):
-            return self._execute_arm(config, arm, paths, prompt, store, network, relay_url)
+        source_provenance = self._verify_source(config)
+        with self._run_network(config, config.source_checkout) as (network, relay_url):
+            return self._execute_arm(config, arm, paths, prompt, store, network, relay_url, source_provenance)
 
     def run_pair(
         self,
@@ -395,7 +540,13 @@ class DockerSut:
 
         if set(paths) != {Arm.OFF, Arm.ON} or set(prompts) != {Arm.OFF, Arm.ON} or set(stores) != {Arm.OFF, Arm.ON}:
             raise UnsafeSutConfiguration("A treatment pair requires exactly OFF and ON inputs")
-        with self._run_network(config, paths[Arm.OFF].runtime) as (network, relay_url):
+        if (
+            len({os.path.realpath(value.workspace) for value in paths.values()}) != 2
+            or len({os.path.realpath(value.runtime) for value in paths.values()}) != 2
+        ):
+            raise UnsafeSutConfiguration("OFF and ON must use distinct fresh roots")
+        source_provenance = self._verify_source(config)
+        with self._run_network(config, config.source_checkout) as (network, relay_url):
             outcomes: dict[Arm, SutOutcome] = {}
             for arm in (Arm.OFF, Arm.ON):
                 outcomes[arm] = self._execute_arm(
@@ -406,6 +557,7 @@ class DockerSut:
                     stores[arm],
                     network,
                     relay_url,
+                    source_provenance,
                 )
             return outcomes
 
@@ -433,14 +585,16 @@ class DockerSut:
             relay_url = relay.start(gateway, config.proxy)
             yield network, relay_url
         finally:
-            relay.stop()
-            if network_created:
-                self._docker.run(
-                    ("docker", "network", "rm", network),
-                    cwd=cwd,
-                    timeout=30,
-                    check=False,
-                )
+            try:
+                relay.stop()
+            finally:
+                if network_created:
+                    self._docker.run(
+                        ("docker", "network", "rm", network),
+                        cwd=cwd,
+                        timeout=30,
+                        check=False,
+                    )
 
     def _execute_arm(
         self,
@@ -451,9 +605,11 @@ class DockerSut:
         store: ArtifactStore,
         network: str,
         relay_url: str,
+        source_provenance: SourceProvenance,
     ) -> SutOutcome:
         container = f"{network}-{arm.value}"
         container_started = False
+        credential_variants = auth_secret_variants(paths.auth_source)
         try:
             paths.prepare()
             auth = paths.copy_auth()
@@ -472,19 +628,24 @@ class DockerSut:
                 store=store,
                 timeout=config.codex_timeout,
                 env={
+                    **loopback_proxy_environment(relay_url),
                     "CODEX_HOME": "/runtime/codex-home",
                     "POWERCONTEXT_HOME": "/runtime/pc-home",
                     "POWERCONTEXT_CODEX_SCOPE_ID": f"eval:{config.run_id}:{arm.value}",
+                    "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env",
+                    "UV_CACHE_DIR": "/runtime/uv-cache",
+                    "UV_OFFLINE": "1",
                 },
+                secrets=credential_variants,
             )
             evidence = self._evidence(config, arm, container, paths, plugin)
-            if plugin != (PLUGIN_ID, config.plugin_version):
+            if plugin != (PLUGIN_ID, source_provenance.plugin_version):
                 raise InvalidTreatment("Isolated Codex home does not contain the exact expected plugin")
             validate_treatment(
                 arm,
                 config.run_id,
                 evidence,
-                expected_plugin_version=config.plugin_version,
+                expected_plugin_version=source_provenance.plugin_version,
                 expected_checkout_sha=config.plugin_checkout_sha,
             )
             logs = self._docker.run(
@@ -493,8 +654,19 @@ class DockerSut:
                 timeout=30,
                 check=False,
             )
-            store.write_text("powercontext/server.log", logs.stdout + logs.stderr)
-            store.write_json("powercontext/treatment.json", evidence.as_dict())
+            server_log = logs.stdout + logs.stderr
+            _reject_retained_secrets(server_log.encode("utf-8"), credential_variants)
+            store.write_text("powercontext/server.log", server_log)
+            treatment_bytes = (
+                json.dumps(evidence.as_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+            ).encode("utf-8")
+            _reject_retained_secrets(treatment_bytes, credential_variants)
+            store.write_bytes("powercontext/treatment.json", treatment_bytes)
+            provenance_bytes = (
+                json.dumps(source_provenance.as_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+            ).encode("utf-8")
+            _reject_retained_secrets(provenance_bytes, credential_variants)
+            store.write_bytes("powercontext/provenance.json", provenance_bytes)
             return SutOutcome(codex, evidence)
         finally:
             if container_started:
@@ -542,6 +714,9 @@ class DockerSut:
                 "--rm",
                 "--network",
                 "none",
+                *_docker_env_args(
+                    {**loopback_proxy_environment(config.proxy.url), "UV_CACHE_DIR": "/runtime/uv-cache"}
+                ),
                 "--read-only",
                 "--cap-drop",
                 "ALL",
@@ -577,6 +752,10 @@ class DockerSut:
         auth: Path,
     ) -> None:
         del arm, auth
+        common_environment = {
+            **loopback_proxy_environment(relay_url),
+            "UV_CACHE_DIR": "/runtime/uv-cache",
+        }
         command = (
             "docker",
             "run",
@@ -604,10 +783,7 @@ class DockerSut:
             f"type=bind,src={config.uv_binary},dst=/tools/uv,readonly",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=512m",
-            "-e",
-            f"HTTPS_PROXY={relay_url}",
-            "-e",
-            "UV_PROJECT_ENVIRONMENT=/runtime/pc-env",
+            *_docker_env_args({**common_environment, "UV_PROJECT_ENVIRONMENT": "/runtime/pc-env"}),
             config.task_image,
             "/tools/uv",
             "sync",
@@ -620,6 +796,46 @@ class DockerSut:
             "cli",
         )
         self._docker.run(command, cwd=paths.runtime, timeout=900)
+        self._docker.run(
+            (
+                "docker",
+                "run",
+                "--rm",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--user",
+                _CONTAINER_UID_GID,
+                "--cpus",
+                config.limits.cpus,
+                "--memory",
+                config.limits.memory,
+                "--pids-limit",
+                str(config.limits.pids),
+                "--network",
+                network,
+                "--mount",
+                f"type=bind,src={config.source_checkout},dst=/source,readonly",
+                "--mount",
+                f"type=bind,src={paths.runtime},dst=/runtime",
+                "--mount",
+                f"type=bind,src={config.uv_binary},dst=/tools/uv,readonly",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,size=256m",
+                *_docker_env_args({**common_environment, "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env"}),
+                config.task_image,
+                "/tools/uv",
+                "sync",
+                "--frozen",
+                "--project",
+                "/source/integrations/codex/plugins/powercontext",
+                "--no-install-project",
+            ),
+            cwd=paths.runtime,
+            timeout=900,
+        )
         setup_common = (
             "docker",
             "run",
@@ -647,8 +863,14 @@ class DockerSut:
             f"type=bind,src={config.codex_binary},dst=/tools/codex,readonly",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=256m",
-            "-e",
-            "CODEX_HOME=/runtime/codex-home",
+            *_docker_env_args(
+                {
+                    **common_environment,
+                    "CODEX_HOME": "/runtime/codex-home",
+                    "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env",
+                    "UV_OFFLINE": "1",
+                }
+            ),
             config.task_image,
             "/tools/codex",
             "plugin",
@@ -712,18 +934,18 @@ class DockerSut:
             f"type=bind,src={auth},dst=/runtime/codex-home/auth.json,readonly",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=1g",
-            "-e",
-            f"HTTPS_PROXY={relay_url}",
-            "-e",
-            f"HTTP_PROXY={relay_url}",
-            "-e",
-            "CODEX_HOME=/runtime/codex-home",
-            "-e",
-            "POWERCONTEXT_HOME=/runtime/pc-home",
-            "-e",
-            f"POWERCONTEXT_CODEX_SCOPE_ID={scope}",
-            "-e",
-            "PATH=/tools:/runtime/pc-env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            *_docker_env_args(
+                {
+                    **loopback_proxy_environment(relay_url),
+                    "CODEX_HOME": "/runtime/codex-home",
+                    "POWERCONTEXT_HOME": "/runtime/pc-home",
+                    "POWERCONTEXT_CODEX_SCOPE_ID": scope,
+                    "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env",
+                    "UV_CACHE_DIR": "/runtime/uv-cache",
+                    "UV_OFFLINE": "1",
+                    "PATH": "/tools:/runtime/pc-env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                }
+            ),
             config.task_image,
             "/runtime/pc-env/bin/powercontext",
             "server",
@@ -864,3 +1086,74 @@ def _reserve_port(address: str) -> int:
         listener.bind((address, 0))
         port = listener.getsockname()[1]
     return int(port)
+
+
+def _docker_env_args(environment: Mapping[str, str]) -> tuple[str, ...]:
+    return tuple(part for key, value in environment.items() for part in ("-e", f"{key}={value}"))
+
+
+def _reject_retained_secrets(data: bytes, variants: tuple[str, ...]) -> None:
+    if any(value.encode("utf-8") in data for value in variants):
+        raise CodexInfrastructureError("Retained artifact contained an unredacted auth secret")
+
+
+def run_codex_contract_smoke(
+    *,
+    run_root: str,
+    task_image: str,
+    codex_bin: str,
+    uv_bin: str,
+    powercontext_source: str,
+    powercontext_sha: str,
+    auth_json: str,
+    proxy_url: str,
+    prompt: str = "Reply with exactly OK.",
+    sut_factory: Callable[[ProcessRunner], DockerSut] = DockerSut,
+) -> dict[str, object]:
+    """Execute the real disposable OFF/ON contract through an injectable Docker adapter."""
+
+    root = Path(run_root).absolute()
+    try:
+        root.mkdir(parents=True, exist_ok=False, mode=0o700)
+    except FileExistsError as error:
+        raise UnsafeSutConfiguration("Contract smoke root must be fresh") from error
+    source = Path(powercontext_source).absolute()
+    auth = Path(auth_json).absolute()
+    variants = auth_secret_variants(auth)
+    config = SutConfig(
+        run_id="contract-smoke",
+        task_image=task_image,
+        codex_binary=Path(codex_bin).absolute(),
+        uv_binary=Path(uv_bin).absolute(),
+        source_checkout=source,
+        plugin_checkout_sha=powercontext_sha,
+        proxy=ProxyRelayConfig(proxy_url),
+    )
+    paths: dict[Arm, ArmPaths] = {}
+    stores: dict[Arm, ArtifactStore] = {}
+    for arm in (Arm.OFF, Arm.ON):
+        arm_root = root / arm.value
+        arm_root.mkdir(mode=0o700)
+        runtime = arm_root / "ephemeral/runtime"
+        paths[arm] = ArmPaths(
+            source=source,
+            auth_source=auth,
+            workspace=arm_root / "ephemeral/workspace",
+            runtime=runtime,
+            codex_home=runtime / "codex-home",
+            pc_home=runtime / "pc-home",
+            result_root=arm_root / "results",
+        )
+        stores[arm] = ArtifactStore(paths[arm].result_root, forbidden_values=variants)
+    outcomes = sut_factory(ProcessRunner()).run_pair(
+        config,
+        paths=paths,
+        prompts={Arm.OFF: prompt.encode("utf-8"), Arm.ON: prompt.encode("utf-8")},
+        stores=stores,
+    )
+    return {
+        "status": "passed",
+        "off_prompt_sources": outcomes[Arm.OFF].evidence.prompt_sources,
+        "on_prompt_sources": outcomes[Arm.ON].evidence.prompt_sources,
+        "run_root": os.fspath(root),
+    }

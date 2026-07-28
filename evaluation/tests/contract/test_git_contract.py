@@ -6,6 +6,7 @@ import platform
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
@@ -677,8 +678,9 @@ class FailIfProcessRuns(ProcessRunner):
         check: bool = True,
         secrets: Sequence[str] = (),
         input_bytes: bytes | None = None,
+        stdout_sink: BinaryIO | None = None,
     ) -> CommandResult:
-        del input_bytes
+        del input_bytes, stdout_sink
         raise AssertionError("normalization and cache key calculation must not access the network")
 
 
@@ -697,6 +699,7 @@ class RecordingProcessRunner(ProcessRunner):
         check: bool = True,
         secrets: Sequence[str] = (),
         input_bytes: bytes | None = None,
+        stdout_sink: BinaryIO | None = None,
     ) -> CommandResult:
         del input_bytes
         self.calls.append((timeout, dict(env or {})))
@@ -708,6 +711,7 @@ class RecordingProcessRunner(ProcessRunner):
             env=env,
             check=check,
             secrets=secrets,
+            stdout_sink=stdout_sink,
         )
 
 
@@ -722,8 +726,8 @@ class RejectFetchRunner(RecordingProcessRunner):
         check: bool = True,
         secrets: Sequence[str] = (),
         input_bytes: bytes | None = None,
+        stdout_sink: BinaryIO | None = None,
     ) -> CommandResult:
-        del input_bytes
         if "fetch" in argv:
             self.commands.append(tuple(argv))
             raise AssertionError("an unvalidated existing mirror must never be fetched")
@@ -734,6 +738,8 @@ class RejectFetchRunner(RecordingProcessRunner):
             env=env,
             check=check,
             secrets=secrets,
+            input_bytes=input_bytes,
+            stdout_sink=stdout_sink,
         )
 
 
@@ -772,8 +778,9 @@ class ControlledGitRunner(ProcessRunner):
         check: bool = True,
         secrets: Sequence[str] = (),
         input_bytes: bytes | None = None,
+        stdout_sink: BinaryIO | None = None,
     ) -> CommandResult:
-        del input_bytes
+        del input_bytes, stdout_sink
         command = tuple(argv)
         self.calls.append((command, tuple(secrets)))
         if "clone" in command:
@@ -800,6 +807,7 @@ class FailCheckoutOnceRunner(ProcessRunner):
         check: bool = True,
         secrets: Sequence[str] = (),
         input_bytes: bytes | None = None,
+        stdout_sink: BinaryIO | None = None,
     ) -> CommandResult:
         if not self.failed and "checkout" in argv:
             self.failed = True
@@ -813,6 +821,7 @@ class FailCheckoutOnceRunner(ProcessRunner):
             check=check,
             secrets=secrets,
             input_bytes=input_bytes,
+            stdout_sink=stdout_sink,
         )
 
 

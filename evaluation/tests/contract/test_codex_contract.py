@@ -6,8 +6,12 @@ import os
 import stat
 import subprocess
 import sys
+from base64 import b64encode, urlsafe_b64encode
 from collections.abc import Sequence
 from pathlib import Path
+from typing import BinaryIO, cast
+from urllib.parse import quote, quote_plus
+from urllib.request import urlopen
 
 import pytest
 
@@ -20,6 +24,7 @@ from powercontext_eval.codex import (
 )
 from powercontext_eval.models import Arm
 from powercontext_eval.powercontext_sut import (
+    LOOPBACK_NO_PROXY,
     ArmPaths,
     ContainerLimits,
     DockerSut,
@@ -29,6 +34,8 @@ from powercontext_eval.powercontext_sut import (
     SutConfig,
     TreatmentEvidence,
     UnsafeSutConfiguration,
+    auth_secret_variants,
+    loopback_proxy_environment,
     validate_treatment,
 )
 from powercontext_eval.process import CommandFailed, CommandResult, CommandTimedOut
@@ -109,6 +116,28 @@ def test_codex_runner_writes_exact_jsonl_and_summary_artifacts(tmp_path: Path) -
     }
     assert outcome.last_message == "last"
     assert outcome.usage == {"input_tokens": 7, "output_tokens": 3}
+
+
+def test_codex_runner_uses_bounded_stream_sink_and_keeps_nonzero_evidence(tmp_path: Path) -> None:
+    raw = b'{"type":"agent_message","message":"done"}\n{"type":"turn.completed"}\n'
+
+    class StreamingRunner:
+        def run(self, argv: Sequence[str], **kwargs: object) -> CommandResult:
+            sink = cast(BinaryIO, kwargs["stdout_sink"])
+            sink.write(raw)
+            return CommandResult(tuple(argv), str(tmp_path), 0, "", "warning")
+
+    store = ArtifactStore(tmp_path / "result")
+    outcome = CodexRunner(StreamingRunner()).run(
+        CodexInvocation(Arm.ON, inside_disposable_container=True),
+        prompt=b"prompt",
+        cwd=tmp_path,
+        store=store,
+    )
+
+    assert outcome.last_message == "done"
+    assert (store.root / "codex/events.jsonl").read_bytes() == raw
+    assert (store.root / "codex/stderr.txt").read_text() == "warning"
 
 
 def test_codex_runner_reports_missing_usage_as_na(tmp_path: Path) -> None:
@@ -214,7 +243,7 @@ def make_paths(tmp_path: Path) -> ArmPaths:
     runtime = tmp_path / "ephemeral" / "runtime"
     codex_home = runtime / "codex-home"
     pc_home = runtime / "pc-home"
-    for path in (source, auth.parent, workspace, codex_home, pc_home):
+    for path in (source, auth.parent):
         path.mkdir(parents=True, exist_ok=True)
     auth.write_text('{"token":"fixture-secret"}')
     os.chmod(auth, 0o600)
@@ -231,6 +260,12 @@ class TranscriptDocker:
         self.commands.append(argv)
         if self.fail_at and self.fail_at in argv:
             raise CommandFailed("injected", command_result("", returncode=70))
+        if argv[:4] == ("git", "-C", os.fspath(Path(argv[2])), "rev-parse"):
+            return command_result("a" * 40 + "\n")
+        if argv[:2] == ("git", "-C") and argv[-2:] == ("rev-parse", "HEAD"):
+            return command_result("a" * 40 + "\n")
+        if argv[:2] == ("git", "-C") and "status" in argv:
+            return command_result("")
         if argv[-3:] == ("network", "inspect", "powercontext-eval-run-1"):
             return command_result('[{"IPAM":{"Config":[{"Gateway":"172.29.0.1"}]}}]')
         if "plugin" in argv and "list" in argv:
@@ -276,6 +311,11 @@ class FakeRelay:
 
 
 def sut_config(tmp_path: Path) -> SutConfig:
+    manifest = tmp_path / "source/integrations/codex/plugins/powercontext/.codex-plugin/plugin.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({"name": "powercontext", "version": "0.1.0"}))
+    lock = tmp_path / "source/integrations/codex/plugins/powercontext/uv.lock"
+    lock.write_text("version = 1\n")
     return SutConfig(
         run_id="run-1",
         task_image="jefzda/sweap-images:fixture",
@@ -328,6 +368,10 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
         "actual_version": "0.145.0",
         "expected_version": "0.145.0",
     }
+    source_provenance = json.loads((paths.result_root / "powercontext/provenance.json").read_text())
+    assert source_provenance["checkout_sha"] == "a" * 40
+    assert source_provenance["plugin_version"] == "0.1.0"
+    assert len(source_provenance["plugin_manifest_sha256"]) == 64
     evidence_command = next(command for command in transcript if "evidence" in command)
     assert "eval:run-1:on" in evidence_command
     assert any("pc_sources" in part for part in evidence_command)
@@ -536,3 +580,257 @@ def test_fake_codex_fixture_is_executable_and_offline(tmp_path: Path) -> None:
         check=True,
     )
     assert b"turn.completed" in result.stdout
+
+
+def test_all_container_phases_receive_identical_loopback_bypass_environment(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    docker = TranscriptDocker()
+
+    DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config, Arm.ON, paths, b"prompt", ArtifactStore(paths.result_root)
+    )
+
+    container_commands = [
+        command
+        for command in docker.commands
+        if command[:2] in {("docker", "run"), ("docker", "exec")} and "--network" in command
+    ]
+    assert container_commands
+    for command in container_commands:
+        assert f"NO_PROXY={LOOPBACK_NO_PROXY}" in command
+        assert f"no_proxy={LOOPBACK_NO_PROXY}" in command
+
+
+def test_urllib_loopback_bypasses_an_unreachable_proxy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del tmp_path
+    import http.server
+    import threading
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    environment = loopback_proxy_environment("http://127.0.0.1:1")
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    try:
+        with urlopen(f"http://127.0.0.1:{server.server_port}", timeout=2) as response:
+            assert response.status == 200
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_auth_secrets_include_nested_scalars_and_supported_derivations(tmp_path: Path) -> None:
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"tokens": [{"access": "a/b +?秘密"}], "account": {"id": 12345}}))
+
+    variants = auth_secret_variants(auth)
+
+    raw = "a/b +?秘密"
+    encoded = raw.encode()
+    assert {
+        raw,
+        quote(raw, safe=""),
+        quote_plus(raw, safe=""),
+        b64encode(encoded).decode(),
+        urlsafe_b64encode(encoded).decode(),
+        encoded.hex(),
+        "12345",
+    } <= set(variants)
+
+
+def test_fake_codex_echo_of_auth_secrets_or_encodings_is_never_published(tmp_path: Path) -> None:
+    raw = "fixture/super secret"
+    variants = auth_secret_variants(_write_json(tmp_path / "auth.json", {"nested": {"token": raw}}))
+    leaked = quote_plus(raw, safe="")
+
+    class LeakingStreamRunner:
+        def run(self, argv: Sequence[str], **kwargs: object) -> CommandResult:
+            del argv
+            sink = cast(BinaryIO, kwargs["stdout_sink"])
+            sink.write(f'{{"type":"agent_message","message":"{leaked}"}}\n'.encode())
+            return command_result("")
+
+    store = ArtifactStore(tmp_path / "result")
+
+    with pytest.raises(CodexInfrastructureError, match="secret"):
+        CodexRunner(LeakingStreamRunner()).run(
+            CodexInvocation(Arm.ON, inside_disposable_container=True),
+            prompt=b"prompt",
+            cwd=tmp_path,
+            store=store,
+            secrets=variants,
+        )
+
+    assert list(store.root.rglob("*")) == []
+
+
+def test_server_log_echo_of_auth_encoding_is_rejected_before_publication(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    secret = "server/log secret"
+    paths.auth_source.write_text(json.dumps({"nested": {"token": secret}}))
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class LeakingLogsDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if argv[:2] == ("docker", "logs"):
+                self.commands.append(argv)
+                return command_result(quote_plus(secret, safe=""))
+            return super().run(argv, **kwargs)
+
+    with pytest.raises(CodexInfrastructureError, match="secret"):
+        DockerSut(LeakingLogsDocker(), relay_factory=FakeRelay).run_arm(
+            config, Arm.ON, paths, b"prompt", ArtifactStore(paths.result_root)
+        )
+    assert not (paths.result_root / "powercontext/server.log").exists()
+
+
+def _write_json(path: Path, value: object) -> Path:
+    path.write_text(json.dumps(value))
+    return path
+
+
+@pytest.mark.parametrize("target", ["workspace", "runtime"])
+@pytest.mark.parametrize("kind", ["stale", "symlink"])
+def test_arm_paths_reject_stale_or_symlink_roots(tmp_path: Path, target: str, kind: str) -> None:
+    paths = make_paths(tmp_path)
+    selected = getattr(paths, target)
+    if kind == "stale":
+        selected.mkdir(parents=True)
+        (selected / "old").write_text("stale")
+    else:
+        destination = tmp_path / f"{target}-elsewhere"
+        destination.mkdir()
+        selected.parent.mkdir(parents=True, exist_ok=True)
+        selected.symlink_to(destination, target_is_directory=True)
+
+    with pytest.raises(UnsafeSutConfiguration, match="fresh"):
+        paths.prepare()
+
+
+def test_pair_rejects_shared_or_nonempty_arm_roots(tmp_path: Path) -> None:
+    off = make_paths(tmp_path / "off")
+    on = make_paths(tmp_path / "on")
+    object.__setattr__(on, "workspace", off.workspace)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    with pytest.raises(UnsafeSutConfiguration):
+        DockerSut(TranscriptDocker(), relay_factory=FakeRelay).run_pair(
+            config,
+            paths={Arm.OFF: off, Arm.ON: on},
+            prompts={Arm.OFF: b"x", Arm.ON: b"x"},
+            stores={Arm.OFF: ArtifactStore(off.result_root), Arm.ON: ArtifactStore(on.result_root)},
+        )
+
+
+def test_source_head_and_manifest_are_verified_before_any_docker_command(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class WrongHeadDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if argv[:2] == ("git", "-C"):
+                self.commands.append(argv)
+                return command_result("b" * 40 + "\n")
+            return super().run(argv, **kwargs)
+
+    docker = WrongHeadDocker()
+    with pytest.raises(InvalidTreatment, match="HEAD"):
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            config, Arm.ON, paths, b"prompt", ArtifactStore(paths.result_root)
+        )
+    assert docker.commands == [
+        ("git", "-C", os.fspath(config.source_checkout), "rev-parse", "--verify", "HEAD^{commit}")
+    ]
+
+
+def test_manifest_version_mismatch_is_rejected_before_docker(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    manifest = config.source_checkout / "integrations/codex/plugins/powercontext/.codex-plugin/plugin.json"
+    manifest.write_text(json.dumps({"name": "powercontext", "version": "9.9.9"}))
+    docker = TranscriptDocker()
+
+    with pytest.raises(InvalidTreatment, match="manifest"):
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            config, Arm.ON, paths, b"prompt", ArtifactStore(paths.result_root)
+        )
+    assert not any(command[:2] == ("docker", "network") for command in docker.commands)
+
+
+@pytest.mark.parametrize("dirty_output", [" M src/powercontext/__init__.py\n", "?? untracked-secret\n"])
+def test_dirty_source_is_rejected_before_any_docker_resource(tmp_path: Path, dirty_output: str) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+
+    class DirtySourceDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if argv[:2] == ("git", "-C") and "status" in argv:
+                self.commands.append(argv)
+                return command_result(dirty_output)
+            return super().run(argv, **kwargs)
+
+    docker = DirtySourceDocker()
+    with pytest.raises(InvalidTreatment, match="clean"):
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            config, Arm.ON, paths, b"prompt", ArtifactStore(paths.result_root)
+        )
+    assert not any(command[:2] == ("docker", "network") for command in docker.commands)
+
+
+def test_plugin_locked_environment_is_prewarmed_and_injected_into_hook_path(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    docker = TranscriptDocker()
+
+    DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config, Arm.ON, paths, b"prompt", ArtifactStore(paths.result_root)
+    )
+
+    plugin_sync = next(
+        command
+        for command in docker.commands
+        if "/source/integrations/codex/plugins/powercontext" in command
+        and "UV_PROJECT_ENVIRONMENT=/runtime/plugin-env" in command
+    )
+    assert plugin_sync[-5:] == (
+        "sync",
+        "--frozen",
+        "--project",
+        "/source/integrations/codex/plugins/powercontext",
+        "--no-install-project",
+    )
+    task = next(command for command in docker.commands if command[:3] == ("docker", "run", "-d"))
+    assert "UV_PROJECT_ENVIRONMENT=/runtime/plugin-env" in task
+    assert "UV_CACHE_DIR=/runtime/uv-cache" in task
+    assert "UV_OFFLINE=1" in task
+
+
+def test_network_cleanup_survives_relay_stop_failure(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    docker = TranscriptDocker()
+
+    class BrokenStopRelay(FakeRelay):
+        def stop(self) -> None:
+            raise RuntimeError("stop failed")
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        DockerSut(docker, relay_factory=BrokenStopRelay).run_arm(
+            config, Arm.ON, paths, b"prompt", ArtifactStore(paths.result_root)
+        )
+    assert ("docker", "network", "rm", "powercontext-eval-run-1") in docker.commands
