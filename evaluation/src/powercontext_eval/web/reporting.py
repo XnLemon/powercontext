@@ -201,10 +201,7 @@ def _comparisons(off: MetricSet, on: MetricSet) -> ComparisonResponse:
 def _acceptance_valid(bundle: ReportBundle) -> bool:
     lifecycle_is_comparable = bundle.off.state == bundle.on.state and bundle.off.state in _COMPARABLE_STATES
     official_outcomes_are_coherent = (
-        bundle.off.passed is not None
-        and bundle.on.passed is not None
-        and bundle.off.passed == bundle.off.resolved
-        and bundle.on.passed == bundle.on.resolved
+        bundle.off.passed is True and bundle.on.passed is True and bundle.off.resolved and bundle.on.resolved
     )
     return (
         bundle.off.treatment_valid

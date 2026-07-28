@@ -214,6 +214,25 @@ def test_acceptance_is_false_without_coherent_official_outcomes(
     assert load_report(run_dir, runs_root).acceptance_valid is False
 
 
+def test_acceptance_requires_both_official_arms_to_pass_and_resolve(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = _write_run(runs_root)
+    bundle = _bundle()
+    unresolved = bundle.model_copy(
+        update={
+            "off": bundle.off.model_copy(update={"resolved": False, "passed": False}),
+            "on": bundle.on.model_copy(update={"resolved": False, "passed": False}),
+        }
+    )
+    (run_dir / "report.json").write_text(unresolved.model_dump_json())
+
+    response = load_report(run_dir, runs_root)
+
+    assert response.acceptance_valid is False
+    assert response.off.resolution == "unresolved"
+    assert response.on.resolution == "unresolved"
+
+
 def test_missing_metrics_and_zero_off_denominator_preserve_na(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_dir = _write_run(runs_root)
