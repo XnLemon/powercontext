@@ -150,17 +150,15 @@ def test_web_config_rejects_invalid_numeric_settings(tmp_path: Path, name: str, 
 
 
 @pytest.mark.parametrize(
-    ("name", "value", "message"),
+    ("name", "value"),
     [
-        ("POWERCONTEXT_EVAL_PORT", "not-a-port", "POWERCONTEXT_EVAL_PORT must be an integer"),
-        ("POWERCONTEXT_EVAL_LEASE_SECONDS", "never", "POWERCONTEXT_EVAL_LEASE_SECONDS must be an integer"),
-        ("POWERCONTEXT_EVAL_POLL_SECONDS", "soon", "POWERCONTEXT_EVAL_POLL_SECONDS must be a number"),
+        ("POWERCONTEXT_EVAL_PORT", "not-a-port"),
+        ("POWERCONTEXT_EVAL_LEASE_SECONDS", "never"),
+        ("POWERCONTEXT_EVAL_POLL_SECONDS", "soon"),
     ],
 )
-def test_web_config_rejects_malformed_numeric_environment_values(
-    tmp_path: Path, name: str, value: str, message: str
-) -> None:
-    with pytest.raises(ValueError, match=message):
+def test_web_config_rejects_malformed_numeric_environment_values(tmp_path: Path, name: str, value: str) -> None:
+    with pytest.raises(ValidationError):
         WebConfig.from_environment({"POWERCONTEXT_EVAL_ROOT": str(tmp_path), name: value})
 
 
@@ -406,6 +404,70 @@ def test_task_record_rejects_incoherent_lifecycle(status: TaskStatus, fields: di
 )
 def test_task_record_accepts_coherent_lifecycle(status: TaskStatus, fields: dict[str, object]) -> None:
     assert TaskRecord.model_validate({**record_payload(status), **fields}).status is status
+
+
+def test_failed_task_accepts_safe_failure_without_phase() -> None:
+    record = TaskRecord.model_validate(
+        {
+            **record_payload(TaskStatus.FAILED),
+            "started_at": datetime(2026, 7, 29, tzinfo=UTC),
+            "finished_at": datetime(2026, 7, 29, 0, 1, tzinfo=UTC),
+            "failure_category": FailureCategory.INTERNAL,
+            "failure_summary": "The worker failed unexpectedly.",
+        }
+    )
+
+    assert record.failure_phase is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"failure_category": FailureCategory.INTERNAL},
+        {"failure_summary": "The worker failed unexpectedly."},
+    ],
+)
+def test_task_record_rejects_partial_failure_category_and_summary(failure: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        TaskRecord.model_validate(
+            {
+                **record_payload(TaskStatus.FAILED),
+                "started_at": datetime(2026, 7, 29, tzinfo=UTC),
+                "finished_at": datetime(2026, 7, 29, 0, 1, tzinfo=UTC),
+                **failure,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "fields"),
+    [
+        (
+            TaskStatus.RUNNING,
+            {"started_at": datetime(2026, 7, 28, 23, 59, tzinfo=UTC)},
+        ),
+        (
+            TaskStatus.SUCCEEDED,
+            {
+                "started_at": datetime(2026, 7, 29, 0, 2, tzinfo=UTC),
+                "finished_at": datetime(2026, 7, 29, 0, 1, tzinfo=UTC),
+                "result": TaskResult(
+                    artifact_dir="runs/run-123",
+                    report_path="runs/run-123/report.md",
+                    off_resolved=True,
+                    on_resolved=True,
+                ),
+            },
+        ),
+        (
+            TaskStatus.CANCELLED,
+            {"finished_at": datetime(2026, 7, 28, 23, 59, tzinfo=UTC)},
+        ),
+    ],
+)
+def test_task_record_rejects_inverted_timestamp_order(status: TaskStatus, fields: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        TaskRecord.model_validate({**record_payload(status), **fields})
 
 
 @pytest.mark.parametrize(

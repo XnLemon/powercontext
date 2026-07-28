@@ -9,6 +9,14 @@ from typing import Annotated, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+class _EnvironmentNumbers(BaseModel):
+    """Coerce textual environment values before strict runtime construction."""
+
+    port: Annotated[int, Field(ge=1, le=65535)] = 8080
+    lease_seconds: Annotated[int, Field(ge=1, le=3600)] = 60
+    poll_seconds: Annotated[float, Field(gt=0, le=30)] = 1.0
+
+
 class WebConfig(BaseModel):
     """Validated process configuration with secret-bearing fields excluded from serialization."""
 
@@ -99,17 +107,13 @@ class WebConfig(BaseModel):
             value = environ.get(f"{prefix}{name}")
             return None if value is None else Path(value)
 
-        def integer(name: str, default: str) -> int:
-            try:
-                return int(environ.get(f"{prefix}{name}", default))
-            except ValueError:
-                raise ValueError(f"{prefix}{name} must be an integer") from None
-
-        def number(name: str, default: str) -> float:
-            try:
-                return float(environ.get(f"{prefix}{name}", default))
-            except ValueError:
-                raise ValueError(f"{prefix}{name} must be a number") from None
+        numbers = _EnvironmentNumbers.model_validate(
+            {
+                "port": environ.get(f"{prefix}PORT", "8080"),
+                "lease_seconds": environ.get(f"{prefix}LEASE_SECONDS", "60"),
+                "poll_seconds": environ.get(f"{prefix}POLL_SECONDS", "1"),
+            }
+        )
 
         return cls.for_root(
             root,
@@ -125,7 +129,7 @@ class WebConfig(BaseModel):
             auth_json=path("AUTH_JSON"),
             proxy_url=environ.get(f"{prefix}PROXY_URL", "http://127.0.0.1:7890"),
             host=environ.get(f"{prefix}HOST", "127.0.0.1"),
-            port=integer("PORT", "8080"),
-            lease_seconds=integer("LEASE_SECONDS", "60"),
-            poll_seconds=number("POLL_SECONDS", "1"),
+            port=numbers.port,
+            lease_seconds=numbers.lease_seconds,
+            poll_seconds=numbers.poll_seconds,
         )

@@ -107,11 +107,19 @@ class TaskRecord(FrozenModel):
 
     @model_validator(mode="after")
     def validate_lifecycle(self) -> Self:
-        failure_fields = (self.failure_category, self.failure_phase, self.failure_summary)
-        has_failure = all(value is not None for value in failure_fields)
-        has_partial_failure = any(value is not None for value in failure_fields) and not has_failure
+        has_category = self.failure_category is not None
+        has_summary = self.failure_summary is not None
+        has_failure = has_category and has_summary
+        has_partial_failure = has_category != has_summary or (self.failure_phase is not None and not has_failure)
         if has_partial_failure:
-            raise ValueError("Failure category, phase, and summary must be provided together")
+            raise ValueError("Failure category and summary must be provided together")
+
+        if self.started_at is not None and self.started_at < self.created_at:
+            raise ValueError("Task start time cannot precede creation")
+        if self.finished_at is not None:
+            previous = self.started_at if self.started_at is not None else self.created_at
+            if self.finished_at < previous:
+                raise ValueError("Task finish time cannot precede its prior lifecycle timestamp")
 
         if self.status is TaskStatus.QUEUED:
             if any((self.phase, self.started_at, self.finished_at, self.result, has_failure)):
