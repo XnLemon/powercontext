@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import ValidationError
 
 from powercontext_eval.artifacts import ArmState
-from powercontext_eval.report import ArmReport, MetricSet, ReportBundle
+from powercontext_eval.report import ArmReport, ReportBundle
 from powercontext_eval.web.models import (
     ArmResponse,
     ComparisonResponse,
@@ -189,12 +189,19 @@ def _comparison(off: float | None, on: float | None) -> MetricComparison | None:
     return MetricComparison(off=off, on=on, delta=delta, percent=percent)
 
 
-def _comparisons(off: MetricSet, on: MetricSet) -> ComparisonResponse:
+def _comparisons(off: ArmReport, on: ArmReport) -> ComparisonResponse:
+    if (
+        not off.treatment_valid
+        or not on.treatment_valid
+        or off.state not in _COMPARABLE_STATES
+        or on.state not in _COMPARABLE_STATES
+    ):
+        return ComparisonResponse()
     return ComparisonResponse(
-        input_tokens=_comparison(off.input_tokens, on.input_tokens),
-        output_tokens=_comparison(off.output_tokens, on.output_tokens),
-        elapsed_seconds=_comparison(off.elapsed_seconds, on.elapsed_seconds),
-        patch_bytes=_comparison(off.patch_bytes, on.patch_bytes),
+        input_tokens=_comparison(off.metrics.input_tokens, on.metrics.input_tokens),
+        output_tokens=_comparison(off.metrics.output_tokens, on.metrics.output_tokens),
+        elapsed_seconds=_comparison(off.metrics.elapsed_seconds, on.metrics.elapsed_seconds),
+        patch_bytes=_comparison(off.metrics.patch_bytes, on.metrics.patch_bytes),
     )
 
 
@@ -225,7 +232,7 @@ def load_report(run_dir: Path, run_root: Path | None = None) -> ReportResponse:
             acceptance_valid=_acceptance_valid(bundle),
             off=_arm_response("off", bundle.off),
             on=_arm_response("on", bundle.on),
-            comparison=_comparisons(bundle.off.metrics, bundle.on.metrics),
+            comparison=_comparisons(bundle.off, bundle.on),
             evidence=EvidenceResponse(off=off_evidence, on=on_evidence),
             revisions=bundle.revisions,
             configuration=bundle.configuration,

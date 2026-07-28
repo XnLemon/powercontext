@@ -231,6 +231,39 @@ def test_acceptance_requires_both_official_arms_to_pass_and_resolve(tmp_path: Pa
     assert response.acceptance_valid is False
     assert response.off.resolution == "unresolved"
     assert response.on.resolution == "unresolved"
+    assert response.comparison.input_tokens is not None
+    assert response.comparison.input_tokens.delta == -841_014
+
+
+@pytest.mark.parametrize(
+    ("off_update", "on_update"),
+    [
+        ({"treatment_valid": False}, {}),
+        ({}, {"treatment_valid": False}),
+        ({"state": ArmState.INVALID_TREATMENT}, {}),
+        ({}, {"state": ArmState.INFRASTRUCTURE_ERROR}),
+    ],
+)
+def test_invalid_or_noncomparable_treatments_hide_all_comparisons(
+    tmp_path: Path, off_update: dict[str, object], on_update: dict[str, object]
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = _write_run(runs_root)
+    bundle = _bundle()
+    invalid = bundle.model_copy(
+        update={
+            "off": bundle.off.model_copy(update=off_update),
+            "on": bundle.on.model_copy(update=on_update),
+        }
+    )
+    (run_dir / "report.json").write_text(invalid.model_dump_json())
+
+    response = load_report(run_dir, runs_root)
+
+    assert response.comparison.input_tokens is None
+    assert response.comparison.output_tokens is None
+    assert response.comparison.elapsed_seconds is None
+    assert response.comparison.patch_bytes is None
 
 
 def test_missing_metrics_and_zero_off_denominator_preserve_na(tmp_path: Path) -> None:
