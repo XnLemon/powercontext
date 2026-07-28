@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+import powercontext_eval.artifacts as artifacts_module
 from powercontext_eval.artifacts import (
     ArmState,
     ArmStateMachine,
@@ -21,6 +23,31 @@ from powercontext_eval.artifacts import (
     StateAlreadyExists,
     UnsafeArtifactPath,
 )
+
+
+def test_linux_noreplace_rename_falls_back_to_raw_syscall_without_glibc_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    class FakeCall:
+        argtypes: tuple[object, ...] = ()
+        restype: object = None
+
+        def __call__(self, *arguments: object) -> int:
+            calls.append(arguments)
+            return 0
+
+    class OldGlibc:
+        syscall = FakeCall()
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(artifacts_module, "CDLL", lambda *_args, **_kwargs: OldGlibc())
+    monkeypatch.setattr(os, "uname", lambda: SimpleNamespace(machine="x86_64"))
+
+    ArtifactStore._rename_noreplace(9, "source", "target")
+
+    assert calls == [(316, 9, b"source", 9, b"target", 1)]
 
 
 def test_write_json_is_canonical_and_replaces_existing_file(tmp_path: Path) -> None:
@@ -321,6 +348,99 @@ def test_postpublication_replacement_is_preserved_and_reports_unknown_recovery(
     assert caught.value.target_name == "result.txt"
     assert caught.value.recovery_name == ".published-moved"
     assert "trusted-payload" not in str(caught.value)
+
+
+def test_overwrite_rollback_does_not_replace_target_changed_after_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "artifacts"
+    store = ArtifactStore(root)
+    store.write_text("result.txt", "old-payload")
+    original_verify = store._verify_logical_parent
+    verify_calls = 0
+
+    def fail_postpublication_parent_check(parts: tuple[str, ...], parent_fd: int) -> None:
+        nonlocal verify_calls
+        verify_calls += 1
+        if verify_calls == 2:
+            raise UnsafeArtifactPath("injected logical parent failure")
+        original_verify(parts, parent_fd)
+
+    original_observe = store._observe_published_target
+    observe_calls = 0
+
+    def replace_after_rollback_observation(parent_fd: int, target_name: str) -> os.stat_result:
+        nonlocal observe_calls
+        observed = original_observe(parent_fd, target_name)
+        observe_calls += 1
+        if observe_calls == 2:
+            os.rename(target_name, ".published-moved", src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            third_party_fd = os.open(
+                target_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            os.write(third_party_fd, b"third-party-target")
+            os.close(third_party_fd)
+        return observed
+
+    monkeypatch.setattr(store, "_verify_logical_parent", fail_postpublication_parent_check)
+    monkeypatch.setattr(store, "_observe_published_target", replace_after_rollback_observation)
+
+    with pytest.raises(ArtifactDurabilityUnknown) as caught:
+        store.write_text("result.txt", "trusted-payload")
+
+    assert (root / "result.txt").read_text() == "third-party-target"
+    assert (root / ".published-moved").read_text() == "trusted-payload"
+    assert caught.value.recovery_name is not None
+    assert caught.value.recovery_name != "result.txt"
+    assert (root / caught.value.recovery_name).read_text() == "old-payload"
+
+
+def test_overwrite_rollback_preserves_target_created_after_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "artifacts"
+    store = ArtifactStore(root)
+    store.write_text("result.txt", "old-payload")
+    original_verify = store._verify_logical_parent
+    verify_calls = 0
+
+    def fail_postpublication_parent_check(parts: tuple[str, ...], parent_fd: int) -> None:
+        nonlocal verify_calls
+        verify_calls += 1
+        if verify_calls == 2:
+            raise UnsafeArtifactPath("injected logical parent failure")
+        original_verify(parts, parent_fd)
+
+    original_quarantine = store._quarantine_target
+    quarantine_name: str | None = None
+
+    def create_target_after_quarantine(parent_fd: int, target_name: str) -> tuple[str, os.stat_result]:
+        nonlocal quarantine_name
+        quarantine_name, metadata = original_quarantine(parent_fd, target_name)
+        third_party_fd = os.open(
+            target_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        os.write(third_party_fd, b"concurrent-third-party")
+        os.close(third_party_fd)
+        return quarantine_name, metadata
+
+    monkeypatch.setattr(store, "_verify_logical_parent", fail_postpublication_parent_check)
+    monkeypatch.setattr(store, "_quarantine_target", create_target_after_quarantine)
+
+    with pytest.raises(ArtifactDurabilityUnknown) as caught:
+        store.write_text("result.txt", "trusted-payload")
+
+    assert (root / "result.txt").read_text() == "concurrent-third-party"
+    assert quarantine_name is not None
+    assert (root / quarantine_name).read_text() == "trusted-payload"
+    assert caught.value.recovery_name is not None
+    assert (root / caught.value.recovery_name).read_text() == "old-payload"
 
 
 def test_durable_write_orders_temp_fsync_replace_and_parent_fsync(

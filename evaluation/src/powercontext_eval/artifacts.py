@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import secrets
 import stat
+import sys
 from collections.abc import Mapping, Sequence
+from ctypes import CDLL, c_char_p, c_int, c_long, c_uint, get_errno
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePath
@@ -363,6 +366,125 @@ class ArtifactStore:
                 continue
         raise ArtifactError("Could not allocate an artifact rollback link")
 
+    @staticmethod
+    def _rename_noreplace(parent_fd: int, source_name: str, target_name: str) -> None:
+        """Atomically rename one directory entry without replacing the destination."""
+
+        library = CDLL(None, use_errno=True)
+        source = os.fsencode(source_name)
+        target = os.fsencode(target_name)
+        if sys.platform == "darwin":
+            rename = library.renameatx_np
+            rename.argtypes = (c_int, c_char_p, c_int, c_char_p, c_uint)
+            rename.restype = c_int
+            result = rename(parent_fd, source, parent_fd, target, 0x00000004)
+        elif sys.platform.startswith("linux"):
+            rename = getattr(library, "renameat2", None)
+            if rename is not None:
+                rename.argtypes = (c_int, c_char_p, c_int, c_char_p, c_uint)
+                rename.restype = c_int
+                result = rename(parent_fd, source, parent_fd, target, 1)
+            else:
+                result = -1
+            if rename is None or (result != 0 and get_errno() == errno.ENOSYS):
+                syscall_numbers = {"x86_64": 316, "aarch64": 276}
+                syscall_number = syscall_numbers.get(os.uname().machine)
+                if syscall_number is None:
+                    raise ArtifactError("Atomic no-replace rename is unavailable on this Linux architecture")
+                syscall = library.syscall
+                syscall.restype = c_long
+                result = syscall(syscall_number, parent_fd, source, parent_fd, target, 1)
+        else:
+            raise ArtifactError("Atomic no-replace rename is unavailable on this platform")
+        if result != 0:
+            error_number = get_errno()
+            raise OSError(error_number, os.strerror(error_number), source_name, target_name)
+
+    @classmethod
+    def _quarantine_target(cls, parent_fd: int, target_name: str) -> tuple[str, os.stat_result]:
+        """Atomically detach the current target into a uniquely owned recovery name."""
+
+        for _ in range(32):
+            quarantine_name = cls._random_name(target_name, "recovery")
+            try:
+                cls._rename_noreplace(parent_fd, target_name, quarantine_name)
+            except FileExistsError:
+                continue
+            metadata = os.stat(quarantine_name, dir_fd=parent_fd, follow_symlinks=False)
+            return quarantine_name, metadata
+        raise ArtifactError("Could not allocate an artifact recovery name")
+
+    @classmethod
+    def _restore_quarantined_target(
+        cls,
+        parent_fd: int,
+        target_name: str,
+        quarantine_name: str,
+        quarantine_metadata: os.stat_result,
+    ) -> bool:
+        """Restore a quarantined entry without replacing a concurrently created target."""
+
+        try:
+            os.link(
+                quarantine_name,
+                target_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            return False
+        cls._unlink_name_if_inode(parent_fd, quarantine_name, quarantine_metadata)
+        os.fsync(parent_fd)
+        return True
+
+    def _rollback_published_target(
+        self,
+        parent_fd: int,
+        target_name: str,
+        published_metadata: os.stat_result,
+        backup_name: str | None,
+    ) -> bool:
+        """Rollback a publication without ever replacing an unclassified target."""
+
+        quarantine_name, quarantine_metadata = self._quarantine_target(parent_fd, target_name)
+        os.fsync(parent_fd)
+        if not self._same_inode(published_metadata, quarantine_metadata):
+            restored = self._restore_quarantined_target(
+                parent_fd,
+                target_name,
+                quarantine_name,
+                quarantine_metadata,
+            )
+            recovery_name = backup_name or self._find_inode_name(
+                parent_fd,
+                published_metadata,
+                excluded_names=frozenset({target_name, quarantine_name}),
+            )
+            if recovery_name is None and not restored:
+                recovery_name = quarantine_name
+            raise ArtifactDurabilityUnknown(target_name, recovery_name)
+
+        if backup_name is None:
+            self._unlink_name_if_inode(parent_fd, quarantine_name, quarantine_metadata)
+            return False
+
+        backup_metadata = os.stat(backup_name, dir_fd=parent_fd, follow_symlinks=False)
+        try:
+            os.link(
+                backup_name,
+                target_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError as error:
+            raise ArtifactDurabilityUnknown(target_name, backup_name) from error
+        os.fsync(parent_fd)
+        self._unlink_name_if_inode(parent_fd, quarantine_name, quarantine_metadata)
+        self._unlink_name_if_inode(parent_fd, backup_name, backup_metadata)
+        return True
+
     def _publish(
         self,
         parent_fd: int,
@@ -426,25 +548,16 @@ class ArtifactStore:
                                 excluded_names=frozenset({target_name}),
                             ),
                         )
-                    current_metadata = self._observe_published_target(parent_fd, target_name)
-                    if not self._same_inode(published_metadata, current_metadata):
-                        recovery_name = backup_name
-                        if recovery_name is None:
-                            recovery_name = self._find_inode_name(
-                                parent_fd,
-                                temporary_metadata,
-                                excluded_names=frozenset({target_name}),
-                            )
-                        raise ArtifactDurabilityUnknown(target_name, recovery_name)
-                    if backup_name is not None:
-                        os.replace(backup_name, target_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-                        os.fsync(parent_fd)
+                    self._observe_published_target(parent_fd, target_name)
+                    if self._rollback_published_target(
+                        parent_fd,
+                        target_name,
+                        published_metadata,
+                        backup_name,
+                    ):
                         backup_name = None
-                    else:
-                        if not self._unlink_name_if_inode(parent_fd, target_name, published_metadata):
-                            raise ArtifactDurabilityUnknown(target_name)
-                        if exclusive:
-                            self._unlink_name_if_inode(parent_fd, temporary_name, published_metadata)
+                    if exclusive:
+                        self._unlink_name_if_inode(parent_fd, temporary_name, published_metadata)
                 except ArtifactDurabilityUnknown:
                     raise
                 except (ArtifactError, OSError):
