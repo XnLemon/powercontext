@@ -40,6 +40,18 @@ def test_powercontext_ref_is_frozen() -> None:
         ref.value = "main"  # ty: ignore[invalid-assignment]
 
 
+def test_powercontext_ref_strictly_rejects_non_string_values() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        PowerContextRef(kind="branch", value=123)  # ty: ignore[invalid-argument-type]
+
+    [error] = exc_info.value.errors()
+    assert error["loc"] == ("value",)
+    assert error["type"] == "string_type"
+
+    with pytest.raises(ValidationError):
+        PowerContextRef(kind="branch", value=b"main")  # ty: ignore[invalid-argument-type]
+
+
 def test_arm_values_are_stable_strings() -> None:
     assert Arm.OFF == "off"
     assert Arm.ON == "on"
