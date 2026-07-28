@@ -204,7 +204,9 @@ Resolving a commit also creates an immutable private ref in the source mirror so
 reflog expiry, or garbage collection cannot remove an object needed by either arm. Materialization builds in a
 unique sibling temporary directory and publishes only a fully verified detached checkout with an OS-level atomic
 no-replace rename. A concurrent creator is never overwritten, and an unsupported no-replace primitive fails
-closed; failed attempts leave the public target absent and retryable.
+closed. Linux uses the libc `renameat2` wrapper when available and an architecture-specific raw
+`SYS_renameat2` fallback on older glibc, including m0's glibc 2.17; failed attempts leave the public target absent
+and retryable.
 
 ## 7. Codex isolation and treatment
 

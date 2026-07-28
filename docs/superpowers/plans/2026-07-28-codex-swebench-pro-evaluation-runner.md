@@ -276,16 +276,17 @@ Expected: imports fail because process and Git adapters do not exist.
 - reject password/query/fragment credentials before creating a cache and require a Git credential helper;
 - use command-scoped URL rewriting for username-only SSH/SCP transports so a raw transport is never persisted;
 - use only `clone --mirror`, `fetch --prune`, `ls-remote`, `rev-parse`, `clone --no-checkout`, and
-  `checkout --detach`, plus `update-ref` for immutable pins and `config --get remote.origin.url` to validate
+  `checkout --detach`, plus `update-ref` for immutable pins and `config --get-all remote.origin.url` to validate
   existing mirrors;
 - reject symlinked or out-of-root cache buckets before invoking Git;
-- validate that an existing mirror's origin equals the normalized source before fetching it;
+- require an existing mirror to contain exactly one origin URL equal to the normalized source before fetching it;
 - resolve `latest`, typed branch, typed tag, or full commit once into `ResolvedGitSource(source, requested, sha)`;
 - pin each resolved SHA under `refs/powercontext-eval/pins/<sha>` so mirror refresh and GC cannot remove it;
 - reject dirty local sources for `latest`;
 - bind source, source-hash bucket, and immutable pin provenance before materializing;
 - materialize only the already resolved full SHA through a unique temporary sibling and publish with an OS-level
-  atomic no-replace rename; fail closed when that primitive is unavailable;
+  atomic no-replace rename; on Linux, use the libc `renameat2` wrapper when present and the architecture-specific
+  raw `SYS_renameat2` syscall on older glibc such as m0's 2.17; fail closed when that primitive is unavailable;
 - remove only the exact temporary materialization on failure so the requested target remains retryable;
 - apply a finite timeout and non-interactive environment to every Git command;
 - work with Git 1.8.3.1 and avoid `git -C`, worktrees, partial clone, or `switch`.
