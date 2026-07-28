@@ -11,6 +11,7 @@ from typing import cast
 
 import pytest
 
+from powercontext_eval import process as process_module
 from powercontext_eval.process import (
     CommandFailed,
     CommandNotFound,
@@ -18,6 +19,47 @@ from powercontext_eval.process import (
     CommandTimedOut,
     ProcessRunner,
 )
+
+
+def test_linux_process_scan_stops_accessing_entries_after_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accessed: list[str] = []
+
+    class FakeStat:
+        def __init__(self, entry_name: str) -> None:
+            self._entry_name = entry_name
+
+        def read_text(self, *, encoding: str, errors: str) -> str:
+            assert encoding == "utf-8"
+            assert errors == "replace"
+            accessed.append(self._entry_name)
+            return f"{self._entry_name} (worker) S 1 0 0 0\n"
+
+    class FakeEntry:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __truediv__(self, child: str) -> FakeStat:
+            assert child == "stat"
+            return FakeStat(self.name)
+
+    class FakeProcRoot:
+        def is_dir(self) -> bool:
+            return True
+
+        def iterdir(self) -> list[FakeEntry]:
+            return [FakeEntry("100"), FakeEntry("101"), FakeEntry("102")]
+
+    def monotonic() -> float:
+        return 2.0 if accessed == ["100", "101"] else 0.0
+
+    monkeypatch.setattr(process_module, "Path", lambda _path: FakeProcRoot())
+    monkeypatch.setattr(process_module.time, "monotonic", monotonic)
+
+    process_module._process_parent_map(deadline=1.0)
+
+    assert accessed == ["100", "101"]
 
 
 def test_run_captures_utf8_output_and_replaces_invalid_bytes(tmp_path: Path) -> None:

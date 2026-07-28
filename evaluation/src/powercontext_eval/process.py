@@ -195,7 +195,7 @@ def _descendant_processes(root_pid: int, deadline: float) -> set[int]:
 def _process_parent_map(deadline: float) -> dict[int, int]:
     proc_root = Path("/proc")
     if proc_root.is_dir():
-        return _linux_process_parent_map(proc_root)
+        return _linux_process_parent_map(proc_root, deadline)
 
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -224,16 +224,27 @@ def _process_parent_map(deadline: float) -> dict[int, int]:
     return parent_map
 
 
-def _linux_process_parent_map(proc_root: Path) -> dict[int, int]:
+def _linux_process_parent_map(proc_root: Path, deadline: float) -> dict[int, int]:
     parent_map: dict[int, int] = {}
     for entry in proc_root.iterdir():
+        if time.monotonic() >= deadline:
+            break
         if not entry.name.isdigit():
+            if time.monotonic() >= deadline:
+                break
             continue
         try:
             stat_line = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            if time.monotonic() >= deadline:
+                break
+            continue
+        if time.monotonic() >= deadline:
+            break
+        try:
             remainder = stat_line.rsplit(")", maxsplit=1)[1].split()
             parent_map[int(entry.name)] = int(remainder[1])
-        except (IndexError, OSError, ValueError):
+        except (IndexError, ValueError):
             continue
     return parent_map
 
