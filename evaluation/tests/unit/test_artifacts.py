@@ -229,10 +229,12 @@ def test_directory_swap_after_preflight_rolls_back_and_leaves_no_payload(
             (root / "nested").symlink_to(outside, target_is_directory=True)
 
     monkeypatch.setattr(store, "_verify_logical_parent", swap_after_preflight)
-    with pytest.raises(UnsafeArtifactPath):
+    with pytest.raises(ArtifactDurabilityUnknown) as caught:
         store.write_text("nested/result.txt", "new-sensitive-payload")
 
     assert (outside / "nested/result.txt").read_text() == "old"
+    assert caught.value.recovery_name is not None
+    assert (outside / "nested" / caught.value.recovery_name).read_text() == "old"
     assert "new-sensitive-payload" not in "\n".join(
         path.read_text(errors="ignore") for path in (outside / "nested").iterdir() if path.is_file()
     )
@@ -263,11 +265,15 @@ def test_moved_temp_and_same_name_replacement_are_detected_and_cleaned(
             moved = True
 
     monkeypatch.setattr(store, "_assert_temp_named", move_after_check)
-    with pytest.raises(UnsafeArtifactPath):
+    with pytest.raises(ArtifactDurabilityUnknown) as caught:
         store.write_text("result.txt", "new-sensitive-payload")
 
     assert (root / "result.txt").read_text() == "old"
-    assert sorted(path.name for path in root.iterdir()) == ["result.txt"]
+    assert caught.value.recovery_name is not None
+    assert (root / caught.value.recovery_name).read_text() == "old"
+    assert "new-sensitive-payload" not in "\n".join(
+        path.read_text(errors="ignore") for path in root.iterdir() if path.is_file()
+    )
 
 
 @pytest.mark.parametrize("mode", ["exclusive", "absent", "overwrite"])
@@ -297,7 +303,8 @@ def test_name_to_inode_publication_race_is_transactionally_rolled_back(
             raced = True
 
     monkeypatch.setattr(store, "_assert_temp_named", replace_after_check)
-    with pytest.raises(UnsafeArtifactPath):
+    expected_error = ArtifactDurabilityUnknown if mode == "overwrite" else UnsafeArtifactPath
+    with pytest.raises(expected_error) as caught:
         if mode == "exclusive":
             store.create_text("result.txt", "trusted-payload")
         else:
@@ -305,6 +312,9 @@ def test_name_to_inode_publication_race_is_transactionally_rolled_back(
 
     if mode == "overwrite":
         assert (root / "result.txt").read_text() == "old"
+        assert isinstance(caught.value, ArtifactDurabilityUnknown)
+        assert caught.value.recovery_name is not None
+        assert (root / caught.value.recovery_name).read_text() == "old"
     else:
         assert not (root / "result.txt").exists()
     assert "attacker-target" not in "\n".join(
@@ -440,6 +450,68 @@ def test_overwrite_rollback_preserves_target_created_after_quarantine(
     assert quarantine_name is not None
     assert (root / quarantine_name).read_text() == "trusted-payload"
     assert caught.value.recovery_name is not None
+    assert (root / caught.value.recovery_name).read_text() == "old-payload"
+
+
+def test_overwrite_rollback_retains_backup_when_restored_target_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "artifacts"
+    store = ArtifactStore(root)
+    store.write_text("result.txt", "old-payload")
+    original_verify = store._verify_logical_parent
+    verify_calls = 0
+
+    def fail_postpublication_parent_check(parts: tuple[str, ...], parent_fd: int) -> None:
+        nonlocal verify_calls
+        verify_calls += 1
+        if verify_calls == 2:
+            raise UnsafeArtifactPath("injected logical parent failure")
+        original_verify(parts, parent_fd)
+
+    original_link = os.link
+    replaced = False
+
+    def replace_after_backup_restore(
+        source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        target: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        nonlocal replaced
+        original_link(
+            source,
+            target,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        source_name = os.fsdecode(source)
+        target_name = os.fsdecode(target)
+        if not replaced and ".backup-" in source_name and target_name == "result.txt":
+            assert dst_dir_fd is not None
+            os.unlink(target, dir_fd=dst_dir_fd)
+            third_party_fd = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=dst_dir_fd,
+            )
+            os.write(third_party_fd, b"post-restore-third-party")
+            os.close(third_party_fd)
+            replaced = True
+
+    monkeypatch.setattr(store, "_verify_logical_parent", fail_postpublication_parent_check)
+    monkeypatch.setattr(os, "link", replace_after_backup_restore)
+
+    with pytest.raises(ArtifactDurabilityUnknown) as caught:
+        store.write_text("result.txt", "trusted-payload")
+
+    assert (root / "result.txt").read_text() == "post-restore-third-party"
+    assert caught.value.recovery_name is not None
+    assert ".backup-" in caught.value.recovery_name
     assert (root / caught.value.recovery_name).read_text() == "old-payload"
 
 

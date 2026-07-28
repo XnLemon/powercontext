@@ -444,7 +444,9 @@ class ArtifactStore:
         target_name: str,
         published_metadata: os.stat_result,
         backup_name: str | None,
-    ) -> bool:
+        temporary_name: str,
+        temporary_metadata: os.stat_result,
+    ) -> None:
         """Rollback a publication without ever replacing an unclassified target."""
 
         quarantine_name, quarantine_metadata = self._quarantine_target(parent_fd, target_name)
@@ -467,7 +469,7 @@ class ArtifactStore:
 
         if backup_name is None:
             self._unlink_name_if_inode(parent_fd, quarantine_name, quarantine_metadata)
-            return False
+            return
 
         backup_metadata = os.stat(backup_name, dir_fd=parent_fd, follow_symlinks=False)
         try:
@@ -481,9 +483,21 @@ class ArtifactStore:
         except FileExistsError as error:
             raise ArtifactDurabilityUnknown(target_name, backup_name) from error
         os.fsync(parent_fd)
+        restored_metadata = os.stat(target_name, dir_fd=parent_fd, follow_symlinks=False)
+        if not self._same_inode(backup_metadata, restored_metadata):
+            raise ArtifactDurabilityUnknown(target_name, backup_name)
+
         self._unlink_name_if_inode(parent_fd, quarantine_name, quarantine_metadata)
-        self._unlink_name_if_inode(parent_fd, backup_name, backup_metadata)
-        return True
+        self._unlink_inode(
+            parent_fd,
+            temporary_name,
+            temporary_metadata,
+            excluded_names=frozenset({target_name, backup_name}),
+        )
+
+        # A same-directory writer can replace ``target_name`` after the check
+        # above. Keep the old inode's backup link as durable recovery evidence.
+        raise ArtifactDurabilityUnknown(target_name, backup_name)
 
     def _publish(
         self,
@@ -549,13 +563,14 @@ class ArtifactStore:
                             ),
                         )
                     self._observe_published_target(parent_fd, target_name)
-                    if self._rollback_published_target(
+                    self._rollback_published_target(
                         parent_fd,
                         target_name,
                         published_metadata,
                         backup_name,
-                    ):
-                        backup_name = None
+                        temporary_name,
+                        temporary_metadata,
+                    )
                     if exclusive:
                         self._unlink_name_if_inode(parent_fd, temporary_name, published_metadata)
                 except ArtifactDurabilityUnknown:
