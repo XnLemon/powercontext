@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { TaskForm } from "./TaskForm";
-import { apiStub, capabilities, instanceId, record } from "../test/fixtures";
+import type { Capabilities } from "../types";
+import { apiStub, capabilities, deferred, instanceId, record } from "../test/fixtures";
 
 describe("TaskForm", () => {
   it("loads exact server capabilities and defaults to OFF/ON", async () => {
@@ -36,15 +37,18 @@ describe("TaskForm", () => {
     await user.type(revision, `commit:${"a".repeat(40)}{Enter}`);
 
     await waitFor(() => expect(createTask).toHaveBeenCalledTimes(1));
-    expect(createTask).toHaveBeenCalledWith({
-      powercontext_ref: `commit:${"a".repeat(40)}`,
-      benchmark: capabilities.benchmarks[0],
-      instance_id: capabilities.instances[0],
-      model: capabilities.models[0],
-      reasoning_effort: capabilities.reasoning_efforts[0],
-      treatment_mode: "off_on",
-      idempotency_key: expect.stringMatching(/^[A-Za-z0-9._-]{8,128}$/),
-    });
+    expect(createTask).toHaveBeenCalledWith(
+      {
+        powercontext_ref: `commit:${"a".repeat(40)}`,
+        benchmark: capabilities.benchmarks[0],
+        instance_id: capabilities.instances[0],
+        model: capabilities.models[0],
+        reasoning_effort: capabilities.reasoning_efforts[0],
+        treatment_mode: "off_on",
+        idempotency_key: expect.stringMatching(/^[A-Za-z0-9._-]{8,128}$/),
+      },
+      expect.any(AbortSignal),
+    );
     expect(screen.getByRole("button", { name: "正在提交…" })).toBeDisabled();
     expect(revision).not.toBeDisabled();
 
@@ -108,48 +112,53 @@ describe("TaskForm", () => {
     expect(createTask.mock.calls[4]?.[0].idempotency_key).not.toBe(editedKey);
   });
 
-  it("submits visible non-first server selections and rotates the intent key when a selection changes", async () => {
-    const user = userEvent.setup();
-    const multiCapabilities = {
-      benchmarks: ["swebench-pro", "server-benchmark"],
-      instances: [instanceId, "server-instance"],
-      models: ["gpt-5.6-sol", "server-model"],
-      reasoning_efforts: ["medium", "high"],
-      treatment_modes: ["off_on", "server-treatment"],
-    };
-    const createTask = vi.fn().mockRejectedValue(new Error("network"));
-    render(
-      <TaskForm
-        api={apiStub({
-          getCapabilities: vi.fn().mockResolvedValue(multiCapabilities),
-          createTask,
-        })}
-        onCreated={() => undefined}
-      />,
-    );
-    await screen.findByRole("option", { name: "server-model" });
+  it("ignores a select value outside the typed server capabilities", async () => {
+    render(<TaskForm api={apiStub()} onCreated={() => undefined} />);
+    await screen.findByRole("option", { name: "gpt-5.6-sol" });
+    const model = screen.getByLabelText("模型");
+    fireEvent.change(model, { target: { value: "unknown-model" } });
+    expect(model).toHaveValue("gpt-5.6-sol");
+  });
 
-    await user.selectOptions(screen.getByLabelText("基准测试"), "server-benchmark");
-    await user.selectOptions(screen.getByLabelText("测试实例"), "server-instance");
-    await user.selectOptions(screen.getByLabelText("模型"), "server-model");
-    await user.selectOptions(screen.getByLabelText("推理强度"), "high");
-    await user.selectOptions(screen.getByLabelText("测试方式"), "server-treatment");
-    await user.click(screen.getByRole("button", { name: "提交测试任务" }));
+  it("ignores stale capabilities and aborts form work on unmount", async () => {
+    const stale = deferred<Capabilities>();
+    const create = deferred<ReturnType<typeof record>>();
+    const firstApi = apiStub({ getCapabilities: vi.fn().mockReturnValue(stale.promise) });
+    const createTask = vi.fn().mockReturnValue(create.promise);
+    const currentApi = apiStub({ createTask });
+    const onCreated = vi.fn();
+    const { rerender, unmount } = render(<TaskForm api={firstApi} onCreated={onCreated} />);
+    rerender(<TaskForm api={currentApi} onCreated={onCreated} />);
+    expect(await screen.findByRole("option", { name: "gpt-5.6-sol" })).toBeVisible();
+    stale.resolve({ benchmarks: [], instances: [], models: [], reasoning_efforts: [], treatment_modes: [] });
+    await act(async () => stale.promise);
+    expect(screen.getByLabelText("模型")).toHaveValue("gpt-5.6-sol");
+
+    fireEvent.click(screen.getByRole("button", { name: "提交测试任务" }));
     await waitFor(() => expect(createTask).toHaveBeenCalledTimes(1));
-    expect(createTask.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({
-        benchmark: "server-benchmark",
-        instance_id: "server-instance",
-        model: "server-model",
-        reasoning_effort: "high",
-        treatment_mode: "server-treatment",
-      }),
-    );
-    const firstKey = createTask.mock.calls[0]?.[0].idempotency_key;
+    const signal = createTask.mock.calls[0]?.[1];
+    unmount();
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal.aborted).toBe(true);
+    create.resolve(record("queued", "task-after-unmount"));
+    await act(async () => create.promise);
+    expect(onCreated).not.toHaveBeenCalled();
+  });
 
-    await user.selectOptions(screen.getByLabelText("模型"), "gpt-5.6-sol");
-    await user.click(screen.getByRole("button", { name: "提交测试任务" }));
-    await waitFor(() => expect(createTask).toHaveBeenCalledTimes(2));
-    expect(createTask.mock.calls[1]?.[0].idempotency_key).not.toBe(firstKey);
+  it("preserves the idempotency intent when an in-flight submit is aborted by an API change", async () => {
+    const first = deferred<ReturnType<typeof record>>();
+    const firstCreate = vi.fn().mockReturnValue(first.promise);
+    const retryCreate = vi.fn().mockRejectedValue(new Error("network"));
+    const { rerender } = render(<TaskForm api={apiStub({ createTask: firstCreate })} onCreated={() => undefined} />);
+    await screen.findByRole("option", { name: "swebench-pro" });
+    fireEvent.click(screen.getByRole("button", { name: "提交测试任务" }));
+    await waitFor(() => expect(firstCreate).toHaveBeenCalledTimes(1));
+    const firstKey = firstCreate.mock.calls[0]?.[0].idempotency_key;
+
+    rerender(<TaskForm api={apiStub({ createTask: retryCreate })} onCreated={() => undefined} />);
+    expect(await screen.findByRole("button", { name: "提交测试任务" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "提交测试任务" }));
+    await waitFor(() => expect(retryCreate).toHaveBeenCalledTimes(1));
+    expect(retryCreate.mock.calls[0]?.[0].idempotency_key).toBe(firstKey);
   });
 });

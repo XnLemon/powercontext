@@ -119,9 +119,9 @@ export function TaskDetail({ api, taskId, onTaskChanged }: TaskDetailProps) {
       <div className="detail-block">
         <h3>时间线</h3>
         <ol className="timeline">
-          <li><span>已提交</span><time>{shownTime(task.created_at)}</time></li>
-          <li><span>开始执行</span><time>{shownTime(task.started_at)}</time></li>
-          <li><span>结束</span><time>{shownTime(task.finished_at)}</time></li>
+          <li><span>已提交</span><time dateTime={task.created_at}>{shownTime(task.created_at)}</time></li>
+          <li><span>开始执行</span><time dateTime={task.started_at ?? undefined}>{shownTime(task.started_at)}</time></li>
+          <li><span>结束</span><time dateTime={task.finished_at ?? undefined}>{shownTime(task.finished_at)}</time></li>
         </ol>
       </div>
       {(task.status === "failed" || task.status === "interrupted") && (

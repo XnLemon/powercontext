@@ -10,8 +10,8 @@ interface TaskFormProps {
 
 const revisionPattern = /^(latest|commit:[0-9a-fA-F]{40})$/;
 
-function hasOption(options: readonly string[], value: string): boolean {
-  return options.includes(value);
+function isOption<Option extends string>(options: readonly Option[], value: string): value is Option {
+  return options.some((option) => option === value);
 }
 
 function idempotencyKey(): string {
@@ -23,35 +23,55 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [loadingError, setLoadingError] = useState(false);
   const [revision, setRevision] = useState("latest");
-  const [benchmark, setBenchmark] = useState("");
-  const [instanceId, setInstanceId] = useState("");
-  const [model, setModel] = useState("");
-  const [reasoningEffort, setReasoningEffort] = useState("");
-  const [treatmentMode, setTreatmentMode] = useState("");
+  const [benchmark, setBenchmark] = useState<TaskCreate["benchmark"] | "">("");
+  const [instanceId, setInstanceId] = useState<TaskCreate["instance_id"] | "">("");
+  const [model, setModel] = useState<TaskCreate["model"] | "">("");
+  const [reasoningEffort, setReasoningEffort] = useState<TaskCreate["reasoning_effort"] | "">("");
+  const [treatmentMode, setTreatmentMode] = useState<TaskCreate["treatment_mode"] | "">("");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
   const [created, setCreated] = useState<TaskRecord | null>(null);
   const intentKey = useRef<{ fingerprint: string; key: string } | null>(null);
+  const capabilityGeneration = useRef(0);
+  const capabilityController = useRef<AbortController | null>(null);
+  const submitGeneration = useRef(0);
+  const submitController = useRef<AbortController | null>(null);
 
   const load = () => {
+    capabilityController.current?.abort();
+    const controller = new AbortController();
+    capabilityController.current = controller;
+    const generation = ++capabilityGeneration.current;
     setLoadingError(false);
     api
-      .getCapabilities()
+      .getCapabilities(controller.signal)
       .then((next) => {
+        if (controller.signal.aborted || generation !== capabilityGeneration.current) return;
         setCapabilities(next);
-        setBenchmark((value) => (hasOption(next.benchmarks, value) ? value : (next.benchmarks[0] ?? "")));
-        setInstanceId((value) => (hasOption(next.instances, value) ? value : (next.instances[0] ?? "")));
-        setModel((value) => (hasOption(next.models, value) ? value : (next.models[0] ?? "")));
+        setBenchmark((value) => (isOption(next.benchmarks, value) ? value : (next.benchmarks[0] ?? "")));
+        setInstanceId((value) => (isOption(next.instances, value) ? value : (next.instances[0] ?? "")));
+        setModel((value) => (isOption(next.models, value) ? value : (next.models[0] ?? "")));
         setReasoningEffort((value) =>
-          hasOption(next.reasoning_efforts, value) ? value : (next.reasoning_efforts[0] ?? ""),
+          isOption(next.reasoning_efforts, value) ? value : (next.reasoning_efforts[0] ?? ""),
         );
         setTreatmentMode((value) =>
-          hasOption(next.treatment_modes, value) ? value : (next.treatment_modes[0] ?? ""),
+          isOption(next.treatment_modes, value) ? value : (next.treatment_modes[0] ?? ""),
         );
       })
-      .catch(() => setLoadingError(true));
+      .catch(() => {
+        if (!controller.signal.aborted && generation === capabilityGeneration.current) setLoadingError(true);
+      });
   };
-  useEffect(load, [api]);
+  useEffect(() => {
+    setPending(false);
+    load();
+    return () => {
+      capabilityController.current?.abort();
+      submitController.current?.abort();
+      capabilityGeneration.current += 1;
+      submitGeneration.current += 1;
+    };
+  }, [api]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -62,11 +82,11 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
     }
     if (capabilities === null) return;
     if (
-      !hasOption(capabilities.benchmarks, benchmark) ||
-      !hasOption(capabilities.instances, instanceId) ||
-      !hasOption(capabilities.models, model) ||
-      !hasOption(capabilities.reasoning_efforts, reasoningEffort) ||
-      !hasOption(capabilities.treatment_modes, treatmentMode)
+      !isOption(capabilities.benchmarks, benchmark) ||
+      !isOption(capabilities.instances, instanceId) ||
+      !isOption(capabilities.models, model) ||
+      !isOption(capabilities.reasoning_efforts, reasoningEffort) ||
+      !isOption(capabilities.treatment_modes, treatmentMode)
     ) {
       setMessage("当前没有可提交的固定测试配置。");
       return;
@@ -83,17 +103,22 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
     if (intentKey.current?.fingerprint !== fingerprint) {
       intentKey.current = { fingerprint, key: idempotencyKey() };
     }
-    const task = { ...intent, idempotency_key: intentKey.current.key } as unknown as TaskCreate;
+    const task: TaskCreate = { ...intent, idempotency_key: intentKey.current.key };
+    submitController.current?.abort();
+    const controller = new AbortController();
+    submitController.current = controller;
+    const generation = ++submitGeneration.current;
     setPending(true);
     try {
-      const result = await api.createTask(task);
+      const result = await api.createTask(task, controller.signal);
+      if (controller.signal.aborted || generation !== submitGeneration.current) return;
       intentKey.current = null;
       setCreated(result);
       onCreated(result);
     } catch {
-      setMessage("提交失败，请稍后重试。");
+      if (!controller.signal.aborted && generation === submitGeneration.current) setMessage("提交失败，请稍后重试。");
     } finally {
-      setPending(false);
+      if (!controller.signal.aborted && generation === submitGeneration.current) setPending(false);
     }
   };
 
@@ -145,8 +170,10 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
           <select
             value={benchmark}
             onChange={(event) => {
-              intentKey.current = null;
-              setBenchmark(event.target.value);
+              if (isOption(capabilities.benchmarks, event.target.value)) {
+                intentKey.current = null;
+                setBenchmark(event.target.value);
+              }
             }}
           >
             {capabilities.benchmarks.map((value) => (
@@ -159,8 +186,10 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
           <select
             value={instanceId}
             onChange={(event) => {
-              intentKey.current = null;
-              setInstanceId(event.target.value);
+              if (isOption(capabilities.instances, event.target.value)) {
+                intentKey.current = null;
+                setInstanceId(event.target.value);
+              }
             }}
           >
             {capabilities.instances.map((value) => (
@@ -174,8 +203,10 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
             <select
               value={model}
               onChange={(event) => {
-                intentKey.current = null;
-                setModel(event.target.value);
+                if (isOption(capabilities.models, event.target.value)) {
+                  intentKey.current = null;
+                  setModel(event.target.value);
+                }
               }}
             >
               {capabilities.models.map((value) => (
@@ -188,8 +219,10 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
             <select
               value={reasoningEffort}
               onChange={(event) => {
-                intentKey.current = null;
-                setReasoningEffort(event.target.value);
+                if (isOption(capabilities.reasoning_efforts, event.target.value)) {
+                  intentKey.current = null;
+                  setReasoningEffort(event.target.value);
+                }
               }}
             >
               {capabilities.reasoning_efforts.map((value) => (
@@ -203,8 +236,10 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
           <select
             value={treatmentMode}
             onChange={(event) => {
-              intentKey.current = null;
-              setTreatmentMode(event.target.value);
+              if (isOption(capabilities.treatment_modes, event.target.value)) {
+                intentKey.current = null;
+                setTreatmentMode(event.target.value);
+              }
             }}
           >
             {capabilities.treatment_modes.map((value) => (

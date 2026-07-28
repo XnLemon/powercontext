@@ -13,6 +13,12 @@ describe("TaskDetail", () => {
     expect(await screen.findByText("不可变提交参数")).toBeVisible();
     expect(screen.getByText("生成报告")).toBeVisible();
     expect(screen.getByRole("link", { name: "查看验收报告" })).toHaveAttribute("href", "/reports/task-done");
+    expect(screen.getAllByRole("time")).toHaveLength(3);
+    expect(screen.getAllByRole("time").map((element) => element.getAttribute("datetime"))).toEqual([
+      "2026-07-29T01:00:00Z",
+      "2026-07-29T01:01:00Z",
+      "2026-07-29T01:02:00Z",
+    ]);
 
     rerender(
       <TaskDetail

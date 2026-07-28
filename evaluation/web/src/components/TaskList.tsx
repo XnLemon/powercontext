@@ -65,6 +65,11 @@ export function TaskList({ api, onSelect }: TaskListProps) {
   const [now, setNow] = useState(Date.now());
   const requestGeneration = useRef(0);
   const requestController = useRef<AbortController | null>(null);
+  const filterRef = useRef<TaskStatus | "">(filter);
+  const loadRef = useRef<() => Promise<void>>(async () => undefined);
+  const mutationGeneration = useRef(0);
+  const mounted = useRef(true);
+  filterRef.current = filter;
 
   const load = useCallback(async () => {
     requestController.current?.abort();
@@ -80,11 +85,15 @@ export function TaskList({ api, onSelect }: TaskListProps) {
       if (!controller.signal.aborted && generation === requestGeneration.current) setError(true);
     }
   }, [api, filter]);
+  loadRef.current = load;
   useEffect(() => {
+    mounted.current = true;
     void load();
     return () => {
+      mounted.current = false;
       requestController.current?.abort();
       requestGeneration.current += 1;
+      mutationGeneration.current += 1;
     };
   }, [load]);
   useEffect(() => {
@@ -95,15 +104,18 @@ export function TaskList({ api, onSelect }: TaskListProps) {
 
   const cancel = async (taskId: string) => {
     if (!window.confirm(`确定取消排队中的任务 ${taskId}？`)) return;
+    const filterAtStart = filterRef.current;
+    const generation = ++mutationGeneration.current;
     setCancelling(taskId);
     setCancelError("");
     try {
       await api.cancelTask(taskId);
-      await load();
+      if (!mounted.current || generation !== mutationGeneration.current) return;
+      if (filterRef.current === filterAtStart) await loadRef.current();
     } catch {
-      setCancelError("任务取消失败，请重试。");
+      if (mounted.current && generation === mutationGeneration.current) setCancelError("任务取消失败，请重试。");
     } finally {
-      setCancelling(null);
+      if (mounted.current && generation === mutationGeneration.current) setCancelling(null);
     }
   };
 

@@ -120,4 +120,24 @@ describe("TaskList", () => {
     expect(screen.getByText("3 分 5 秒")).toBeVisible();
     vi.useRealTimers();
   });
+
+  it("does not refresh the old filter when cancellation resolves after a filter change", async () => {
+    const user = userEvent.setup();
+    const cancellation = deferred<ReturnType<typeof record>>();
+    const listTasks = vi
+      .fn()
+      .mockResolvedValueOnce([summary("queued")])
+      .mockResolvedValueOnce([summary("running", "task-running-filtered")]);
+    const cancelTask = vi.fn().mockReturnValue(cancellation.promise);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<TaskList api={apiStub({ listTasks, cancelTask })} onSelect={() => undefined} />);
+    await user.click(await screen.findByRole("button", { name: "取消 task-queued" }));
+    fireEvent.change(screen.getByLabelText("状态筛选"), { target: { value: "running" } });
+    expect(await screen.findByText("task-running-filtered")).toBeVisible();
+
+    cancellation.resolve(record("cancelled"));
+    await act(async () => cancellation.promise);
+    expect(screen.getByText("task-running-filtered")).toBeVisible();
+    expect(listTasks).toHaveBeenCalledTimes(2);
+  });
 });
