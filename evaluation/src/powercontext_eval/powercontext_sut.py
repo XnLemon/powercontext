@@ -705,6 +705,8 @@ class DockerSut:
     def _assign_arm_ownership(self, config: SutConfig, paths: ArmPaths) -> None:
         """Use a networkless, capability-minimal helper for exact owned mounts."""
 
+        if all((path.stat().st_uid, path.stat().st_gid) == (2950, 100) for path in (paths.workspace, paths.runtime)):
+            return
         self._docker.run(
             (
                 "docker",
