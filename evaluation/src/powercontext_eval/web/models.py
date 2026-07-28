@@ -1,10 +1,12 @@
 """Strict public domain models for the evaluation console."""
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from powercontext_eval.models import PowerContextRef
 from powercontext_eval.runner import INSTANCE_ID
@@ -103,6 +105,36 @@ class TaskRecord(FrozenModel):
 
     _utc_timestamps = field_validator("created_at", "started_at", "finished_at")(_require_utc)
 
+    @model_validator(mode="after")
+    def validate_lifecycle(self) -> Self:
+        failure_fields = (self.failure_category, self.failure_phase, self.failure_summary)
+        has_failure = all(value is not None for value in failure_fields)
+        has_partial_failure = any(value is not None for value in failure_fields) and not has_failure
+        if has_partial_failure:
+            raise ValueError("Failure category, phase, and summary must be provided together")
+
+        if self.status is TaskStatus.QUEUED:
+            if any((self.phase, self.started_at, self.finished_at, self.result, has_failure)):
+                raise ValueError("Queued tasks cannot contain lifecycle outcomes")
+        elif self.status is TaskStatus.RUNNING:
+            if self.started_at is None or self.finished_at is not None or self.result is not None or has_failure:
+                raise ValueError("Running tasks require only a start time")
+        elif self.status is TaskStatus.SUCCEEDED:
+            if self.started_at is None or self.finished_at is None or self.result is None or has_failure:
+                raise ValueError("Succeeded tasks require start, finish, and result data")
+        elif self.status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED}:
+            if self.started_at is None or self.finished_at is None or not has_failure or self.result is not None:
+                raise ValueError("Failed and interrupted tasks require complete failure data")
+        elif self.status is TaskStatus.CANCELLED and (
+            self.started_at is not None
+            or self.finished_at is None
+            or self.result is not None
+            or has_failure
+            or self.phase is not None
+        ):
+            raise ValueError("Cancelled tasks require only a finish time")
+        return self
+
 
 class TaskSummary(FrozenModel):
     task_id: str
@@ -147,23 +179,23 @@ class HealthResponse(FrozenModel):
 
 
 class MetricValue(FrozenModel):
-    value: int | float | None
+    value: Annotated[int | float, Field(ge=0, allow_inf_nan=False)] | None
 
 
 class ArmResponse(FrozenModel):
     arm: Literal["off", "on"]
     resolution: Literal["resolved", "unresolved"]
-    input_tokens: int | None = None
-    output_tokens: int | None = None
-    elapsed_seconds: float | None = None
-    patch_bytes: int | None = None
+    input_tokens: Annotated[int, Field(ge=0)] | None = None
+    output_tokens: Annotated[int, Field(ge=0)] | None = None
+    elapsed_seconds: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None
+    patch_bytes: Annotated[int, Field(ge=0)] | None = None
 
 
 class MetricComparison(FrozenModel):
-    off: int | float
-    on: int | float
-    delta: int | float
-    percent: float | None
+    off: Annotated[int | float, Field(ge=0, allow_inf_nan=False)]
+    on: Annotated[int | float, Field(ge=0, allow_inf_nan=False)]
+    delta: Annotated[int | float, Field(allow_inf_nan=False)]
+    percent: Annotated[float, Field(allow_inf_nan=False)] | None
 
 
 class ComparisonResponse(FrozenModel):
@@ -196,11 +228,20 @@ class ReportResponse(FrozenModel):
     on: ArmResponse
     comparison: ComparisonResponse
     evidence: EvidenceResponse
-    revisions: dict[str, str]
-    configuration: dict[str, str]
+    revisions: Mapping[str, str]
+    configuration: Mapping[str, str]
     generated_at: datetime
 
     _utc_timestamp = field_validator("generated_at")(_require_utc)
+
+    @field_validator("revisions", "configuration")
+    @classmethod
+    def freeze_mapping(cls, value: Mapping[str, str]) -> Mapping[str, str]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("revisions", "configuration")
+    def serialize_mapping(self, value: Mapping[str, str]) -> dict[str, str]:
+        return dict(value)
 
     @model_validator(mode="after")
     def require_distinct_arms(self) -> Self:

@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-class _ConfigInput(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+class WebConfig(BaseModel):
+    """Validated process configuration with secret-bearing fields excluded from serialization."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     root: Path
     database_path: Path
@@ -23,12 +24,12 @@ class _ConfigInput(BaseModel):
     raw_sample_path: Path
     codex_binary: Path
     uv_binary: Path
-    auth_json: Path
-    proxy_url: str
-    host: str = Field(min_length=1)
-    port: Annotated[int, Field(ge=1, le=65535)]
-    lease_seconds: Annotated[int, Field(ge=1, le=3600)]
-    poll_seconds: Annotated[float, Field(gt=0, le=30)]
+    auth_json: Path = Field(exclude=True, repr=False)
+    proxy_url: str = Field(exclude=True, repr=False)
+    host: str = Field(default="127.0.0.1", min_length=1)
+    port: Annotated[int, Field(ge=1, le=65535)] = 8080
+    lease_seconds: Annotated[int, Field(ge=1, le=3600)] = 60
+    poll_seconds: Annotated[float, Field(gt=0, le=30)] = 1.0
 
     @field_validator(
         "root",
@@ -49,28 +50,6 @@ class _ConfigInput(BaseModel):
             raise ValueError("Runtime paths must be absolute")
         return value
 
-
-@dataclass(frozen=True, slots=True)
-class WebConfig:
-    """Validated process configuration; secret-bearing fields are excluded from its representation."""
-
-    root: Path
-    database_path: Path
-    run_root: Path
-    frontend_dist: Path
-    powercontext_source: Path
-    harness_root: Path
-    harness_python: Path
-    raw_sample_path: Path
-    codex_binary: Path
-    uv_binary: Path
-    auth_json: Path = field(repr=False)
-    proxy_url: str = field(repr=False)
-    host: str = "127.0.0.1"
-    port: int = 8080
-    lease_seconds: int = 60
-    poll_seconds: float = 1.0
-
     @classmethod
     def for_root(
         cls,
@@ -86,34 +65,30 @@ class WebConfig:
         codex_binary: Path | None = None,
         uv_binary: Path | None = None,
         auth_json: Path | None = None,
-        proxy_url: str = "http://127.0.0.1:8081",
+        proxy_url: str = "http://127.0.0.1:7890",
         host: str = "127.0.0.1",
         port: int = 8080,
         lease_seconds: int = 60,
         poll_seconds: float = 1.0,
     ) -> Self:
-        values = _ConfigInput.model_validate(
-            {
-                "root": root,
-                "database_path": database_path or root / "web" / "tasks.sqlite3",
-                "run_root": run_root or root,
-                "frontend_dist": frontend_dist or root / "deploy" / "powercontext" / "evaluation" / "web" / "dist",
-                "powercontext_source": powercontext_source or root / "powercontext",
-                "harness_root": harness_root or root / "swebench-pro",
-                "harness_python": harness_python or root / "swebench-pro" / ".venv" / "bin" / "python",
-                "raw_sample_path": raw_sample_path or root / "data" / "swebench-pro-instance.jsonl",
-                "codex_binary": codex_binary or root / "bin" / "codex",
-                "uv_binary": uv_binary or root / "bin" / "uv",
-                "auth_json": auth_json or root / "config" / "auth.json",
-                "proxy_url": proxy_url,
-                "host": host,
-                "port": port,
-                "lease_seconds": lease_seconds,
-                "poll_seconds": poll_seconds,
-            },
-            strict=True,
+        return cls(
+            root=root,
+            database_path=database_path or root / "web" / "tasks.sqlite3",
+            run_root=run_root or root,
+            frontend_dist=frontend_dist or root / "deploy" / "powercontext" / "evaluation" / "web" / "dist",
+            powercontext_source=powercontext_source or root / "deploy" / "powercontext",
+            harness_root=harness_root or root / "cache" / "swebench-pro.git",
+            harness_python=harness_python or root / "venvs" / "swebench-pro-ca10a60" / "bin" / "python",
+            raw_sample_path=raw_sample_path or root / "cache" / "dataset" / "instance.jsonl",
+            codex_binary=codex_binary or root / "bin" / "codex",
+            uv_binary=uv_binary or root / "bin" / "uv",
+            auth_json=auth_json or root / "codex-home" / "auth.json",
+            proxy_url=proxy_url,
+            host=host,
+            port=port,
+            lease_seconds=lease_seconds,
+            poll_seconds=poll_seconds,
         )
-        return cls(**values.model_dump())
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str]) -> Self:
@@ -123,6 +98,18 @@ class WebConfig:
         def path(name: str) -> Path | None:
             value = environ.get(f"{prefix}{name}")
             return None if value is None else Path(value)
+
+        def integer(name: str, default: str) -> int:
+            try:
+                return int(environ.get(f"{prefix}{name}", default))
+            except ValueError:
+                raise ValueError(f"{prefix}{name} must be an integer") from None
+
+        def number(name: str, default: str) -> float:
+            try:
+                return float(environ.get(f"{prefix}{name}", default))
+            except ValueError:
+                raise ValueError(f"{prefix}{name} must be a number") from None
 
         return cls.for_root(
             root,
@@ -136,9 +123,9 @@ class WebConfig:
             codex_binary=path("CODEX_BINARY"),
             uv_binary=path("UV_BINARY"),
             auth_json=path("AUTH_JSON"),
-            proxy_url=environ.get(f"{prefix}PROXY_URL", "http://127.0.0.1:8081"),
+            proxy_url=environ.get(f"{prefix}PROXY_URL", "http://127.0.0.1:7890"),
             host=environ.get(f"{prefix}HOST", "127.0.0.1"),
-            port=int(environ.get(f"{prefix}PORT", "8080")),
-            lease_seconds=int(environ.get(f"{prefix}LEASE_SECONDS", "60")),
-            poll_seconds=float(environ.get(f"{prefix}POLL_SECONDS", "1")),
+            port=integer("PORT", "8080"),
+            lease_seconds=integer("LEASE_SECONDS", "60"),
+            poll_seconds=number("POLL_SECONDS", "1"),
         )

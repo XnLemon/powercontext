@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from math import inf, nan
 from pathlib import Path
 
 import pytest
@@ -6,7 +7,19 @@ from pydantic import ValidationError
 
 from powercontext_eval.runner import INSTANCE_ID
 from powercontext_eval.web.config import WebConfig
-from powercontext_eval.web.models import FailureCategory, TaskCreate, TaskPhase, TaskRecord, TaskStatus
+from powercontext_eval.web.models import (
+    ArmResponse,
+    ComparisonResponse,
+    EvidenceResponse,
+    FailureCategory,
+    ReportResponse,
+    TaskCreate,
+    TaskPhase,
+    TaskRecord,
+    TaskResult,
+    TaskStatus,
+    TreatmentEvidence,
+)
 
 
 def valid_task(**overrides: object) -> dict[str, object]:
@@ -37,6 +50,41 @@ def test_web_config_accepts_explicit_frontend_dist(tmp_path: Path) -> None:
     config = WebConfig.for_root(tmp_path, frontend_dist=frontend_dist)
 
     assert config.frontend_dist == frontend_dist
+
+
+def test_web_config_defaults_match_m0_layout() -> None:
+    root = Path("/data/powercontext-eval")
+
+    config = WebConfig.for_root(root)
+
+    assert config.powercontext_source == root / "deploy" / "powercontext"
+    assert config.harness_root == root / "cache" / "swebench-pro.git"
+    assert config.harness_python == root / "venvs" / "swebench-pro-ca10a60" / "bin" / "python"
+    assert config.raw_sample_path == root / "cache" / "dataset" / "instance.jsonl"
+    assert config.codex_binary == root / "bin" / "codex"
+    assert config.uv_binary == root / "bin" / "uv"
+    assert config.auth_json == root / "codex-home" / "auth.json"
+    assert config.proxy_url == "http://127.0.0.1:7890"
+    assert config.frontend_dist == root / "deploy" / "powercontext" / "evaluation" / "web" / "dist"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("root", Path("relative")),
+        ("database_path", Path("relative.sqlite3")),
+        ("port", 0),
+        ("port", 65536),
+        ("lease_seconds", 0),
+        ("poll_seconds", 0.0),
+    ],
+)
+def test_web_config_direct_construction_rejects_invalid_values(tmp_path: Path, field: str, value: object) -> None:
+    default = WebConfig.for_root(tmp_path)
+    payload = {name: getattr(default, name) for name in WebConfig.model_fields}
+
+    with pytest.raises(ValidationError):
+        WebConfig(**{**payload, field: value})  # ty: ignore[invalid-argument-type]
 
 
 def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) -> None:
@@ -101,12 +149,28 @@ def test_web_config_rejects_invalid_numeric_settings(tmp_path: Path, name: str, 
         WebConfig.from_environment({"POWERCONTEXT_EVAL_ROOT": str(tmp_path), name: value})
 
 
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("POWERCONTEXT_EVAL_PORT", "not-a-port", "POWERCONTEXT_EVAL_PORT must be an integer"),
+        ("POWERCONTEXT_EVAL_LEASE_SECONDS", "never", "POWERCONTEXT_EVAL_LEASE_SECONDS must be an integer"),
+        ("POWERCONTEXT_EVAL_POLL_SECONDS", "soon", "POWERCONTEXT_EVAL_POLL_SECONDS must be a number"),
+    ],
+)
+def test_web_config_rejects_malformed_numeric_environment_values(
+    tmp_path: Path, name: str, value: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        WebConfig.from_environment({"POWERCONTEXT_EVAL_ROOT": str(tmp_path), name: value})
+
+
 def test_web_config_has_no_public_serialization_that_leaks_secrets(tmp_path: Path) -> None:
     secret = "https://user:secret@proxy.invalid"
     config = WebConfig.for_root(tmp_path, auth_json=tmp_path / "auth-secret.json", proxy_url=secret)
 
-    assert not hasattr(config, "model_dump")
     assert not hasattr(config, "to_public")
+    assert "auth_json" not in config.model_dump()
+    assert "proxy_url" not in config.model_dump()
     assert secret not in repr(config)
     assert "auth-secret.json" not in repr(config)
 
@@ -230,11 +294,161 @@ def test_task_record_exposes_only_safe_failure_details() -> None:
         request=TaskCreate.model_validate(valid_task()),
         status=TaskStatus.FAILED,
         created_at=datetime(2026, 7, 29, tzinfo=UTC),
+        started_at=datetime(2026, 7, 29, tzinfo=UTC),
         finished_at=datetime(2026, 7, 29, 0, 1, tzinfo=UTC),
         failure_category=FailureCategory.CODEX_EXECUTION,
-        failure_phase=None,
+        failure_phase=TaskPhase.RUNNING_OFF,
         failure_summary="Codex did not complete. Inspect retained m0 logs.",
     )
 
     assert record.failure_category is FailureCategory.CODEX_EXECUTION
     assert record.failure_summary == "Codex did not complete. Inspect retained m0 logs."
+
+
+def record_payload(status: TaskStatus) -> dict[str, object]:
+    return {
+        "task_id": "run-123",
+        "request": TaskCreate.model_validate(valid_task()),
+        "status": status,
+        "created_at": datetime(2026, 7, 29, tzinfo=UTC),
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "fields"),
+    [
+        (TaskStatus.QUEUED, {"started_at": datetime(2026, 7, 29, tzinfo=UTC)}),
+        (TaskStatus.RUNNING, {}),
+        (
+            TaskStatus.RUNNING,
+            {"started_at": datetime(2026, 7, 29, tzinfo=UTC), "finished_at": datetime(2026, 7, 29, tzinfo=UTC)},
+        ),
+        (
+            TaskStatus.SUCCEEDED,
+            {"started_at": datetime(2026, 7, 29, tzinfo=UTC), "finished_at": datetime(2026, 7, 29, tzinfo=UTC)},
+        ),
+        (
+            TaskStatus.FAILED,
+            {
+                "started_at": datetime(2026, 7, 29, tzinfo=UTC),
+                "finished_at": datetime(2026, 7, 29, tzinfo=UTC),
+                "failure_category": FailureCategory.CODEX_EXECUTION,
+            },
+        ),
+        (
+            TaskStatus.INTERRUPTED,
+            {
+                "started_at": datetime(2026, 7, 29, tzinfo=UTC),
+                "finished_at": datetime(2026, 7, 29, tzinfo=UTC),
+                "failure_category": FailureCategory.WORKER_INTERRUPTION,
+                "failure_phase": TaskPhase.RUNNING_ON,
+                "failure_summary": "Worker lease expired.",
+                "result": {
+                    "artifact_dir": "runs/run-123",
+                    "report_path": "runs/run-123/report.md",
+                    "off_resolved": False,
+                    "on_resolved": False,
+                },
+            },
+        ),
+        (TaskStatus.CANCELLED, {}),
+        (
+            TaskStatus.CANCELLED,
+            {"finished_at": datetime(2026, 7, 29, tzinfo=UTC), "started_at": datetime(2026, 7, 29, tzinfo=UTC)},
+        ),
+    ],
+)
+def test_task_record_rejects_incoherent_lifecycle(status: TaskStatus, fields: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        TaskRecord.model_validate({**record_payload(status), **fields})
+
+
+@pytest.mark.parametrize(
+    ("status", "fields"),
+    [
+        (TaskStatus.QUEUED, {}),
+        (TaskStatus.RUNNING, {"started_at": datetime(2026, 7, 29, tzinfo=UTC)}),
+        (
+            TaskStatus.SUCCEEDED,
+            {
+                "started_at": datetime(2026, 7, 29, tzinfo=UTC),
+                "finished_at": datetime(2026, 7, 29, tzinfo=UTC),
+                "result": TaskResult(
+                    artifact_dir="runs/run-123",
+                    report_path="runs/run-123/report.md",
+                    off_resolved=True,
+                    on_resolved=True,
+                ),
+            },
+        ),
+        (
+            TaskStatus.FAILED,
+            {
+                "started_at": datetime(2026, 7, 29, tzinfo=UTC),
+                "finished_at": datetime(2026, 7, 29, tzinfo=UTC),
+                "failure_category": FailureCategory.CODEX_EXECUTION,
+                "failure_phase": TaskPhase.RUNNING_OFF,
+                "failure_summary": "Codex did not complete.",
+            },
+        ),
+        (
+            TaskStatus.INTERRUPTED,
+            {
+                "started_at": datetime(2026, 7, 29, tzinfo=UTC),
+                "finished_at": datetime(2026, 7, 29, tzinfo=UTC),
+                "failure_category": FailureCategory.WORKER_INTERRUPTION,
+                "failure_phase": TaskPhase.RUNNING_ON,
+                "failure_summary": "Worker lease expired.",
+            },
+        ),
+        (TaskStatus.CANCELLED, {"finished_at": datetime(2026, 7, 29, tzinfo=UTC)}),
+    ],
+)
+def test_task_record_accepts_coherent_lifecycle(status: TaskStatus, fields: dict[str, object]) -> None:
+    assert TaskRecord.model_validate({**record_payload(status), **fields}).status is status
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("input_tokens", -1),
+        ("output_tokens", -1),
+        ("elapsed_seconds", -0.1),
+        ("patch_bytes", -1),
+        ("elapsed_seconds", nan),
+        ("elapsed_seconds", inf),
+    ],
+)
+def test_report_arm_rejects_negative_or_non_finite_metrics(field: str, value: float) -> None:
+    with pytest.raises(ValidationError):
+        ArmResponse(arm="off", resolution="resolved", **{field: value})  # ty: ignore[invalid-argument-type]
+
+
+def test_report_response_nested_mappings_are_immutable() -> None:
+    evidence = TreatmentEvidence(
+        mcp_requests=0,
+        prompt_sources=0,
+        plugin_checkout_sha="0" * 40,
+        plugin_id="powercontext",
+        plugin_installed=False,
+        plugin_version="0.1.0",
+        scope_id="scope",
+        server_ready=False,
+    )
+    report = ReportResponse(
+        task_id="run-123",
+        acceptance_valid=False,
+        off=ArmResponse(arm="off", resolution="unresolved"),
+        on=ArmResponse(arm="on", resolution="unresolved"),
+        comparison=ComparisonResponse(),
+        evidence=EvidenceResponse(off=evidence, on=evidence),
+        revisions={"powercontext": "0" * 40},
+        configuration={"model": "gpt-5.6-sol"},
+        generated_at=datetime(2026, 7, 29, tzinfo=UTC),
+    )
+
+    with pytest.raises(TypeError):
+        report.revisions["powercontext"] = "1" * 40  # ty: ignore[invalid-assignment]
+    with pytest.raises(TypeError):
+        report.configuration["model"] = "other"  # ty: ignore[invalid-assignment]
+    assert ReportResponse.model_validate_json(report.model_dump_json()).revisions["powercontext"] == "0" * 40
