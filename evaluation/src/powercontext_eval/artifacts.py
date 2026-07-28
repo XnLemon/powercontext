@@ -253,6 +253,33 @@ class ArtifactStore:
         if not stat.S_ISREG(named.st_mode) or not self._same_inode(expected, named):
             raise UnsafeArtifactPath("Artifact temporary file identity changed")
 
+    @staticmethod
+    def _observe_published_target(parent_fd: int, target_name: str) -> os.stat_result:
+        return os.stat(target_name, dir_fd=parent_fd, follow_symlinks=False)
+
+    @classmethod
+    def _find_inode_name(
+        cls,
+        parent_fd: int,
+        expected: os.stat_result,
+        *,
+        excluded_names: frozenset[str] = frozenset(),
+    ) -> str | None:
+        try:
+            names = os.listdir(parent_fd)
+        except OSError:
+            return None
+        for name in names:
+            if name in excluded_names:
+                continue
+            try:
+                candidate = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if cls._same_inode(expected, candidate):
+                return name
+        return None
+
     @classmethod
     def _unlink_inode(
         cls,
@@ -349,6 +376,7 @@ class ArtifactStore:
         temporary_metadata = os.fstat(temporary_fd)
         backup_name: str | None = None
         published = False
+        published_metadata: os.stat_result | None = None
         try:
             target_metadata = self._target_metadata(parent_fd, target_name)
             if exclusive and target_metadata is not None:
@@ -378,20 +406,47 @@ class ArtifactStore:
                     dst_dir_fd=parent_fd,
                 )
             published = True
-            os.fsync(parent_fd)
-            published_metadata = os.stat(target_name, dir_fd=parent_fd, follow_symlinks=False)
+            published_metadata = self._observe_published_target(parent_fd, target_name)
             if not self._same_inode(temporary_metadata, published_metadata):
                 raise UnsafeArtifactPath("Published artifact identity changed")
+            os.fsync(parent_fd)
             self._verify_logical_parent(parts, parent_fd)
+            final_metadata = self._observe_published_target(parent_fd, target_name)
+            if not self._same_inode(published_metadata, final_metadata):
+                raise UnsafeArtifactPath("Published artifact changed after verification")
         except BaseException as publish_error:
             if published:
                 try:
+                    if published_metadata is None:
+                        raise ArtifactDurabilityUnknown(
+                            target_name,
+                            self._find_inode_name(
+                                parent_fd,
+                                temporary_metadata,
+                                excluded_names=frozenset({target_name}),
+                            ),
+                        )
+                    current_metadata = self._observe_published_target(parent_fd, target_name)
+                    if not self._same_inode(published_metadata, current_metadata):
+                        recovery_name = backup_name
+                        if recovery_name is None:
+                            recovery_name = self._find_inode_name(
+                                parent_fd,
+                                temporary_metadata,
+                                excluded_names=frozenset({target_name}),
+                            )
+                        raise ArtifactDurabilityUnknown(target_name, recovery_name)
                     if backup_name is not None:
                         os.replace(backup_name, target_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
                         os.fsync(parent_fd)
                         backup_name = None
                     else:
-                        self._unlink_name_if_inode(parent_fd, target_name, temporary_metadata)
+                        if not self._unlink_name_if_inode(parent_fd, target_name, published_metadata):
+                            raise ArtifactDurabilityUnknown(target_name)
+                        if exclusive:
+                            self._unlink_name_if_inode(parent_fd, temporary_name, published_metadata)
+                except ArtifactDurabilityUnknown:
+                    raise
                 except (ArtifactError, OSError):
                     raise ArtifactDurabilityUnknown(target_name, backup_name) from publish_error
             try:

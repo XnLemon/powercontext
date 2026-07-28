@@ -243,6 +243,86 @@ def test_moved_temp_and_same_name_replacement_are_detected_and_cleaned(
     assert sorted(path.name for path in root.iterdir()) == ["result.txt"]
 
 
+@pytest.mark.parametrize("mode", ["exclusive", "absent", "overwrite"])
+def test_name_to_inode_publication_race_is_transactionally_rolled_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    root = tmp_path / "artifacts"
+    store = ArtifactStore(root)
+    if mode == "overwrite":
+        store.write_text("result.txt", "old")
+    original_assert = store._assert_temp_named
+    raced = False
+
+    def replace_after_check(parent_fd: int, temporary_name: str, temporary_fd: int) -> None:
+        nonlocal raced
+        original_assert(parent_fd, temporary_name, temporary_fd)
+        if not raced:
+            os.rename(temporary_name, ".trusted-moved", src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            attacker_fd = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            os.write(attacker_fd, b"attacker-target")
+            os.close(attacker_fd)
+            raced = True
+
+    monkeypatch.setattr(store, "_assert_temp_named", replace_after_check)
+    with pytest.raises(UnsafeArtifactPath):
+        if mode == "exclusive":
+            store.create_text("result.txt", "trusted-payload")
+        else:
+            store.write_text("result.txt", "trusted-payload")
+
+    if mode == "overwrite":
+        assert (root / "result.txt").read_text() == "old"
+    else:
+        assert not (root / "result.txt").exists()
+    assert "attacker-target" not in "\n".join(
+        path.read_text(errors="ignore") for path in root.iterdir() if path.is_file()
+    )
+    assert "trusted-payload" not in "\n".join(
+        path.read_text(errors="ignore") for path in root.iterdir() if path.is_file()
+    )
+
+
+def test_postpublication_replacement_is_preserved_and_reports_unknown_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "artifacts"
+    store = ArtifactStore(root)
+    original_observe = store._observe_published_target
+    replaced = False
+
+    def replace_after_observation(parent_fd: int, target_name: str) -> os.stat_result:
+        nonlocal replaced
+        observed = original_observe(parent_fd, target_name)
+        if not replaced:
+            os.rename(target_name, ".published-moved", src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            attacker_fd = os.open(
+                target_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            os.write(attacker_fd, b"third-party-target")
+            os.close(attacker_fd)
+            replaced = True
+        return observed
+
+    monkeypatch.setattr(store, "_observe_published_target", replace_after_observation)
+    with pytest.raises(ArtifactDurabilityUnknown) as caught:
+        store.write_text("result.txt", "trusted-payload")
+
+    assert (root / "result.txt").read_text() == "third-party-target"
+    assert (root / ".published-moved").read_text() == "trusted-payload"
+    assert caught.value.target_name == "result.txt"
+    assert caught.value.recovery_name == ".published-moved"
+    assert "trusted-payload" not in str(caught.value)
+
+
 def test_durable_write_orders_temp_fsync_replace_and_parent_fsync(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
