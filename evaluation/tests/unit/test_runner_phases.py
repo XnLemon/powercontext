@@ -10,7 +10,7 @@ from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluati
 from powercontext_eval.codex import CodexOutcome
 from powercontext_eval.models import Arm
 from powercontext_eval.report import ReportBundle
-from powercontext_eval.runner import INSTANCE_ID, MinimalRunConfig, RunPhase, run_minimal_swebench_pro
+from powercontext_eval.runner import INSTANCE_ID, MinimalRunConfig, PhaseCallback, RunPhase, run_minimal_swebench_pro
 
 
 def test_run_phases_have_stable_order_and_values() -> None:
@@ -53,7 +53,10 @@ def _config(tmp_path: Path) -> MinimalRunConfig:
 
 
 def _run_with_fakes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, events: list[object]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[object],
+    on_phase: PhaseCallback | None = None,
 ) -> tuple[MinimalRunConfig, object]:
     config = _config(tmp_path)
     materialized = tmp_path / "materialized"
@@ -102,7 +105,8 @@ def _run_with_fakes(
         "powercontext_eval.runner.SweBenchProInstance.from_raw",
         lambda *args, **kwargs: instance,
     )
-    result = run_minimal_swebench_pro(config, on_phase=lambda phase: events.append(phase))
+    callback = on_phase if on_phase is not None else lambda phase: events.append(phase)
+    result = run_minimal_swebench_pro(config, on_phase=callback)
     return config, result
 
 
@@ -125,6 +129,24 @@ def test_runner_emits_phases_immediately_before_named_work(tmp_path: Path, monke
         "official",
         RunPhase.GENERATING_REPORT,
     ]
+
+
+def test_runner_preserves_falsey_phase_callback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class FalseyPhaseRecorder:
+        def __init__(self) -> None:
+            self.phases: list[RunPhase] = []
+
+        def __bool__(self) -> bool:
+            return False
+
+        def __call__(self, phase: RunPhase) -> None:
+            self.phases.append(phase)
+
+    recorder = FalseyPhaseRecorder()
+
+    _run_with_fakes(tmp_path, monkeypatch, [], on_phase=recorder)
+
+    assert recorder.phases == list(RunPhase)
 
 
 def test_runner_persists_strict_validated_report_json_without_secrets(

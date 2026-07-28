@@ -82,7 +82,7 @@ def run_minimal_swebench_pro(
 ) -> MinimalRunResult:
     """Resolve PowerContext once, run Gold then OFF/ON, and render a report."""
 
-    emit_phase = on_phase or (lambda phase: None)
+    emit_phase = on_phase if on_phase is not None else (lambda phase: None)
     run_id = config.run_id or datetime.now(UTC).strftime("run-%Y%m%d-%H%M%S")
     layout = EvaluationPaths(config.root.absolute(), run_id)
     if os.path.lexists(layout.run_artifacts) or os.path.lexists(config.root / "work" / run_id):
