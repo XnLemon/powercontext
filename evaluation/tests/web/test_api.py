@@ -268,13 +268,14 @@ def test_structured_and_raw_reports_use_validated_artifacts(
     task = client.post("/api/tasks", json=payload("report-key")).json()
     claimed = store.claim_next("worker", now=NOW)
     assert claimed is not None
-    _write_report(config.run_root, task["task_id"])
+    worker_run_dir = config.run_root / "runs" / task["task_id"]
+    _write_report(config.run_root / "runs", task["task_id"])
     store.succeed(
         task["task_id"],
         "worker",
         TaskResult(
-            artifact_dir=str(config.run_root / task["task_id"]),
-            report_path=str(config.run_root / task["task_id"] / "report.md"),
+            artifact_dir=str(worker_run_dir.relative_to(config.run_root)),
+            report_path=str((worker_run_dir / "report.md").relative_to(config.run_root)),
             off_resolved=True,
             on_resolved=True,
         ),
@@ -302,6 +303,30 @@ def test_structured_and_raw_reports_use_validated_artifacts(
     assert raw.text == "# Résumé\n"
     assert raw.headers["content-type"].startswith("text/plain")
     assert structured.headers["cache-control"] == raw.headers["cache-control"] == "no-store"
+
+
+def test_report_api_reads_the_canonical_worker_artifact_directory(
+    client: TestClient, config: WebConfig, store: TaskStore
+) -> None:
+    task = client.post("/api/tasks", json=payload("worker-report-key")).json()
+    claimed = store.claim_next("worker", now=NOW)
+    assert claimed is not None
+    worker_run_dir = config.run_root / "runs" / task["task_id"]
+    _write_report(config.run_root / "runs", task["task_id"])
+    store.succeed(
+        task["task_id"],
+        "worker",
+        TaskResult(
+            artifact_dir=str(worker_run_dir.relative_to(config.run_root)),
+            report_path=str((worker_run_dir / "report.md").relative_to(config.run_root)),
+            off_resolved=True,
+            on_resolved=True,
+        ),
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert client.get(f"/api/tasks/{task['task_id']}/report").status_code == 200
+    assert client.get(f"/api/tasks/{task['task_id']}/report.md").status_code == 200
 
 
 def test_report_unavailable_is_safe_for_queued_and_missing_tasks(client: TestClient) -> None:

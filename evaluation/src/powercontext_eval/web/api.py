@@ -389,7 +389,8 @@ def create_app(config: WebConfig, store: TaskStore | None = None) -> FastAPI:
         if isinstance(record, JSONResponse):
             return record
         try:
-            projected = load_report(config.run_root / record.task_id, config.run_root)
+            retained_root = config.run_root / "runs"
+            projected = load_report(retained_root / record.task_id, retained_root)
         except (ReportingError, OSError):
             return _error(409, "report_unavailable", "The evaluation report is not available.")
         return JSONResponse(content=projected.model_dump(mode="json"), headers=_NO_STORE)
@@ -400,7 +401,8 @@ def create_app(config: WebConfig, store: TaskStore | None = None) -> FastAPI:
         if isinstance(record, JSONResponse):
             return record
         try:
-            markdown = load_raw_report(config.run_root / record.task_id, config.run_root)
+            retained_root = config.run_root / "runs"
+            markdown = load_raw_report(retained_root / record.task_id, retained_root)
         except (InvalidReportArtifact, UnsafeReportPath, OSError):
             return _error(409, "report_unavailable", "The evaluation report is not available.")
         return PlainTextResponse(markdown, media_type="text/plain; charset=utf-8", headers=_NO_STORE)

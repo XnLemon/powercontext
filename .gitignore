@@ -22,6 +22,8 @@ build/
 develop-eggs/
 dist/
 evaluation/web/node_modules/
+evaluation/web/playwright-report/
+evaluation/web/test-results/
 evaluation/web/*.tsbuildinfo
 downloads/
 eggs/
