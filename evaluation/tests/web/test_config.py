@@ -187,40 +187,40 @@ def test_task_create_rejects_oversized_or_unsafe_idempotency_keys(idempotency_ke
 
 
 def test_task_status_values_are_exact() -> None:
-    assert list(TaskStatus) == [
-        TaskStatus.QUEUED,
-        TaskStatus.RUNNING,
-        TaskStatus.SUCCEEDED,
-        TaskStatus.FAILED,
-        TaskStatus.INTERRUPTED,
-        TaskStatus.CANCELLED,
+    assert [item.value for item in TaskStatus] == [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "interrupted",
+        "cancelled",
     ]
 
 
 def test_task_phase_values_are_exact() -> None:
-    assert list(TaskPhase) == [
-        TaskPhase.PREPARING,
-        TaskPhase.VALIDATING_GOLD,
-        TaskPhase.RUNNING_OFF,
-        TaskPhase.RUNNING_ON,
-        TaskPhase.OFFICIAL_EVALUATION,
-        TaskPhase.GENERATING_REPORT,
+    assert [item.value for item in TaskPhase] == [
+        "preparing",
+        "validating_gold",
+        "running_off",
+        "running_on",
+        "official_evaluation",
+        "generating_report",
     ]
 
 
 def test_failure_category_values_are_exact() -> None:
-    assert list(FailureCategory) == [
-        FailureCategory.INVALID_REQUEST,
-        FailureCategory.QUEUE_UNAVAILABLE,
-        FailureCategory.SOURCE_RESOLUTION,
-        FailureCategory.ENVIRONMENT_PREPARATION,
-        FailureCategory.GOLD_VALIDATION,
-        FailureCategory.CODEX_EXECUTION,
-        FailureCategory.TREATMENT_VALIDATION,
-        FailureCategory.OFFICIAL_EVALUATOR,
-        FailureCategory.REPORT_GENERATION,
-        FailureCategory.WORKER_INTERRUPTION,
-        FailureCategory.INTERNAL,
+    assert [item.value for item in FailureCategory] == [
+        "invalid_request",
+        "queue_unavailable",
+        "source_resolution_failure",
+        "environment_preparation_failure",
+        "gold_validation_failure",
+        "codex_execution_failure",
+        "treatment_validation_failure",
+        "official_evaluator_failure",
+        "report_generation_failure",
+        "worker_interruption",
+        "internal",
     ]
 
 
