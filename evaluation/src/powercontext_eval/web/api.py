@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 import os
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from stat import S_ISDIR, S_ISREG
@@ -14,7 +17,7 @@ from typing import Annotated, Any
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.models import Capabilities, HealthResponse, TaskCreate, TaskRecord, TaskStatus, TaskSummary
@@ -34,6 +37,8 @@ _SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
 }
+_MAX_FRONTEND_FILE_BYTES = 8 * 1024 * 1024
+_MAX_FRONTEND_TOTAL_BYTES = 32 * 1024 * 1024
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -70,39 +75,53 @@ class TaskEventStream:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        load: Callable[[str], Awaitable[TaskRecord]] | None = None,
     ) -> None:
         self._request = request
         self._store = store
         self._task_id = task_id
         self._poll_seconds = poll_seconds
-        self._heartbeat_seconds = heartbeat_seconds
+        self._heartbeat_seconds = min(heartbeat_seconds, 15.0)
         self._sleep = sleep
         self._monotonic = monotonic
         self._wall_clock = wall_clock
+        self._load = load
 
     async def __aiter__(self) -> AsyncIterator[str]:
         last_version: int | None = None
-        last_output = self._monotonic()
+        started = self._monotonic()
+        next_poll = started
+        next_heartbeat = started + self._heartbeat_seconds
         while not await self._request.is_disconnected():
-            record = self._store.get(self._task_id)
-            if record.version != last_version:
-                event = {
-                    "task_id": record.task_id,
-                    "status": record.status,
-                    "phase": record.phase,
-                    "version": record.version,
-                    "occurred_at": self._wall_clock(),
-                }
-                data = json.dumps(event, default=lambda value: value.isoformat(), separators=(",", ":"))
-                yield f"event: task\ndata: {data}\n\n"
-                last_version = record.version
-                last_output = self._monotonic()
-                if record.status in _TERMINAL:
-                    return
-            elif self._monotonic() - last_output >= self._heartbeat_seconds:
+            now = self._monotonic()
+            if now >= next_poll:
+                record = (
+                    await self._load(self._task_id)
+                    if self._load is not None
+                    else await asyncio.to_thread(self._store.get, self._task_id)
+                )
+                now = self._monotonic()
+                next_poll = now + self._poll_seconds
+                if record.version != last_version:
+                    event = {
+                        "task_id": record.task_id,
+                        "status": record.status,
+                        "phase": record.phase,
+                        "version": record.version,
+                        "occurred_at": self._wall_clock(),
+                    }
+                    data = json.dumps(event, default=lambda value: value.isoformat(), separators=(",", ":"))
+                    yield f"event: task\ndata: {data}\n\n"
+                    last_version = record.version
+                    next_heartbeat = now + self._heartbeat_seconds
+                    if record.status in _TERMINAL:
+                        return
+            now = self._monotonic()
+            if now >= next_heartbeat:
                 yield ": heartbeat\n\n"
-                last_output = self._monotonic()
-            await self._sleep(self._poll_seconds)
+                next_heartbeat = now + self._heartbeat_seconds
+            now = self._monotonic()
+            await self._sleep(max(0.0, min(next_poll, next_heartbeat) - now))
 
 
 def _safe_frontend(frontend: Path, root: Path) -> bool:
@@ -137,21 +156,105 @@ def _safe_frontend(frontend: Path, root: Path) -> bool:
     return True
 
 
-def _safe_asset(assets: Path, requested: str) -> Path | None:
+@dataclass(frozen=True)
+class _FrontendSnapshot:
+    index: bytes
+    assets: dict[str, tuple[bytes, str]]
+
+
+def _open_directory(parent_fd: int, name: str) -> int:
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not S_ISDIR(before.st_mode):
+        raise OSError("Frontend component is not a directory")
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        dir_fd=parent_fd,
+    )
+    after = os.fstat(descriptor)
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        os.close(descriptor)
+        raise OSError("Frontend directory changed while opening")
+    return descriptor
+
+
+def _read_snapshot_file(parent_fd: int, name: str, total: list[int]) -> bytes:
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not S_ISREG(before.st_mode) or before.st_size > _MAX_FRONTEND_FILE_BYTES:
+        raise OSError("Frontend file is not a bounded regular file")
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        dir_fd=parent_fd,
+    )
     try:
-        relative = Path(requested)
-        if not requested or relative.is_absolute() or ".." in relative.parts:
-            return None
-        candidate = assets / relative
-        current = assets
-        for component in relative.parts:
-            current /= component
-            metadata = current.lstat()
-            if current.is_symlink():
-                return None
-        return candidate if S_ISREG(metadata.st_mode) else None
-    except (FileNotFoundError, NotADirectoryError, OSError):
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or not S_ISREG(after.st_mode):
+            raise OSError("Frontend file changed while opening")
+        chunks: list[bytes] = []
+        remaining = _MAX_FRONTEND_FILE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > _MAX_FRONTEND_FILE_BYTES or len(data) != after.st_size:
+            raise OSError("Frontend file changed while reading")
+        total[0] += len(data)
+        if total[0] > _MAX_FRONTEND_TOTAL_BYTES:
+            raise OSError("Frontend snapshot is too large")
+        return data
+    finally:
+        os.close(descriptor)
+
+
+def _snapshot_assets(directory_fd: int, prefix: str, total: list[int]) -> dict[str, tuple[bytes, str]]:
+    assets: dict[str, tuple[bytes, str]] = {}
+    for name in sorted(os.listdir(directory_fd)):
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        relative = f"{prefix}/{name}" if prefix else name
+        if S_ISDIR(metadata.st_mode):
+            child_fd = _open_directory(directory_fd, name)
+            try:
+                assets.update(_snapshot_assets(child_fd, relative, total))
+            finally:
+                os.close(child_fd)
+        elif S_ISREG(metadata.st_mode):
+            media_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+            assets[relative] = (_read_snapshot_file(directory_fd, name, total), media_type)
+        else:
+            raise OSError("Frontend tree contains a non-regular entry")
+    return assets
+
+
+def _snapshot_frontend(frontend: Path, root: Path) -> _FrontendSnapshot | None:
+    if not _safe_frontend(frontend, root):
         return None
+    relative = frontend.relative_to(root / "deploy")
+    descriptors: list[int] = []
+    try:
+        root_fd = os.open(
+            root,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        descriptors.append(root_fd)
+        current_fd = _open_directory(root_fd, "deploy")
+        descriptors.append(current_fd)
+        for component in relative.parts:
+            current_fd = _open_directory(current_fd, component)
+            descriptors.append(current_fd)
+        total = [0]
+        index = _read_snapshot_file(current_fd, "index.html", total)
+        assets_fd = _open_directory(current_fd, "assets")
+        descriptors.append(assets_fd)
+        return _FrontendSnapshot(index=index, assets=_snapshot_assets(assets_fd, "", total))
+    except (FileNotFoundError, NotADirectoryError, OSError, ValueError):
+        return None
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def create_app(config: WebConfig, store: TaskStore | None = None) -> FastAPI:
@@ -272,20 +375,29 @@ def create_app(config: WebConfig, store: TaskStore | None = None) -> FastAPI:
     def unknown_api(path: str) -> JSONResponse:
         return _error(404, "not_found", "The requested API route does not exist.")
 
-    frontend = config.frontend_dist
-    index = frontend / "index.html"
-    assets = frontend / "assets"
-    frontend_ready = _safe_frontend(frontend, config.root)
-    if frontend_ready:
+    frontend_snapshot = _snapshot_frontend(config.frontend_dist, config.root)
+    if frontend_snapshot is not None:
 
         @app.get("/assets/{asset_path:path}")
         def frontend_asset(asset_path: str) -> Response:
-            target = _safe_asset(assets, asset_path)
-            return FileResponse(target) if target is not None else PlainTextResponse("Not found.", status_code=404)
+            asset = frontend_snapshot.assets.get(asset_path)
+            if asset is None:
+                return PlainTextResponse("Not found.", status_code=404)
+            content, media_type = asset
+            cache = (
+                "public, max-age=31536000, immutable"
+                if re.search(r"[-.][A-Za-z0-9_-]{8,}\.", Path(asset_path).name)
+                else "no-cache"
+            )
+            return Response(content, media_type=media_type, headers={"Cache-Control": cache})
 
         @app.get("/{path:path}")
         def frontend_fallback(path: str) -> Response:
-            return FileResponse(index)
+            return Response(
+                frontend_snapshot.index,
+                media_type="text/html",
+                headers={"Cache-Control": "no-store"},
+            )
     else:
 
         @app.get("/assets/{asset_path:path}")

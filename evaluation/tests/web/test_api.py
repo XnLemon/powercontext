@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -312,11 +313,12 @@ def test_event_stream_suppresses_unchanged_versions_emits_change_and_final_then_
         now=NOW,
     )
     request = _Request()
-    ticks = iter((0.0, 0.0, 1.0, 1.0, 2.0, 2.0))
+    now = 0.0
     sleeps = 0
 
-    async def sleep(_seconds: float) -> None:
-        nonlocal sleeps
+    async def sleep(seconds: float) -> None:
+        nonlocal now, sleeps
+        now += seconds
         sleeps += 1
         if sleeps == 2:
             store.cancel_queued(record.task_id, now=NOW + timedelta(seconds=1))
@@ -329,7 +331,7 @@ def test_event_stream_suppresses_unchanged_versions_emits_change_and_final_then_
             poll_seconds=0.1,
             heartbeat_seconds=15,
             sleep=sleep,
-            monotonic=lambda: next(ticks),
+            monotonic=lambda: now,
             wall_clock=lambda: NOW,
         ).__aiter__()
         initial = await _next(stream)
@@ -349,20 +351,21 @@ def test_event_stream_heartbeat_at_fifteen_seconds_and_disconnect_exit(store: Ta
         now=NOW,
     )
     request = _Request()
-    monotonic_values = iter((0.0, 0.0, 15.0, 15.0))
+    now = 0.0
 
-    async def sleep(_seconds: float) -> None:
-        return None
+    async def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
 
     async def scenario() -> None:
         stream = TaskEventStream(
             request,
             store,
             record.task_id,
-            poll_seconds=0.1,
+            poll_seconds=30,
             heartbeat_seconds=15,
             sleep=sleep,
-            monotonic=lambda: next(monotonic_values),
+            monotonic=lambda: now,
             wall_clock=lambda: NOW,
         ).__aiter__()
         assert '"status":"queued"' in await _next(stream)
@@ -381,9 +384,15 @@ def test_event_stream_does_not_hold_sqlite_transaction_during_wait(config: WebCo
     )
     second = TaskStore(config.database_path, lease_duration=timedelta(seconds=60))
     request = _Request()
+    now = 0.0
+    mutated = False
 
-    async def sleep(_seconds: float) -> None:
-        second.cancel_queued(record.task_id, now=NOW + timedelta(seconds=1))
+    async def sleep(seconds: float) -> None:
+        nonlocal mutated, now
+        now += seconds
+        if not mutated:
+            second.cancel_queued(record.task_id, now=NOW + timedelta(seconds=1))
+            mutated = True
 
     async def scenario() -> None:
         stream = TaskEventStream(
@@ -393,13 +402,109 @@ def test_event_stream_does_not_hold_sqlite_transaction_during_wait(config: WebCo
             poll_seconds=0.1,
             heartbeat_seconds=15,
             sleep=sleep,
-            monotonic=lambda: 0.0,
+            monotonic=lambda: now,
             wall_clock=lambda: NOW,
         ).__aiter__()
         await _next(stream)
         assert '"status":"cancelled"' in await _next(stream)
 
     asyncio.run(scenario())
+
+
+def test_event_stream_loads_sqlite_without_blocking_event_loop(
+    store: TaskStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record, _ = store.create(TaskCreate.model_validate(payload("async-load-key")), now=NOW)
+    original_get = store.get
+    order: list[str] = []
+
+    def slow_get(task_id: str) -> Any:
+        time.sleep(0.05)
+        return original_get(task_id)
+
+    monkeypatch.setattr(store, "get", slow_get)
+
+    async def scenario() -> None:
+        stream = TaskEventStream(
+            _Request(),
+            store,
+            record.task_id,
+            poll_seconds=1,
+            sleep=asyncio.sleep,
+            monotonic=time.monotonic,
+            wall_clock=lambda: NOW,
+        ).__aiter__()
+
+        async def consume() -> None:
+            await _next(stream)
+            order.append("event")
+
+        async def timer() -> None:
+            await asyncio.sleep(0.005)
+            order.append("timer")
+
+        await asyncio.gather(consume(), timer())
+
+    asyncio.run(scenario())
+    assert order == ["timer", "event"]
+
+
+def test_event_stream_heartbeat_is_not_delayed_by_thirty_second_poll(store: TaskStore) -> None:
+    record, _ = store.create(TaskCreate.model_validate(payload("long-poll-key")), now=NOW)
+    request = _Request()
+    now = 0.0
+    sleeps: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    async def scenario() -> None:
+        stream = TaskEventStream(
+            request,
+            store,
+            record.task_id,
+            poll_seconds=30,
+            heartbeat_seconds=15,
+            sleep=sleep,
+            monotonic=lambda: now,
+            wall_clock=lambda: NOW,
+        ).__aiter__()
+        assert '"status":"queued"' in await _next(stream)
+        assert await _next(stream) == ": heartbeat\n\n"
+        request.disconnected = True
+
+    asyncio.run(scenario())
+    assert sleeps == [15]
+
+
+def test_event_stream_clamps_heartbeat_to_fifteen_seconds(store: TaskStore) -> None:
+    record, _ = store.create(TaskCreate.model_validate(payload("clamped-heartbeat-key")), now=NOW)
+    now = 0.0
+    sleeps: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    async def scenario() -> None:
+        stream = TaskEventStream(
+            _Request(),
+            store,
+            record.task_id,
+            poll_seconds=30,
+            heartbeat_seconds=60,
+            sleep=sleep,
+            monotonic=lambda: now,
+            wall_clock=lambda: NOW,
+        ).__aiter__()
+        await _next(stream)
+        assert await _next(stream) == ": heartbeat\n\n"
+
+    asyncio.run(scenario())
+    assert sleeps == [15]
 
 
 def test_frontend_fallback_is_confined_and_does_not_capture_api(config: WebConfig, store: TaskStore) -> None:
@@ -415,6 +520,46 @@ def test_frontend_fallback_is_confined_and_does_not_capture_api(config: WebConfi
     assert client.get("/assets/%2e%2e/index.html").status_code == 404
     assert client.get("/api/unknown").headers["content-type"].startswith("application/json")
     assert client.get("/assets/").status_code == 404
+
+
+def test_frontend_is_an_immutable_snapshot_with_cache_policy(
+    tmp_path: Path, config: WebConfig, store: TaskStore
+) -> None:
+    assets = config.frontend_dist / "assets"
+    assets.mkdir(parents=True)
+    index = config.frontend_dist / "index.html"
+    hashed = assets / "app-a1b2c3d4.js"
+    index.write_text("<main>safe</main>")
+    hashed.write_text("safe-code")
+    client = TestClient(create_app(config, store))
+
+    outside_index = tmp_path / "secret-index"
+    outside_asset = tmp_path / "secret-asset"
+    outside_index.write_text(SECRET)
+    outside_asset.write_text(SECRET)
+    index.unlink()
+    index.symlink_to(outside_index)
+    hashed.unlink()
+    hashed.symlink_to(outside_asset)
+
+    root = client.get("/")
+    asset = client.get("/assets/app-a1b2c3d4.js")
+    assert root.text == "<main>safe</main>"
+    assert root.headers["cache-control"] == "no-store"
+    assert asset.text == "safe-code"
+    assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert SECRET not in root.text + asset.text
+
+
+def test_frontend_snapshot_rejects_oversized_regular_file(config: WebConfig, store: TaskStore) -> None:
+    assets = config.frontend_dist / "assets"
+    assets.mkdir(parents=True)
+    (config.frontend_dist / "index.html").write_text("index")
+    (assets / "large.js").write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+
+    client = TestClient(create_app(config, store))
+
+    assert client.get("/").status_code == 503
 
 
 @pytest.mark.parametrize("link", ["parent", "dist", "index", "assets", "descendant"])
