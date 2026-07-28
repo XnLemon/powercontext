@@ -1,9 +1,11 @@
 import subprocess
 import sys
+from pathlib import Path
 
 from typer.testing import CliRunner
 
 from powercontext_eval.cli import app
+from powercontext_eval.runner import MinimalRunResult
 
 
 def test_cli_help_describes_the_evaluation_runner() -> None:
@@ -71,3 +73,20 @@ def test_cli_module_is_directly_executable() -> None:
     )
     assert result.returncode == 0
     assert "codex-contract-smoke" in result.stdout
+
+
+def test_swebench_pro_run_exposes_the_minimal_m0_command(monkeypatch) -> None:
+    calls: list[object] = []
+
+    def fake_run(config: object) -> MinimalRunResult:
+        calls.append(config)
+        return MinimalRunResult("run-fixed", Path("/data/powercontext-eval/runs/run-fixed/report.md"), False, True)
+
+    monkeypatch.setattr("powercontext_eval.cli.run_minimal_swebench_pro", fake_run)
+    result = CliRunner().invoke(app, ["swebench-pro", "run", "--run-id", "run-fixed"])
+
+    assert result.exit_code == 0, result.output
+    assert '"run_id": "run-fixed"' in result.output
+    assert '"off_resolved": false' in result.output
+    assert '"on_resolved": true' in result.output
+    assert len(calls) == 1

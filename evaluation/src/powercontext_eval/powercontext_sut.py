@@ -470,8 +470,8 @@ class DockerSut:
         """Verify immutable checkout and plugin manifest before creating resources."""
 
         result = self._docker.run(
-            ("git", "-C", os.fspath(config.source_checkout), "rev-parse", "--verify", "HEAD^{commit}"),
-            cwd=config.source_checkout.parent,
+            ("git", "rev-parse", "--verify", "HEAD^{commit}"),
+            cwd=config.source_checkout,
             timeout=30,
         )
         actual_sha = result.stdout.strip()
@@ -480,13 +480,11 @@ class DockerSut:
         status = self._docker.run(
             (
                 "git",
-                "-C",
-                os.fspath(config.source_checkout),
                 "status",
                 "--porcelain=v1",
                 "--untracked-files=all",
             ),
-            cwd=config.source_checkout.parent,
+            cwd=config.source_checkout,
             timeout=30,
         )
         if status.stdout:
@@ -696,7 +694,7 @@ class DockerSut:
             )
             created = True
             self._docker.run(
-                ("docker", "cp", f"{name}:/workspace/.", os.fspath(paths.workspace)),
+                ("docker", "cp", f"{name}:/app/.", os.fspath(paths.workspace)),
                 cwd=paths.runtime,
                 timeout=300,
             )

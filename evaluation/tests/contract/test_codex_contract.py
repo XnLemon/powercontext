@@ -260,11 +260,9 @@ class TranscriptDocker:
         self.commands.append(argv)
         if self.fail_at and self.fail_at in argv:
             raise CommandFailed("injected", command_result("", returncode=70))
-        if argv[:4] == ("git", "-C", os.fspath(Path(argv[2])), "rev-parse"):
+        if argv[:2] == ("git", "rev-parse"):
             return command_result("a" * 40 + "\n")
-        if argv[:2] == ("git", "-C") and argv[-2:] == ("rev-parse", "HEAD"):
-            return command_result("a" * 40 + "\n")
-        if argv[:2] == ("git", "-C") and "status" in argv:
+        if argv[:2] == ("git", "status"):
             return command_result("")
         if argv[-3:] == ("network", "inspect", "powercontext-eval-run-1"):
             return command_result('[{"IPAM":{"Config":[{"Gateway":"172.29.0.1"}]}}]')
@@ -341,6 +339,12 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
     )
 
     transcript = docker.commands
+    assert (
+        "docker",
+        "cp",
+        "powercontext-eval-run-1-on-init:/app/.",
+        str(paths.workspace),
+    ) in transcript
     run = next(command for command in transcript if command[:3] == ("docker", "run", "-d"))
     joined = " ".join(run)
     assert "--read-only" in run
@@ -741,7 +745,7 @@ def test_source_head_and_manifest_are_verified_before_any_docker_command(tmp_pat
 
     class WrongHeadDocker(TranscriptDocker):
         def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-            if argv[:2] == ("git", "-C"):
+            if argv[:2] == ("git", "rev-parse"):
                 self.commands.append(argv)
                 return command_result("b" * 40 + "\n")
             return super().run(argv, **kwargs)
@@ -751,9 +755,7 @@ def test_source_head_and_manifest_are_verified_before_any_docker_command(tmp_pat
         DockerSut(docker, relay_factory=FakeRelay).run_arm(
             config, Arm.ON, paths, b"prompt", ArtifactStore(paths.result_root)
         )
-    assert docker.commands == [
-        ("git", "-C", os.fspath(config.source_checkout), "rev-parse", "--verify", "HEAD^{commit}")
-    ]
+    assert docker.commands == [("git", "rev-parse", "--verify", "HEAD^{commit}")]
 
 
 def test_manifest_version_mismatch_is_rejected_before_docker(tmp_path: Path) -> None:
@@ -777,7 +779,7 @@ def test_dirty_source_is_rejected_before_any_docker_resource(tmp_path: Path, dir
 
     class DirtySourceDocker(TranscriptDocker):
         def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-            if argv[:2] == ("git", "-C") and "status" in argv:
+            if argv[:2] == ("git", "status"):
                 self.commands.append(argv)
                 return command_result(dirty_output)
             return super().run(argv, **kwargs)
