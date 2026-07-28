@@ -357,10 +357,16 @@ Expected: imports fail because artifact and report modules do not exist.
 
 - [ ] **Step 3: Implement atomic artifact and report primitives**
 
-Use same-directory temporary files plus `Path.replace()` for atomic writes. JSON is UTF-8, sorted, indented by two,
-and newline-terminated. Artifact relative paths reject absolute paths and `..`; the store validates every existing
-component from the filesystem anchor through its root and target parents, so an ancestor symlink cannot redirect
-creation outside the configured artifact path.
+Use same-directory temporary files plus dirfd-relative atomic replacement for writes. JSON is UTF-8, sorted,
+indented by two, and newline-terminated. Artifact relative paths reject absolute paths and `..`; the store validates
+every existing component from the filesystem anchor through its root and target parents, so an ancestor symlink
+cannot redirect creation outside the configured artifact path.
+
+Production writes use anchored directory file descriptors with `O_DIRECTORY` and `O_NOFOLLOW`, relative temporary
+creation, and dirfd-relative publication/cleanup. They revalidate directory identity before and after publication,
+fsync the completed file and containing directory, and fsync a parent after creating a child directory. Initial
+state creation is atomic and exclusive; reopening the same state path never resets existing progress. State
+evidence is canonicalized as strict JSON and deeply isolated from caller-owned mutable values.
 
 Arm state transitions are validated against:
 
@@ -381,7 +387,8 @@ ALLOWED_TRANSITIONS = {
 through unchecked model-copy APIs. It reads only retained manifest, metrics, and treatment evidence; it does not
 query Git, Docker, Codex, PowerContext, or the network. Valid treatments remain comparable after either arm moves
 from `treatment_validated` to the terminal `reported` state, so the final retained bundle reproduces the same
-comparison.
+comparison. Revision and configuration keys are NFKC-normalized and must be ASCII before credential-name
+screening, preventing full-width or mixed-script secret field names from bypassing the retained schema.
 
 - [ ] **Step 4: Verify GREEN**
 

@@ -424,6 +424,11 @@ Artifact creation validates every existing path component from the filesystem an
 root and artifact parent. A symlink in the root's ancestry, not only at the final parent or file, is rejected
 before any directory or temporary file is created.
 
+Writes remain anchored to opened directory file descriptors through temporary creation, target inspection,
+publication, cleanup, and pre/post-publication identity checks. Completed files and parent directory entries are
+fsynced. Initial arm state uses exclusive atomic creation, and canonical state evidence is deeply immutable so a
+caller cannot change the audited snapshot after persistence.
+
 `run-manifest.json` is canonical JSON and contains:
 
 - run ID and timestamps;
@@ -445,6 +450,7 @@ represented as unavailable, never inferred.
 The report strictly revalidates its complete retained input at the rendering boundary and is reproducible from the
 manifest and retained arm artifacts without querying live services. A valid arm remains comparable in both
 `treatment_validated` and terminal `reported` state so regeneration after final persistence is byte-equivalent.
+Revision and configuration keys are NFKC-normalized, restricted to ASCII, and then checked for sensitive names.
 Neither `codex-home` nor `powercontext-home` is copied from `work/` into `runs/`.
 
 ## 12. m0 deployment and safety
