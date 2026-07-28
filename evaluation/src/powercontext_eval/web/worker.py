@@ -141,11 +141,12 @@ class EvaluationWorker:
                 heartbeat.join()
         return True
 
-    def run_forever(self) -> None:
+    def run_forever(self, poll_seconds: float | None = None) -> None:
         """Poll until stopped, recovering an expired predecessor before each claim."""
+        interval = self._config.poll_seconds if poll_seconds is None else poll_seconds
         while not self._stop.is_set():
             if not self.run_once():
-                self._sleep(self._config.poll_seconds)
+                self._sleep(interval)
 
     def _run_config(self, task: TaskRecord) -> MinimalRunConfig:
         return MinimalRunConfig(

@@ -1,11 +1,25 @@
 """Command-line entry point for the evaluation runner."""
 
+from __future__ import annotations
+
 import json
+import os
+import signal
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from datetime import timedelta
+from pathlib import Path
+from types import FrameType
+from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 import typer
+from pydantic import ValidationError
 
 from powercontext_eval.powercontext_sut import run_codex_contract_smoke
 from powercontext_eval.runner import MinimalRunConfig, run_minimal_swebench_pro
+
+if TYPE_CHECKING:
+    from powercontext_eval.web.config import WebConfig
 
 app = typer.Typer(no_args_is_help=True, help="PowerContext evaluation runner.")
 swebench_pro_app = typer.Typer(no_args_is_help=True, help="Pinned SWE-bench Pro evaluation.")
@@ -15,6 +29,63 @@ app.add_typer(swebench_pro_app, name="swebench-pro")
 @app.callback()
 def root() -> None:
     """Run reproducible PowerContext evaluations."""
+
+
+class _Stoppable(Protocol):
+    def stop(self) -> None: ...
+
+
+def _request_worker_stop(worker: _Stoppable, _signum: int, _frame: FrameType | None) -> None:
+    """Request that a worker exit after its current task finishes."""
+    worker.stop()
+
+
+def _web_config(root_path: Path | None) -> WebConfig:
+    from powercontext_eval.web.config import WebConfig
+
+    try:
+        return WebConfig.from_environment(os.environ, root=root_path)
+    except (KeyError, TypeError, ValueError, ValidationError):
+        raise typer.BadParameter("Invalid evaluation configuration.", param_hint="--root") from None
+
+
+@contextmanager
+def _worker_signal_handlers(worker: _Stoppable) -> Iterator[None]:
+    previous: dict[signal.Signals, Any] = {}
+    handler: Callable[[int, FrameType | None], None] = lambda signum, frame: _request_worker_stop(worker, signum, frame)
+    try:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, handler)
+        yield
+    finally:
+        for signum, prior in previous.items():
+            signal.signal(signum, prior)
+
+
+@app.command("web")
+def web(root_path: Annotated[Path | None, typer.Option("--root")] = None) -> None:
+    """Serve the evaluation console API and frontend."""
+    import uvicorn
+
+    from powercontext_eval.web.api import create_app
+
+    config = _web_config(root_path)
+    uvicorn.run(create_app(config), host=config.host, port=config.port)
+
+
+@app.command("worker")
+def worker(root_path: Annotated[Path | None, typer.Option("--root")] = None) -> None:
+    """Run queued evaluations serially until shutdown is requested."""
+    from powercontext_eval.web.store import TaskStore
+    from powercontext_eval.web.worker import EvaluationWorker
+
+    config = _web_config(root_path)
+    store = TaskStore(config.database_path, lease_duration=timedelta(seconds=config.lease_seconds))
+    store.initialize()
+    service = EvaluationWorker(config, store, runner=run_minimal_swebench_pro)
+    with _worker_signal_handlers(service):
+        service.run_forever(config.poll_seconds)
 
 
 @app.command("codex-contract-smoke")
