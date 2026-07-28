@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { TaskList } from "./TaskList";
@@ -47,5 +48,30 @@ describe("TaskList", () => {
     expect(await screen.findByText("任务列表暂时无法加载。")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     expect(await screen.findByText("还没有测试任务。")).toBeVisible();
+  });
+
+  it("keeps a queued row actionable after cancellation rejection and succeeds on retry", async () => {
+    const user = userEvent.setup();
+    const listTasks = vi
+      .fn()
+      .mockResolvedValueOnce([summary("queued")])
+      .mockResolvedValueOnce([summary("cancelled")]);
+    const cancelTask = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("<raw>private upstream</raw>"))
+      .mockResolvedValueOnce(record("cancelled"));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<TaskList api={apiStub({ listTasks, cancelTask })} onSelect={() => undefined} />);
+
+    const cancel = await screen.findByRole("button", { name: "取消 task-queued" });
+    await user.click(cancel);
+    expect(await screen.findByText("任务取消失败，请重试。")).toBeVisible();
+    expect(screen.queryByText(/private|upstream|raw/i)).not.toBeInTheDocument();
+    expect(cancel).toBeEnabled();
+    expect(screen.getAllByText("排队中").some((element) => element.matches(".status"))).toBe(true);
+
+    await user.click(cancel);
+    await waitFor(() => expect(cancelTask).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getAllByText("已取消").some((element) => element.matches(".status"))).toBe(true));
   });
 });

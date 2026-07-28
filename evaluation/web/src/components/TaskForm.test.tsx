@@ -70,4 +70,41 @@ describe("TaskForm", () => {
     expect(await screen.findByText("提交失败，请稍后重试。")).toBeVisible();
     expect(screen.queryByText(/private|script/i)).not.toBeInTheDocument();
   });
+
+  it("reuses the intent key after failure and rotates it after edits or success", async () => {
+    const user = userEvent.setup();
+    const createTask = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("network"))
+      .mockRejectedValueOnce(new Error("network"))
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValueOnce(record("queued", "task-success"))
+      .mockResolvedValueOnce(record("queued", "task-next"));
+    render(<TaskForm api={apiStub({ createTask })} onCreated={() => undefined} />);
+    await screen.findByRole("option", { name: "swebench-pro" });
+    const submit = screen.getByRole("button", { name: "提交测试任务" });
+
+    await user.click(submit);
+    await screen.findByText("提交失败，请稍后重试。");
+    const firstKey = createTask.mock.calls[0]?.[0].idempotency_key;
+    await user.click(submit);
+    await waitFor(() => expect(createTask).toHaveBeenCalledTimes(2));
+    expect(createTask.mock.calls[1]?.[0].idempotency_key).toBe(firstKey);
+
+    const revision = screen.getByLabelText("PowerContext 版本");
+    await user.clear(revision);
+    await user.type(revision, `commit:${"b".repeat(40)}`);
+    await user.click(submit);
+    await waitFor(() => expect(createTask).toHaveBeenCalledTimes(3));
+    const editedKey = createTask.mock.calls[2]?.[0].idempotency_key;
+    expect(editedKey).not.toBe(firstKey);
+
+    await user.click(submit);
+    expect(await screen.findByText(/task-success/)).toBeVisible();
+    expect(createTask.mock.calls[3]?.[0].idempotency_key).toBe(editedKey);
+
+    await user.click(submit);
+    expect(await screen.findByText(/task-next/)).toBeVisible();
+    expect(createTask.mock.calls[4]?.[0].idempotency_key).not.toBe(editedKey);
+  });
 });

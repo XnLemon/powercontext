@@ -50,7 +50,10 @@ export function TaskDetail({ api, taskId, onTaskChanged }: TaskDetailProps) {
     void load();
     const subscription = api.subscribeTaskEvents(
       taskId,
-      () => void load(),
+      () => {
+        setReconnecting(false);
+        void load();
+      },
       () => setReconnecting(true),
     );
     return () => subscription.close();

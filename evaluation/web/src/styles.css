@@ -377,6 +377,12 @@ dd {
   padding: 22px 24px 0;
 }
 
+.list-feedback {
+  min-height: 0;
+  padding: 0 24px;
+  font-size: 12px;
+}
+
 .filter-control {
   width: 170px;
 }

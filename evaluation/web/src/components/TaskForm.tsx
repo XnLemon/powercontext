@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import type { EvaluationApi } from "../api";
 import type { Capabilities, TaskCreate, TaskRecord } from "../types";
@@ -22,6 +22,7 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
   const [created, setCreated] = useState<TaskRecord | null>(null);
+  const intentKey = useRef<{ fingerprint: string; key: string } | null>(null);
 
   const load = () => {
     setLoadingError(false);
@@ -54,18 +55,23 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
       setMessage("当前没有可提交的固定测试配置。");
       return;
     }
-    const task: TaskCreate = {
+    const intent = {
       powercontext_ref: revision,
       benchmark,
       instance_id: instanceId,
       model,
       reasoning_effort: reasoningEffort,
       treatment_mode: "off_on",
-      idempotency_key: idempotencyKey(),
-    };
+    } as const;
+    const fingerprint = JSON.stringify(intent);
+    if (intentKey.current?.fingerprint !== fingerprint) {
+      intentKey.current = { fingerprint, key: idempotencyKey() };
+    }
+    const task: TaskCreate = { ...intent, idempotency_key: intentKey.current.key };
     setPending(true);
     try {
       const result = await api.createTask(task);
+      intentKey.current = null;
       setCreated(result);
       onCreated(result);
     } catch {
@@ -110,7 +116,10 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
           <input
             aria-label="PowerContext 版本"
             value={revision}
-            onChange={(event) => setRevision(event.target.value)}
+            onChange={(event) => {
+              intentKey.current = null;
+              setRevision(event.target.value);
+            }}
             spellCheck={false}
           />
           <span className="field-hint">latest 或 commit: 加 40 位提交哈希</span>

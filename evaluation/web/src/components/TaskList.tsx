@@ -39,6 +39,7 @@ export function TaskList({ api, onSelect }: TaskListProps) {
   const [filter, setFilter] = useState<TaskStatus | "">("");
   const [error, setError] = useState(false);
   const [cancelling, setCancelling] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState("");
 
   const load = useCallback(async () => {
     setError(false);
@@ -54,9 +55,12 @@ export function TaskList({ api, onSelect }: TaskListProps) {
   const cancel = async (taskId: string) => {
     if (!window.confirm(`确定取消排队中的任务 ${taskId}？`)) return;
     setCancelling(taskId);
+    setCancelError("");
     try {
       await api.cancelTask(taskId);
       await load();
+    } catch {
+      setCancelError("任务取消失败，请重试。");
     } finally {
       setCancelling(null);
     }
@@ -80,6 +84,9 @@ export function TaskList({ api, onSelect }: TaskListProps) {
             ))}
           </select>
         </label>
+      </div>
+      <div className="list-feedback" aria-live="polite">
+        {cancelError && <p className="error-message">{cancelError}</p>}
       </div>
       {error ? (
         <div className="empty-state">

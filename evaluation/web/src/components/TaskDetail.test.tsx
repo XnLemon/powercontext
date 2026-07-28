@@ -1,11 +1,12 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { TaskEvent } from "../types";
 import { TaskDetail } from "./TaskDetail";
 import { apiStub, record } from "../test/fixtures";
 
 describe("TaskDetail", () => {
+  afterEach(() => vi.useRealTimers());
   it("shows immutable parameters, truthful timeline, safe failure, and successful report link", async () => {
     const api = apiStub({ getTask: vi.fn().mockResolvedValue(record("succeeded", "task-done")) });
     const { rerender } = render(<TaskDetail api={api} taskId="task-done" />);
@@ -65,5 +66,42 @@ describe("TaskDetail", () => {
     await waitFor(() => expect(subscribeTaskEvents).toHaveBeenCalledTimes(2));
     unmount();
     expect(close).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops fallback polling after a valid event and can restart it after another error", async () => {
+    vi.useFakeTimers();
+    let onEvent!: (event: TaskEvent) => void;
+    let onError!: () => void;
+    const subscribeTaskEvents = vi.fn((_id, eventHandler, errorHandler) => {
+      onEvent = eventHandler;
+      onError = errorHandler;
+      return { close: vi.fn() };
+    });
+    const getTask = vi.fn().mockResolvedValue(record("running", "task-recovery"));
+    render(<TaskDetail api={apiStub({ getTask, subscribeTaskEvents })} taskId="task-recovery" />);
+    await vi.waitFor(() => expect(getTask).toHaveBeenCalledTimes(1));
+
+    act(() => onError());
+    expect(screen.getByText("实时连接中断，正在定时刷新。")).toBeVisible();
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(getTask).toHaveBeenCalledTimes(2);
+
+    act(() =>
+      onEvent({
+        task_id: "task-recovery",
+        status: "running",
+        phase: "running_on",
+        version: 2,
+        occurred_at: "2026-07-29T01:02:00Z",
+      }),
+    );
+    await vi.waitFor(() => expect(getTask).toHaveBeenCalledTimes(3));
+    expect(screen.queryByText("实时连接中断，正在定时刷新。")).not.toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(10000));
+    expect(getTask).toHaveBeenCalledTimes(3);
+
+    act(() => onError());
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(getTask).toHaveBeenCalledTimes(4);
   });
 });
