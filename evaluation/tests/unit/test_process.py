@@ -85,6 +85,18 @@ def test_run_captures_utf8_output_and_replaces_invalid_bytes(tmp_path: Path) -> 
     )
 
 
+def test_run_writes_exact_input_bytes_to_stdin(tmp_path: Path) -> None:
+    payload = b"prompt with no trailing newline\x00binary"
+
+    result = ProcessRunner().run(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+        cwd=tmp_path,
+        input_bytes=payload,
+    )
+
+    assert result.stdout.encode("utf-8") == payload
+
+
 def test_command_result_is_frozen() -> None:
     result = CommandResult(argv=("true",), cwd="/tmp", returncode=0, stdout="", stderr="")
     field_name = "returncode"

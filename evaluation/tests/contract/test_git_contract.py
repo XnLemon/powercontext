@@ -676,7 +676,9 @@ class FailIfProcessRuns(ProcessRunner):
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
+        input_bytes: bytes | None = None,
     ) -> CommandResult:
+        del input_bytes
         raise AssertionError("normalization and cache key calculation must not access the network")
 
 
@@ -694,7 +696,9 @@ class RecordingProcessRunner(ProcessRunner):
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
+        input_bytes: bytes | None = None,
     ) -> CommandResult:
+        del input_bytes
         self.calls.append((timeout, dict(env or {})))
         self.commands.append(tuple(argv))
         return super().run(
@@ -717,7 +721,9 @@ class RejectFetchRunner(RecordingProcessRunner):
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
+        input_bytes: bytes | None = None,
     ) -> CommandResult:
+        del input_bytes
         if "fetch" in argv:
             self.commands.append(tuple(argv))
             raise AssertionError("an unvalidated existing mirror must never be fetched")
@@ -765,7 +771,9 @@ class ControlledGitRunner(ProcessRunner):
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
+        input_bytes: bytes | None = None,
     ) -> CommandResult:
+        del input_bytes
         command = tuple(argv)
         self.calls.append((command, tuple(secrets)))
         if "clone" in command:
@@ -791,6 +799,7 @@ class FailCheckoutOnceRunner(ProcessRunner):
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
+        input_bytes: bytes | None = None,
     ) -> CommandResult:
         if not self.failed and "checkout" in argv:
             self.failed = True
@@ -803,6 +812,7 @@ class FailCheckoutOnceRunner(ProcessRunner):
             env=env,
             check=check,
             secrets=secrets,
+            input_bytes=input_bytes,
         )
 
 

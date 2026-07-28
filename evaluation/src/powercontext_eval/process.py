@@ -71,10 +71,13 @@ class ProcessRunner:
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
+        input_bytes: bytes | None = None,
     ) -> CommandResult:
         """Execute a command without a shell and return redacted output."""
 
         validated_argv = _validate_argv(argv)
+        if input_bytes is not None and not isinstance(input_bytes, bytes):
+            raise TypeError("input_bytes must be bytes or None")
         cwd_text = os.fspath(cwd)
         if "\0" in cwd_text:
             raise ValueError("cwd must not contain NUL")
@@ -88,6 +91,7 @@ class ProcessRunner:
                 env=child_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE if input_bytes is not None else None,
                 start_new_session=os.name == "posix",
                 shell=False,
             )
@@ -113,7 +117,7 @@ class ProcessRunner:
             raise CommandNotFound(_failure_message("Command could not be started", result, redactor), result) from None
 
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
+            stdout, stderr = process.communicate(input=input_bytes, timeout=timeout)
         except subprocess.TimeoutExpired as error:
             final_stdout, final_stderr = _terminate_timed_out_process(process)
             result = _result(
