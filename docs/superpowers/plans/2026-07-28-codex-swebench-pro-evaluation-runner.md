@@ -438,21 +438,28 @@ The Codex adapter must construct:
 
 ```text
 codex exec --ephemeral --ignore-rules --json
+  --disable shell_snapshot
   --dangerously-bypass-approvals-and-sandbox
   --dangerously-bypass-hook-trust
-  --model <model>
-  -c model_reasoning_effort="<effort>"
+  --model gpt-5.6-sol
+  -c model_reasoning_effort="medium"
   --enable|--disable plugins
   -C /workspace
   -
 ```
 
 It streams stdout to `codex-events.jsonl`, stderr to a separate redacted log, writes the last message, parses usage,
-and treats timeout/nonzero exit as infrastructure outcomes rather than resolved status.
+and treats timeout/nonzero exit as infrastructure outcomes rather than resolved status. Pin Codex CLI `0.145.0`
+for the first paid experiment. Reject any attempt to use the dangerous bypass on the `m0` host: it is valid only
+inside the exact disposable task container, where the standalone CLI does not depend on a host `bwrap` helper.
 
 The SUT adapter must:
 
 - materialize the resolved source into disposable arm work;
+- create a run-owned Docker internal bridge and an exactly tracked host relay bound only to its gateway, forwarding
+  to the configured loopback proxy;
+- give both arms the same relay URL and no direct network path, host-network mode, proxy configuration file, or
+  Docker socket;
 - create an arm-specific package environment and PowerContext data directory;
 - install the local marketplace and only `powercontext@powercontext` into the isolated Codex home;
 - start `powercontext server run` at loopback port 8000 in the same arm container;

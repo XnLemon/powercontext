@@ -224,8 +224,10 @@ credential helper. Username-only SSH/SCP transports may use a command-scoped Git
 mirror origin and provenance always contain only the sanitized source.
 
 Both homes receive the same pinned Codex CLI, authentication, model, reasoning level, prompt, task repository,
-shell environment policy, sandbox mode, time limit, and resource budget. The only treatment switch is the stable
-Codex `plugins` feature:
+shell environment policy, sandbox mode, time limit, and resource budget. The first paid experiment pins Codex CLI
+`0.145.0`, model `gpt-5.6-sol`, and reasoning effort `medium`; changing any of them creates a new experiment
+configuration rather than silently changing an existing run. The only treatment switch is the stable Codex
+`plugins` feature:
 
 - OFF passes `--disable plugins`.
 - ON passes `--enable plugins` and `--dangerously-bypass-hook-trust`.
@@ -240,14 +242,18 @@ codex exec
   --ephemeral
   --ignore-rules
   --json
+  --disable shell_snapshot
   --dangerously-bypass-approvals-and-sandbox
   --cd <task-workspace>
-  --model <model-id>
-  -c model_reasoning_effort="<level>"
+  --model gpt-5.6-sol
+  -c model_reasoning_effort="medium"
 ```
 
 The dangerous Codex execution flag is permitted only inside the dedicated, disposable SWE-bench task container.
-It is never used directly against the `m0` host workspace.
+It is never used directly against the `m0` host workspace. The pinned standalone Codex binary has no adjacent
+`bwrap` helper on `m0`, so a host-side tool-using smoke is not a valid substitute for the container contract.
+`shell_snapshot` is explicitly disabled in both arms because `m0`'s login-shell replay is not part of the
+benchmark treatment and produced a validation error in the no-tool authentication smoke.
 
 The runner deliberately does not pass `--ignore-user-config`: Codex documents that flag as ignoring the isolated
 `CODEX_HOME/config.toml`, which also contains this run's marketplace and installed-plugin selection. The home is
@@ -436,6 +442,14 @@ Mihomo is installed as a systemd service running as the existing `rongfeng.frf` 
 from `dev` through a controller-owned mode-0700 temporary directory and is never printed or committed. It binds
 only `127.0.0.1:7890`.
 
+Task containers do not use host networking and cannot reach that loopback listener directly. For each run, the
+runner creates a uniquely named Docker `--internal` bridge, reads that bridge's gateway address, and starts an
+exactly tracked host `socat` relay bound only to that gateway. The relay forwards to `127.0.0.1:7890`; task
+containers receive only the relay URL through their proxy environment. This gives Codex proxy-only egress without
+mounting Mihomo configuration, publishing a host port, exposing the relay on a LAN interface, or granting direct
+container Internet access. OFF and ON use the same bridge, relay, and proxy environment. The relay and bridge are
+removed by exact run identity after both arms, including failure paths.
+
 The existing Docker daemon currently hosts unrelated workloads. The evaluation deployment must:
 
 - inspect existing restart policies and daemon configuration before any change;
@@ -453,8 +467,9 @@ replacing the host Git.
 Mirror buckets are direct non-symlink children of the configured cache root. A pre-existing symlink or path that
 resolves outside that root is rejected before Git executes.
 
-Codex login is an operator action if device authorization or browser interaction is required. Credentials remain
-outside the repository and retained run tree.
+The current MVP copies only the Mac Codex `auth.json` into a dedicated mode-0600 m0 auth directory and verifies
+`codex login status` there. Credentials remain outside the repository and retained run tree; no Codex config,
+history, sessions, or shell state is copied.
 
 ## 13. Security model
 
@@ -468,6 +483,7 @@ container with:
 - the minimum Codex auth material required for the run, available only for the Codex phase;
 - no proxy configuration file;
 - no unrelated environment secrets;
+- only proxy-mediated egress through a run-owned relay on a dedicated internal Docker bridge;
 - resource and wall-clock limits;
 - cleanup by exact run/container identifiers.
 
