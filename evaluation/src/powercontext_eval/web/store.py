@@ -231,7 +231,6 @@ class TaskStore:
         if not worker_id:
             raise ValueError("worker_id must not be empty")
         now_text = _timestamp(now)
-        expires_at = _timestamp(now + self._lease_duration)
         with self._write() as connection:
             running = connection.execute(
                 "SELECT 1 FROM tasks WHERE status = ? LIMIT 1",
@@ -253,6 +252,9 @@ class TaskStore:
                 return None
 
             task_id = str(row["task_id"])
+            effective_claim_time = max(now, _parse_timestamp(row["created_at"]))
+            claim_time_text = _timestamp(effective_claim_time)
+            expires_at = _timestamp(effective_claim_time + self._lease_duration)
             connection.execute(
                 """
                 INSERT INTO worker_lease(singleton, worker_id, task_id, expires_at)
@@ -270,15 +272,19 @@ class TaskStore:
                 SET status = ?, started_at = ?, version = version + 1
                 WHERE task_id = ? AND status = ?
                 """,
-                (TaskStatus.RUNNING.value, now_text, task_id, TaskStatus.QUEUED.value),
+                (TaskStatus.RUNNING.value, claim_time_text, task_id, TaskStatus.QUEUED.value),
             )
             return self._record(self._select_task(connection, task_id))
 
     def heartbeat(self, task_id: str, worker_id: str, *, now: datetime) -> TaskRecord:
         """Renew the active lease owned by a worker."""
-        expires_at = _timestamp(now + self._lease_duration)
         with self._write() as connection:
             self._require_running_owner(connection, task_id, worker_id, now=now)
+            row = self._select_task(connection, task_id)
+            started_at = _parse_optional_timestamp(row["started_at"])
+            if started_at is None:
+                raise TaskConflict("Running task has no start time")
+            expires_at = _timestamp(max(now, started_at) + self._lease_duration)
             connection.execute(
                 "UPDATE worker_lease SET expires_at = ? WHERE singleton = ?",
                 (expires_at, 1),

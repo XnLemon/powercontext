@@ -162,6 +162,23 @@ def test_claim_is_fifo_atomic_and_globally_excludes_other_connection(database: P
     assert second_store.list_tasks(status=TaskStatus.QUEUED, limit=10, offset=0)[0].task_id == second.task_id
 
 
+def test_claim_clamps_stale_worker_time_to_task_creation_and_lease_chronology(store: TaskStore) -> None:
+    created_at = NOW + timedelta(seconds=10)
+    stale_worker_now = NOW
+    queued, _ = store.create(request("stale-claim-clock"), now=created_at)
+
+    claimed = store.claim_next("worker-a", now=stale_worker_now)
+
+    assert claimed is not None
+    assert claimed.task_id == queued.task_id
+    assert claimed.started_at == created_at
+    phased = store.set_phase(queued.task_id, "worker-a", TaskPhase.PREPARING, now=stale_worker_now)
+    heartbeat = store.heartbeat(queued.task_id, "worker-a", now=stale_worker_now)
+    assert phased.started_at == heartbeat.started_at == created_at
+    assert store.health_snapshot(now=created_at + timedelta(seconds=59))["worker_lease_active"] is True
+    assert store.health_snapshot(now=created_at + timedelta(seconds=61))["worker_lease_active"] is False
+
+
 def test_heartbeat_requires_owner_and_increments_version(store: TaskStore) -> None:
     queued, _ = store.create(request("heartbeat-key"), now=NOW)
     running = store.claim_next("worker-a", now=NOW + timedelta(seconds=1))

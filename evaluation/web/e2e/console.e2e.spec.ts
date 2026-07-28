@@ -22,9 +22,10 @@ test("submits a task and opens its generated report", async ({ page }) => {
   await expect(page.getByLabel("PowerContext 版本")).toHaveValue("latest");
 
   await submit(page);
-  const taskId = (await page.locator(".success-message strong").textContent())?.trim();
+  const submissionStatus = page.locator('.form-feedback[aria-live="polite"]');
+  const taskId = (await submissionStatus.locator("strong").textContent())?.trim();
   expect(taskId).toMatch(/^run-/);
-  await expect(page.getByText(/队列位置：1/)).toBeVisible();
+  await expect(submissionStatus.getByText(`已提交任务 ${taskId} · 队列位置：1`, { exact: true })).toBeVisible();
   await expect(page.getByText(/准备环境|验证 Gold|OFF 执行|ON 执行|官方评测|生成报告/)).toBeVisible();
   await expect(page.locator("body")).not.toContainText("%");
   await expect(page.getByRole("link", { name: "查看验收报告" })).toBeVisible();
