@@ -481,7 +481,7 @@ class DockerSut:
             (
                 "git",
                 "status",
-                "--porcelain=v1",
+                "--porcelain",
                 "--untracked-files=all",
             ),
             cwd=config.source_checkout,
