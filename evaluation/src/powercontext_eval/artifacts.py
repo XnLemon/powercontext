@@ -71,9 +71,31 @@ class ArtifactStore:
 
     def __init__(self, root: str | os.PathLike[str], *, forbidden_values: Sequence[str | bytes] = ()) -> None:
         self.root = Path(root).absolute()
+        if "\x00" in os.fspath(root) or ".." in self.root.parts:
+            raise UnsafeArtifactPath("Artifact root contains an unsafe component")
         self._forbidden = tuple(self._encode_forbidden(value) for value in forbidden_values)
-        self.root.mkdir(parents=True, exist_ok=True)
-        self._verify_directory(self.root)
+        self._root_chain = self._initialize_root()
+
+    def _initialize_root(self) -> tuple[tuple[Path, int, int], ...]:
+        """Create the root one component at a time without following symlinks."""
+
+        anchor = Path(self.root.anchor)
+        current = anchor
+        verified: list[tuple[Path, int, int]] = []
+        for part in self.root.parts[1:]:
+            self._verify_directory(current)
+            current = current / part
+            try:
+                current.mkdir()
+            except FileExistsError:
+                pass
+            metadata = self._directory_metadata(current)
+            verified.append((current, metadata.st_dev, metadata.st_ino))
+            self._revalidate_chain(verified)
+        if not verified:
+            metadata = self._directory_metadata(anchor)
+            verified.append((anchor, metadata.st_dev, metadata.st_ino))
+        return tuple(verified)
 
     @staticmethod
     def _encode_forbidden(value: str | bytes) -> bytes:
@@ -83,13 +105,28 @@ class ArtifactStore:
         return encoded
 
     @staticmethod
-    def _verify_directory(path: Path) -> None:
+    def _directory_metadata(path: Path) -> os.stat_result:
         try:
-            mode = path.lstat().st_mode
+            metadata = path.lstat()
         except OSError as error:
             raise UnsafeArtifactPath("Artifact directory cannot be inspected") from error
-        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise UnsafeArtifactPath("Artifact path component is not a real directory")
+        return metadata
+
+    @classmethod
+    def _verify_directory(cls, path: Path) -> None:
+        cls._directory_metadata(path)
+
+    @classmethod
+    def _revalidate_chain(cls, chain: Sequence[tuple[Path, int, int]]) -> None:
+        for path, expected_device, expected_inode in chain:
+            metadata = cls._directory_metadata(path)
+            if (metadata.st_dev, metadata.st_ino) != (expected_device, expected_inode):
+                raise UnsafeArtifactPath("Artifact directory identity changed")
+
+    def _verify_root_chain(self) -> None:
+        self._revalidate_chain(self._root_chain)
 
     @staticmethod
     def _validate_relative(relative_path: str | os.PathLike[str]) -> tuple[str, ...]:
@@ -113,7 +150,7 @@ class ArtifactStore:
 
     def _target(self, relative_path: str | os.PathLike[str]) -> Path:
         parts = self._validate_relative(relative_path)
-        self._verify_directory(self.root)
+        self._verify_root_chain()
         parent = self.root
         for part in parts[:-1]:
             parent = parent / part
@@ -154,7 +191,7 @@ class ArtifactStore:
                 stream.write(data)
                 stream.flush()
                 os.fsync(stream.fileno())
-            self._verify_directory(self.root)
+            self._verify_root_chain()
             self._verify_directory(parent)
             self._verify_contained(target)
             try:

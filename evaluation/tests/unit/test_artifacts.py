@@ -77,6 +77,24 @@ def test_symlink_root_is_rejected(tmp_path: Path) -> None:
         ArtifactStore(linked)
 
 
+def test_symlink_in_root_ancestor_is_rejected_without_escape(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(UnsafeArtifactPath):
+        ArtifactStore(linked / "nested")
+
+    assert list(outside.iterdir()) == []
+
+
+def test_parent_component_in_root_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(UnsafeArtifactPath):
+        ArtifactStore(tmp_path / "first" / ".." / "second")
+    assert not (tmp_path / "first").exists()
+
+
 @pytest.mark.parametrize("secret", ["", b""])
 def test_empty_forbidden_values_are_rejected(tmp_path: Path, secret: str | bytes) -> None:
     with pytest.raises(ValueError, match="non-empty"):

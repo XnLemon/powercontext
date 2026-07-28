@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic_core import PydanticSerializationError
 
 from powercontext_eval.artifacts import ArmState
 
@@ -75,6 +76,10 @@ class ReportBundle(BaseModel):
         return values
 
 
+class InvalidReportBundle(ValueError):
+    """A report bundle failed safe boundary revalidation."""
+
+
 def _cell(value: object | None) -> str:
     if value is None:
         return "N/A"
@@ -125,9 +130,10 @@ def _arm_section(label: str, arm: ArmReport) -> list[str]:
 
 def _comparison(bundle: ReportBundle) -> list[str]:
     lines = ["## Comparison", ""]
+    comparable_states = {ArmState.TREATMENT_VALIDATED, ArmState.REPORTED}
     if not (
-        bundle.off.state is ArmState.TREATMENT_VALIDATED
-        and bundle.on.state is ArmState.TREATMENT_VALIDATED
+        bundle.off.state in comparable_states
+        and bundle.on.state in comparable_states
         and bundle.off.treatment_valid
         and bundle.on.treatment_valid
     ):
@@ -157,9 +163,33 @@ def _comparison(bundle: ReportBundle) -> list[str]:
     return lines
 
 
+def _validated_bundle(bundle: ReportBundle) -> ReportBundle:
+    """Revalidate copied or mutated model contents without reflecting rejected values."""
+
+    try:
+        if type(bundle) is not ReportBundle:
+            raise TypeError
+        expected_bundle_fields = set(ReportBundle.model_fields)
+        if set(bundle.__dict__) != expected_bundle_fields:
+            raise ValueError
+        for model, model_type in (
+            (bundle.off, ArmReport),
+            (bundle.on, ArmReport),
+        ):
+            if type(model) is not model_type or set(model.__dict__) != set(model_type.model_fields):
+                raise ValueError
+            if type(model.metrics) is not MetricSet or set(model.metrics.__dict__) != set(MetricSet.model_fields):
+                raise ValueError
+        serialized = bundle.model_dump(mode="python", round_trip=True, warnings="none")
+        return ReportBundle.model_validate(serialized, strict=True)
+    except (AttributeError, PydanticSerializationError, TypeError, ValueError):
+        raise InvalidReportBundle("Report bundle failed strict validation") from None
+
+
 def render_report(bundle: ReportBundle) -> str:
     """Render only the supplied validated bundle, with no external reads."""
 
+    bundle = _validated_bundle(bundle)
     if bundle.off.arm != "off" or bundle.on.arm != "on":
         raise ValueError("Report arms must be supplied in OFF then ON roles")
     lines = [f"# {_cell(bundle.title)}", ""]
