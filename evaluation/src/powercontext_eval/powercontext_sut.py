@@ -786,8 +786,9 @@ class DockerSut:
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=512m",
             *_docker_env_args({**common_environment, "UV_PROJECT_ENVIRONMENT": "/runtime/pc-env"}),
-            config.task_image,
+            "--entrypoint",
             _CONTAINER_UV,
+            config.task_image,
             "sync",
             "--frozen",
             "--project",
@@ -827,8 +828,9 @@ class DockerSut:
                 "--tmpfs",
                 "/tmp:rw,noexec,nosuid,size=256m",
                 *_docker_env_args({**common_environment, "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env"}),
-                config.task_image,
+                "--entrypoint",
                 _CONTAINER_UV,
+                config.task_image,
                 "sync",
                 "--frozen",
                 "--project",
@@ -873,8 +875,9 @@ class DockerSut:
                     "UV_OFFLINE": "1",
                 }
             ),
-            config.task_image,
+            "--entrypoint",
             _CONTAINER_CODEX,
+            config.task_image,
             "plugin",
         )
         self._docker.run(
@@ -951,8 +954,9 @@ class DockerSut:
                     ),
                 }
             ),
-            config.task_image,
+            "--entrypoint",
             "/runtime/pc-env/bin/powercontext",
+            config.task_image,
             "server",
             "run",
             "--host",
