@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from powercontext_eval.runner import INSTANCE_ID
 from powercontext_eval.web.config import WebConfig
-from powercontext_eval.web.models import FailureCategory, TaskCreate, TaskRecord, TaskStatus
+from powercontext_eval.web.models import FailureCategory, TaskCreate, TaskPhase, TaskRecord, TaskStatus
 
 
 def valid_task(**overrides: object) -> dict[str, object]:
@@ -28,7 +28,7 @@ def test_web_config_derives_confined_paths(tmp_path: Path) -> None:
 
     assert config.database_path == tmp_path / "web" / "tasks.sqlite3"
     assert config.run_root == tmp_path
-    assert config.frontend_dist.parts[-3:] == ("evaluation", "web", "dist")
+    assert config.frontend_dist == tmp_path / "deploy" / "powercontext" / "evaluation" / "web" / "dist"
 
 
 def test_web_config_accepts_explicit_frontend_dist(tmp_path: Path) -> None:
@@ -145,6 +145,83 @@ def test_task_create_rejects_unsupported_revision(powercontext_ref: str) -> None
 def test_task_create_rejects_values_outside_capabilities(field: str, value: str) -> None:
     with pytest.raises(ValidationError):
         TaskCreate.model_validate(valid_task(**{field: value}))
+
+
+def test_task_create_rejects_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        TaskCreate.model_validate(valid_task(unexpected="value"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("powercontext_ref", b"latest"),
+        ("benchmark", b"swebench-pro"),
+        ("instance_id", 123),
+        ("model", b"gpt-5.6-sol"),
+        ("reasoning_effort", b"medium"),
+        ("treatment_mode", b"off_on"),
+        ("idempotency_key", b"request-1234"),
+    ],
+)
+def test_task_create_strictly_rejects_coercible_non_strings(field: str, value: object) -> None:
+    with pytest.raises(ValidationError):
+        TaskCreate.model_validate(valid_task(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    "idempotency_key",
+    [
+        "a" * 129,
+        "request key",
+        "request/key",
+        "request:key",
+        "request@key",
+        "request+key",
+        "request$key",
+    ],
+)
+def test_task_create_rejects_oversized_or_unsafe_idempotency_keys(idempotency_key: str) -> None:
+    with pytest.raises(ValidationError):
+        TaskCreate.model_validate(valid_task(idempotency_key=idempotency_key))
+
+
+def test_task_status_values_are_exact() -> None:
+    assert list(TaskStatus) == [
+        TaskStatus.QUEUED,
+        TaskStatus.RUNNING,
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.INTERRUPTED,
+        TaskStatus.CANCELLED,
+    ]
+
+
+def test_task_phase_values_are_exact() -> None:
+    assert list(TaskPhase) == [
+        TaskPhase.PREPARING,
+        TaskPhase.VALIDATING_GOLD,
+        TaskPhase.RUNNING_OFF,
+        TaskPhase.RUNNING_ON,
+        TaskPhase.OFFICIAL_EVALUATION,
+        TaskPhase.GENERATING_REPORT,
+    ]
+
+
+def test_failure_category_values_are_exact() -> None:
+    assert list(FailureCategory) == [
+        FailureCategory.INVALID_REQUEST,
+        FailureCategory.QUEUE_UNAVAILABLE,
+        FailureCategory.SOURCE_RESOLUTION,
+        FailureCategory.ENVIRONMENT_PREPARATION,
+        FailureCategory.GOLD_VALIDATION,
+        FailureCategory.CODEX_EXECUTION,
+        FailureCategory.TREATMENT_VALIDATION,
+        FailureCategory.OFFICIAL_EVALUATOR,
+        FailureCategory.REPORT_GENERATION,
+        FailureCategory.WORKER_INTERRUPTION,
+        FailureCategory.INTERNAL,
+    ]
 
 
 def test_task_record_exposes_only_safe_failure_details() -> None:

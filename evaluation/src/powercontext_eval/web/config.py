@@ -92,13 +92,12 @@ class WebConfig:
         lease_seconds: int = 60,
         poll_seconds: float = 1.0,
     ) -> Self:
-        evaluation_root = Path(__file__).parents[3]
         values = _ConfigInput.model_validate(
             {
                 "root": root,
                 "database_path": database_path or root / "web" / "tasks.sqlite3",
                 "run_root": run_root or root,
-                "frontend_dist": frontend_dist or evaluation_root / "web" / "dist",
+                "frontend_dist": frontend_dist or root / "deploy" / "powercontext" / "evaluation" / "web" / "dist",
                 "powercontext_source": powercontext_source or root / "powercontext",
                 "harness_root": harness_root or root / "swebench-pro",
                 "harness_python": harness_python or root / "swebench-pro" / ".venv" / "bin" / "python",
