@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+import os
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from stat import S_ISDIR, S_ISREG
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.models import Capabilities, HealthResponse, TaskCreate, TaskRecord, TaskStatus, TaskSummary
@@ -53,37 +56,102 @@ def _summary_payload(summary: TaskSummary, store: TaskStore) -> dict[str, Any]:
     return payload
 
 
-async def _event_stream(
-    request: Request,
-    store: TaskStore,
-    task_id: str,
-    *,
-    poll_seconds: float,
-    heartbeat_seconds: float = 15.0,
-    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-) -> AsyncIterator[str]:
-    last_version: int | None = None
-    last_output = clock()
-    while not await request.is_disconnected():
-        record = store.get(task_id)
-        if record.version != last_version:
-            event = {
-                "task_id": record.task_id,
-                "status": record.status,
-                "phase": record.phase,
-                "version": record.version,
-                "occurred_at": clock(),
-            }
-            data = json.dumps(event, default=lambda value: value.isoformat(), separators=(",", ":"))
-            yield f"event: task\ndata: {data}\n\n"
-            last_version = record.version
-            last_output = clock()
-            if record.status in _TERMINAL:
-                return
-        elif clock() - last_output >= timedelta(seconds=heartbeat_seconds):
-            yield ": heartbeat\n\n"
-            last_output = clock()
-        await asyncio.sleep(poll_seconds)
+class TaskEventStream:
+    """Poll task snapshots without retaining a database connection between polls."""
+
+    def __init__(
+        self,
+        request: Request,
+        store: TaskStore,
+        task_id: str,
+        *,
+        poll_seconds: float,
+        heartbeat_seconds: float = 15.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._request = request
+        self._store = store
+        self._task_id = task_id
+        self._poll_seconds = poll_seconds
+        self._heartbeat_seconds = heartbeat_seconds
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._wall_clock = wall_clock
+
+    async def __aiter__(self) -> AsyncIterator[str]:
+        last_version: int | None = None
+        last_output = self._monotonic()
+        while not await self._request.is_disconnected():
+            record = self._store.get(self._task_id)
+            if record.version != last_version:
+                event = {
+                    "task_id": record.task_id,
+                    "status": record.status,
+                    "phase": record.phase,
+                    "version": record.version,
+                    "occurred_at": self._wall_clock(),
+                }
+                data = json.dumps(event, default=lambda value: value.isoformat(), separators=(",", ":"))
+                yield f"event: task\ndata: {data}\n\n"
+                last_version = record.version
+                last_output = self._monotonic()
+                if record.status in _TERMINAL:
+                    return
+            elif self._monotonic() - last_output >= self._heartbeat_seconds:
+                yield ": heartbeat\n\n"
+                last_output = self._monotonic()
+            await self._sleep(self._poll_seconds)
+
+
+def _safe_frontend(frontend: Path, root: Path) -> bool:
+    """Validate a regular, symlink-free build under the configured deploy tree."""
+    deploy = root / "deploy"
+    try:
+        relative = frontend.relative_to(deploy)
+        if not relative.parts or ".." in relative.parts:
+            return False
+        for ancestor in (root, deploy):
+            metadata = ancestor.lstat()
+            if ancestor.is_symlink() or not S_ISDIR(metadata.st_mode):
+                return False
+        current = deploy
+        for component in relative.parts:
+            current /= component
+            metadata = current.lstat()
+            if current.is_symlink() or not S_ISDIR(metadata.st_mode):
+                return False
+        index = frontend / "index.html"
+        assets = frontend / "assets"
+        if index.is_symlink() or not S_ISREG(index.lstat().st_mode):
+            return False
+        if assets.is_symlink() or not S_ISDIR(assets.lstat().st_mode):
+            return False
+        for directory, directories, files in os.walk(frontend, followlinks=False):
+            base = Path(directory)
+            if any((base / name).is_symlink() for name in (*directories, *files)):
+                return False
+    except (FileNotFoundError, NotADirectoryError, OSError, ValueError):
+        return False
+    return True
+
+
+def _safe_asset(assets: Path, requested: str) -> Path | None:
+    try:
+        relative = Path(requested)
+        if not requested or relative.is_absolute() or ".." in relative.parts:
+            return None
+        candidate = assets / relative
+        current = assets
+        for component in relative.parts:
+            current /= component
+            metadata = current.lstat()
+            if current.is_symlink():
+                return None
+        return candidate if S_ISREG(metadata.st_mode) else None
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        return None
 
 
 def create_app(config: WebConfig, store: TaskStore | None = None) -> FastAPI:
@@ -157,7 +225,7 @@ def create_app(config: WebConfig, store: TaskStore | None = None) -> FastAPI:
         except TaskNotFound:
             return _error(404, "task_not_found", "The requested evaluation task does not exist.")
         return StreamingResponse(
-            _event_stream(request, task_store, task_id, poll_seconds=config.poll_seconds),
+            TaskEventStream(request, task_store, task_id, poll_seconds=config.poll_seconds),
             media_type="text/event-stream",
             headers={**_NO_STORE, "X-Accel-Buffering": "no"},
         )
@@ -197,20 +265,32 @@ def create_app(config: WebConfig, store: TaskStore | None = None) -> FastAPI:
     def unknown_api_get(path: str) -> JSONResponse:
         return _error(404, "not_found", "The requested API route does not exist.")
 
-    @app.api_route("/api/{path:path}", methods=["POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+    @app.api_route(
+        "/api/{path:path}",
+        methods=["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE", "CONNECT"],
+    )
     def unknown_api(path: str) -> JSONResponse:
         return _error(404, "not_found", "The requested API route does not exist.")
 
     frontend = config.frontend_dist
     index = frontend / "index.html"
     assets = frontend / "assets"
-    if index.is_file() and not index.is_symlink() and assets.is_dir() and not assets.is_symlink():
-        app.mount("/assets", StaticFiles(directory=assets, check_dir=True), name="assets")
+    frontend_ready = _safe_frontend(frontend, config.root)
+    if frontend_ready:
+
+        @app.get("/assets/{asset_path:path}")
+        def frontend_asset(asset_path: str) -> Response:
+            target = _safe_asset(assets, asset_path)
+            return FileResponse(target) if target is not None else PlainTextResponse("Not found.", status_code=404)
 
         @app.get("/{path:path}")
         def frontend_fallback(path: str) -> Response:
             return FileResponse(index)
     else:
+
+        @app.get("/assets/{asset_path:path}")
+        def frontend_asset_unavailable(asset_path: str) -> Response:
+            return PlainTextResponse("Evaluation console frontend is not built.", status_code=503)
 
         @app.get("/{path:path}")
         def frontend_unavailable(path: str) -> Response:

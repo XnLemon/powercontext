@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from powercontext_eval.artifacts import ArmState
 from powercontext_eval.report import ArmReport, MetricSet, ReportBundle
-from powercontext_eval.web.api import create_app
+from powercontext_eval.web.api import TaskEventStream, create_app
 from powercontext_eval.web.config import WebConfig
-from powercontext_eval.web.models import TaskResult
+from powercontext_eval.web.models import TaskCreate, TaskResult
 from powercontext_eval.web.store import TaskStore
 
 NOW = datetime(2026, 7, 29, 1, 2, 3, tzinfo=UTC)
@@ -37,7 +39,7 @@ def config(tmp_path: Path) -> WebConfig:
         tmp_path,
         database_path=tmp_path / "tasks.sqlite3",
         run_root=tmp_path / "runs",
-        frontend_dist=tmp_path / "frontend",
+        frontend_dist=tmp_path / "deploy" / "frontend",
         proxy_url=f"http://{SECRET}@127.0.0.1:7890",
     )
 
@@ -175,6 +177,26 @@ def test_method_and_internal_errors_use_fixed_secret_free_envelopes(
     assert_safe(internal)
 
 
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("HEAD", "/api/unknown"),
+        ("TRACE", "/api/unknown"),
+        ("CONNECT", "/api/unknown"),
+        ("HEAD", "/api/tasks"),
+        ("TRACE", "/api/health"),
+    ],
+)
+def test_every_api_method_uses_fixed_no_store_error_envelope(client: TestClient, method: str, path: str) -> None:
+    response = client.request(method, path)
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["cache-control"] == "no-store"
+    if method != "HEAD":
+        assert response.json() == {"error": {"code": "not_found", "message": "The requested API route does not exist."}}
+
+
 def _write_report(run_root: Path, task_id: str) -> None:
     run_dir = run_root / task_id
     for arm in ("off", "on"):
@@ -272,6 +294,114 @@ def test_terminal_event_stream_emits_compact_task_event_and_security_headers(cli
     assert SECRET not in response.text
 
 
+class _Request:
+    def __init__(self) -> None:
+        self.disconnected = False
+
+    async def is_disconnected(self) -> bool:
+        return self.disconnected
+
+
+async def _next(stream: Any) -> str:
+    return await anext(stream)
+
+
+def test_event_stream_suppresses_unchanged_versions_emits_change_and_final_then_exits(store: TaskStore) -> None:
+    record, _ = store.create(
+        TaskCreate.model_validate(payload("sse-task-key")),
+        now=NOW,
+    )
+    request = _Request()
+    ticks = iter((0.0, 0.0, 1.0, 1.0, 2.0, 2.0))
+    sleeps = 0
+
+    async def sleep(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 2:
+            store.cancel_queued(record.task_id, now=NOW + timedelta(seconds=1))
+
+    async def scenario() -> None:
+        stream = TaskEventStream(
+            request,
+            store,
+            record.task_id,
+            poll_seconds=0.1,
+            heartbeat_seconds=15,
+            sleep=sleep,
+            monotonic=lambda: next(ticks),
+            wall_clock=lambda: NOW,
+        ).__aiter__()
+        initial = await _next(stream)
+        final = await _next(stream)
+        assert '"status":"queued"' in initial
+        assert '"status":"cancelled"' in final
+        with pytest.raises(StopAsyncIteration):
+            await _next(stream)
+
+    asyncio.run(scenario())
+    assert sleeps == 2
+
+
+def test_event_stream_heartbeat_at_fifteen_seconds_and_disconnect_exit(store: TaskStore) -> None:
+    record, _ = store.create(
+        TaskCreate.model_validate(payload("heartbeat-key")),
+        now=NOW,
+    )
+    request = _Request()
+    monotonic_values = iter((0.0, 0.0, 15.0, 15.0))
+
+    async def sleep(_seconds: float) -> None:
+        return None
+
+    async def scenario() -> None:
+        stream = TaskEventStream(
+            request,
+            store,
+            record.task_id,
+            poll_seconds=0.1,
+            heartbeat_seconds=15,
+            sleep=sleep,
+            monotonic=lambda: next(monotonic_values),
+            wall_clock=lambda: NOW,
+        ).__aiter__()
+        assert '"status":"queued"' in await _next(stream)
+        assert await _next(stream) == ": heartbeat\n\n"
+        request.disconnected = True
+        with pytest.raises(StopAsyncIteration):
+            await _next(stream)
+
+    asyncio.run(scenario())
+
+
+def test_event_stream_does_not_hold_sqlite_transaction_during_wait(config: WebConfig, store: TaskStore) -> None:
+    record, _ = store.create(
+        TaskCreate.model_validate(payload("db-wait-key")),
+        now=NOW,
+    )
+    second = TaskStore(config.database_path, lease_duration=timedelta(seconds=60))
+    request = _Request()
+
+    async def sleep(_seconds: float) -> None:
+        second.cancel_queued(record.task_id, now=NOW + timedelta(seconds=1))
+
+    async def scenario() -> None:
+        stream = TaskEventStream(
+            request,
+            store,
+            record.task_id,
+            poll_seconds=0.1,
+            heartbeat_seconds=15,
+            sleep=sleep,
+            monotonic=lambda: 0.0,
+            wall_clock=lambda: NOW,
+        ).__aiter__()
+        await _next(stream)
+        assert '"status":"cancelled"' in await _next(stream)
+
+    asyncio.run(scenario())
+
+
 def test_frontend_fallback_is_confined_and_does_not_capture_api(config: WebConfig, store: TaskStore) -> None:
     assets = config.frontend_dist / "assets"
     assets.mkdir(parents=True)
@@ -284,3 +414,58 @@ def test_frontend_fallback_is_confined_and_does_not_capture_api(config: WebConfi
     assert client.get("/assets/app.js").text == "ok"
     assert client.get("/assets/%2e%2e/index.html").status_code == 404
     assert client.get("/api/unknown").headers["content-type"].startswith("application/json")
+    assert client.get("/assets/").status_code == 404
+
+
+@pytest.mark.parametrize("link", ["parent", "dist", "index", "assets", "descendant"])
+def test_frontend_rejects_symlinked_tree(tmp_path: Path, config: WebConfig, store: TaskStore, link: str) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "index.html").write_text("outside")
+    (outside / "app.js").write_text("outside")
+    dist = config.frontend_dist
+    if link == "parent":
+        linked_dist = outside / "frontend"
+        (linked_dist / "assets").mkdir(parents=True)
+        (linked_dist / "index.html").write_text("outside")
+        (linked_dist / "assets" / "app.js").write_text("outside")
+        config.frontend_dist.parent.symlink_to(outside, target_is_directory=True)
+    elif link == "dist":
+        dist.parent.mkdir(parents=True)
+        dist.symlink_to(outside, target_is_directory=True)
+    else:
+        assets = dist / "assets"
+        assets.mkdir(parents=True)
+        (dist / "index.html").write_text("index")
+        (assets / "app.js").write_text("ok")
+        if link == "index":
+            (dist / "index.html").unlink()
+            (dist / "index.html").symlink_to(outside / "index.html")
+        elif link == "assets":
+            for child in assets.iterdir():
+                child.unlink()
+            assets.rmdir()
+            assets.symlink_to(outside, target_is_directory=True)
+        else:
+            (assets / "linked.js").symlink_to(outside / "app.js")
+
+    client = TestClient(create_app(config, store))
+
+    assert client.get("/").status_code == 503
+    assert client.get("/assets/app.js").status_code == 503
+
+
+def test_frontend_rejects_dist_outside_root_deploy(tmp_path: Path, config: WebConfig, store: TaskStore) -> None:
+    outside = tmp_path / "outside-dist"
+    (outside / "assets").mkdir(parents=True)
+    (outside / "index.html").write_text("outside")
+    unsafe = config.model_copy(update={"frontend_dist": outside})
+
+    client = TestClient(create_app(unsafe, store))
+
+    assert client.get("/").status_code == 503
+
+    (config.root / "deploy").mkdir()
+    lexical_escape = config.model_copy(update={"frontend_dist": config.root / "deploy" / ".." / "outside-dist"})
+    escaped_client = TestClient(create_app(lexical_escape, store))
+    assert escaped_client.get("/").status_code == 503
