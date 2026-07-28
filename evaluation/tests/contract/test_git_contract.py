@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from powercontext_eval import git_source as git_source_module
-from powercontext_eval.errors import CommandFailed, GitSourceError
+from powercontext_eval.errors import CommandError, CommandFailed, GitSourceError
 from powercontext_eval.git_source import GitSource, ResolvedGitSource
 from powercontext_eval.models import PowerContextRef
 from powercontext_eval.process import CommandResult, ProcessRunner
@@ -851,10 +851,65 @@ def test_resolve_rejects_embedded_password_query_and_fragment_before_cache_creat
     assert not (tmp_path / "cache").exists()
 
 
-def test_username_only_ssh_uses_command_scoped_rewrite_and_sanitized_origin(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "raw_source",
+    [
+        "secret%2Dtoken@example.invalid:org/repo.git",
+        "ssh://secret%2Dtoken@example.invalid/org/repo.git",
+    ],
+)
+def test_username_only_ssh_failure_redacts_raw_and_decoded_username_but_keeps_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raw_source: str,
+) -> None:
+    executable_directory = tmp_path / "bin"
+    executable_directory.mkdir()
+    fake_ssh = executable_directory / "ssh"
+    fake_ssh.write_text(
+        '#!/bin/sh\nprintf \'ssh-arg=%s\\n\' "$@" >&2\nif [ "${1-}" = "-G" ]; then exit 0; fi\nexit 19\n',
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{executable_directory}{os.pathsep}{os.environ['PATH']}")
+    source = GitSource(cache_root=tmp_path / "cache")
+
+    with pytest.raises(GitSourceError, match="clone Git mirror") as caught:
+        source.resolve(raw_source, PowerContextRef(kind="commit", value="a" * 40))
+
+    cause = caught.value.__cause__
+    assert isinstance(cause, CommandError)
+    rendered = "\n".join(
+        [
+            str(caught.value),
+            repr(caught.value),
+            str(cause),
+            repr(cause),
+            repr(cause.result),
+            *cause.result.argv,
+            cause.result.stdout,
+            cause.result.stderr,
+        ]
+    )
+    for secret in (raw_source, "secret%2Dtoken", "secret-token"):
+        assert secret not in rendered
+    assert "example.invalid" in cause.result.stderr
+    assert "org/repo.git" in cause.result.stderr
+
+
+@pytest.mark.parametrize(
+    ("raw_source", "normalized"),
+    [
+        ("ssh://deploy%2Dtoken@example.com/org/repo.git", "ssh://example.com/org/repo.git"),
+        ("deploy%2Dtoken@example.com:org/repo.git", "example.com:org/repo.git"),
+    ],
+)
+def test_username_only_ssh_uses_command_scoped_rewrite_and_sanitized_origin(
+    tmp_path: Path,
+    raw_source: str,
+    normalized: str,
+) -> None:
     sha = "a" * 40
-    raw_source = "ssh://deploy@example.com/org/repo.git"
-    normalized = "ssh://example.com/org/repo.git"
     runner = ControlledGitRunner(sha)
     source = GitSource(cache_root=tmp_path / "cache", runner=runner)
 
@@ -868,12 +923,16 @@ def test_username_only_ssh_uses_command_scoped_rewrite_and_sanitized_origin(tmp_
     assert not any(call[1:4] == ("remote", "set-url", "origin") for call, _secrets in runner.calls)
     assert runner.origin == normalized
     assert resolved.source == normalized
-    assert "deploy" not in repr(resolved)
+    assert "deploy%2Dtoken" not in repr(resolved)
+    assert "deploy-token" not in repr(resolved)
     sensitive_calls = [
         (call, secrets) for call, secrets in runner.calls if any(raw_source in argument for argument in call)
     ]
     assert sensitive_calls
-    assert all(raw_source in secrets and "deploy" in secrets for _call, secrets in sensitive_calls)
+    assert all(
+        raw_source in secrets and "deploy%2Dtoken" in secrets and "deploy-token" in secrets
+        for _call, secrets in sensitive_calls
+    )
 
 
 @pytest.mark.parametrize(

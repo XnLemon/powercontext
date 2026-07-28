@@ -439,7 +439,7 @@ def _source_details(source: str | Path) -> _SourceDetails:
     if scp_match is not None:
         normalized = f"{scp_match.group('host')}:{scp_match.group('path')}"
         user = scp_match.group("user")
-        secrets = tuple(secret for secret in (raw, unquote(user) if user else None) if secret)
+        secrets = tuple(secret for secret in (raw, user, unquote(user) if user else None) if secret)
         return _SourceDetails(
             normalized=normalized,
             transport=raw,
@@ -489,7 +489,9 @@ def _url_secrets(
     fragment: str,
 ) -> tuple[str, ...]:
     values = [raw]
-    values.extend(unquote(value) for value in (username, password) if value)
+    for value in (username, password):
+        if value:
+            values.extend((value, unquote(value)))
     values.extend(unquote(value) for pair in parse_qsl(query, keep_blank_values=True) for value in pair if value)
     if fragment:
         values.append(unquote(fragment))
