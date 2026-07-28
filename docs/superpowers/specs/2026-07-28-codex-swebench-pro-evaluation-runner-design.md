@@ -519,6 +519,9 @@ The first live run follows this order:
 The initial candidate is
 `instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9`. This is an engineering selection, not an
 officially designated sample. It is used only if its Gold Patch passes in the pinned local-Docker evaluator.
+Its pinned dataset `dockerhub_tag` resolves through the harness image rule to
+`jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9`; adapters must not
+mistake `dockerhub_tag` for a repository name.
 
 Later statistical evaluation should use a curated Gold-verified subset, randomized arm order, repeated trials, and
 confidence intervals. That is a follow-on milestone, not part of this MVP.

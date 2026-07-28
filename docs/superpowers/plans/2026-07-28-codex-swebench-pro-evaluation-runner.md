@@ -753,7 +753,7 @@ Expected: all commands exit zero and their versions are written to `environment.
 - [ ] **Step 3: Resolve Docker image delivery without interrupting current containers**
 
 Use the already available trusted amd64 Docker engine outside `m0` to pull
-`jefzda/flipt-io.flipt-flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9`, verify manifest digest
+`jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9`, verify manifest digest
 `sha256:d2c9d5460c479cb257a0588a603021f4e83e31f2614146728336689854f52803`, export it with `docker save`,
 transfer the archive through an owner-only temporary path, and import it with `docker load` on `m0`. Verify the
 loaded image ID/digest before deleting the exact temporary archive. Do not reconfigure or restart the existing
