@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from powercontext_eval.paths import EvaluationPaths
 from powercontext_eval.web.models import (
@@ -37,6 +37,12 @@ class TaskConflict(TaskStoreError):
 
 class TaskOwnershipError(TaskStoreError):
     """The worker does not own the active task lease."""
+
+
+class HealthSnapshot(TypedDict):
+    worker_lease_active: bool
+    queued_tasks: int
+    running_tasks: int
 
 
 class TaskStore:
@@ -163,6 +169,41 @@ class TaskStore:
         parameters.extend((limit, offset))
         with self._connection() as connection:
             return [self._summary(self._record(row)) for row in connection.execute(sql, parameters).fetchall()]
+
+    def queue_position(self, task_id: str) -> int | None:
+        """Return the one-based position among currently queued tasks."""
+        with self._connection() as connection:
+            row = self._select_task(connection, task_id)
+            if TaskStatus(row["status"]) is not TaskStatus.QUEUED:
+                return None
+            position = connection.execute(
+                """
+                SELECT COUNT(*) FROM tasks
+                WHERE status = ? AND queue_seq <= ?
+                """,
+                (TaskStatus.QUEUED.value, row["queue_seq"]),
+            ).fetchone()[0]
+            if not isinstance(position, int):
+                raise TypeError("SQLite queue count is not an integer")
+            return position
+
+    def health_snapshot(self, *, now: datetime) -> HealthSnapshot:
+        """Return queue counts and observable lease state without mutating tasks."""
+        now_text = _timestamp(now)
+        with self._connection() as connection:
+            counts = {
+                str(row["status"]): int(row["count"])
+                for row in connection.execute("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status").fetchall()
+            }
+            lease = connection.execute(
+                "SELECT 1 FROM worker_lease WHERE singleton = ? AND expires_at > ?",
+                (1, now_text),
+            ).fetchone()
+        return {
+            "worker_lease_active": lease is not None,
+            "queued_tasks": counts.get(TaskStatus.QUEUED.value, 0),
+            "running_tasks": counts.get(TaskStatus.RUNNING.value, 0),
+        }
 
     def cancel_queued(self, task_id: str, *, now: datetime) -> TaskRecord:
         """Cancel a queued task."""

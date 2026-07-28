@@ -111,6 +111,29 @@ def test_cancel_only_queued_task_and_increments_version(store: TaskStore) -> Non
         store.cancel_queued(cancelled.task_id, now=NOW + timedelta(seconds=2))
 
 
+def test_queue_position_and_read_only_health_snapshot(store: TaskStore) -> None:
+    first, _ = store.create(request("position-key-1"), now=NOW)
+    second, _ = store.create(request("position-key-2"), now=NOW)
+    store.cancel_queued(first.task_id, now=NOW + timedelta(seconds=1))
+
+    assert store.queue_position(first.task_id) is None
+    assert store.queue_position(second.task_id) == 1
+    assert store.health_snapshot(now=NOW + timedelta(seconds=1)) == {
+        "worker_lease_active": False,
+        "queued_tasks": 1,
+        "running_tasks": 0,
+    }
+
+
+def test_health_observes_only_nonexpired_worker_lease(store: TaskStore) -> None:
+    task, _ = store.create(request("lease-health-key"), now=NOW)
+    store.claim_next("worker", now=NOW)
+
+    assert store.health_snapshot(now=NOW + timedelta(seconds=30))["worker_lease_active"] is True
+    assert store.health_snapshot(now=NOW + timedelta(seconds=61))["worker_lease_active"] is False
+    assert store.get(task.task_id).status is TaskStatus.RUNNING
+
+
 def test_claim_is_fifo_atomic_and_globally_excludes_other_connection(database: Path) -> None:
     first_store = TaskStore(database, lease_duration=timedelta(seconds=60))
     second_store = TaskStore(database, lease_duration=timedelta(seconds=60))
