@@ -558,8 +558,185 @@ td small {
   margin-bottom: 0;
 }
 
-.report-placeholder {
-  padding: 28px;
+.report-view {
+  display: grid;
+  gap: 22px;
+}
+
+.report-identity {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line-strong);
+}
+
+.report-task-id {
+  max-width: 780px;
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, monospace;
+  font-size: clamp(18px, 2vw, 25px);
+}
+
+.acceptance-badge {
+  flex: none;
+  padding: 8px 12px;
+  border: 1px solid currentcolor;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.acceptance-badge--valid {
+  background: var(--green-soft);
+  color: var(--green-dark);
+}
+
+.acceptance-badge--invalid {
+  background: #fff5f3;
+  color: var(--red);
+}
+
+.report-section {
+  padding: 24px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.report-section > h3,
+.report-index > h2 {
+  margin: 0 0 18px;
+  font-size: 17px;
+}
+
+.validity-list {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  margin: 0;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+
+.validity-list > div {
+  padding: 14px;
+  background: var(--surface);
+}
+
+.validity-list dt,
+.arm-metrics dt,
+.evidence-panel dt,
+.metadata-list dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.validity-list dd {
+  margin: 5px 0 0;
+  font-weight: 700;
+}
+
+.report-view--invalid .validity-list dd {
+  color: var(--red);
+}
+
+.invalid-note,
+.comparison-unavailable {
+  margin: 15px 0 0;
+  color: var(--red);
+  font-weight: 650;
+}
+
+.arm-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.arm-panel {
+  padding: 18px;
+  border-left: 3px solid var(--line-strong);
+  background: #f8f8f4;
+}
+
+.arm-panel h4 {
+  margin: 0 0 16px;
+  font-size: 15px;
+}
+
+.arm-metrics,
+.evidence-panel dl,
+.metadata-list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+}
+
+.arm-metrics > div,
+.evidence-panel dl > div,
+.metadata-list > div {
+  display: grid;
+  grid-template-columns: minmax(110px, .7fr) minmax(0, 1.3fr);
+  gap: 15px;
+}
+
+.arm-metrics dd,
+.evidence-panel dd,
+.metadata-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.metadata-group + .metadata-group {
+  margin-top: 22px;
+}
+
+.metadata-group h4 {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.metadata-list + .metadata-list {
+  margin-top: 12px;
+}
+
+.raw-report-link {
+  justify-self: start;
+}
+
+.report-index {
+  padding: 24px;
+}
+
+.report-index ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.report-index li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+
+.report-index strong,
+.report-index span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.report-index span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 @media (max-width: 959px) {
@@ -610,11 +787,19 @@ td small {
   }
 
   .form-row,
-  .detail-grid {
+  .detail-grid,
+  .validity-list,
+  .arm-grid {
     grid-template-columns: 1fr;
   }
 
   .panel-heading {
+    flex-direction: column;
+  }
+
+  .report-identity,
+  .report-index li {
+    align-items: stretch;
     flex-direction: column;
   }
 

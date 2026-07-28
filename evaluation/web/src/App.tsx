@@ -5,6 +5,8 @@ import { AppShell } from "./components/AppShell";
 import { TaskDetail } from "./components/TaskDetail";
 import { TaskForm } from "./components/TaskForm";
 import { TaskList } from "./components/TaskList";
+import { ReportView } from "./components/ReportView";
+import { ReportIndex } from "./components/ReportIndex";
 import type { TaskRecord, TaskSummary } from "./types";
 
 interface AppProps {
@@ -48,20 +50,18 @@ export function App({ api: injectedApi }: AppProps) {
       </div>
     );
   } else if (reportMatch?.[1]) {
+    const taskId = decodeURIComponent(reportMatch[1]);
     content = (
       <div className="page">
         <PageHeader eyebrow="只读结果" title="验收报告" />
-        <section className="panel report-placeholder">
-          <p>结构化报告将在下一阶段实现。</p>
-          <p>任务：{decodeURIComponent(reportMatch[1])}</p>
-        </section>
+        <ReportView api={api} taskId={taskId} />
       </div>
     );
   } else if (path === "/reports" || path.startsWith("/reports/")) {
     content = (
       <div className="page">
         <PageHeader eyebrow="只读结果" title="验收报告" />
-        <section className="panel empty-state">请选择已完成任务的报告链接进行查看。</section>
+        <ReportIndex api={api} />
       </div>
     );
   } else {

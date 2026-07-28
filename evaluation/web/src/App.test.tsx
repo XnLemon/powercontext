@@ -41,14 +41,30 @@ describe("App", () => {
     expect(screen.queryByText(/通过|未通过/)).not.toBeInTheDocument();
   });
 
-  it("routes task details and report placeholder without preloading conclusions", async () => {
+  it("routes task details and the report index without preloading conclusions", async () => {
     window.history.replaceState({}, "", "/tasks/task-one");
     render(<App api={apiStub({ getTask: vi.fn().mockResolvedValue(record("queued", "task-one")) })} />);
     expect(await screen.findByRole("heading", { name: "任务详情" })).toBeVisible();
 
     fireEvent.click(screen.getByRole("link", { name: "验收报告" }));
     expect(await screen.findByRole("heading", { name: "验收报告" })).toBeVisible();
-    expect(screen.getByText("请选择已完成任务的报告链接进行查看。")).toBeVisible();
+    expect(screen.getByText("暂无已完成的验收报告。")).toBeVisible();
+  });
+
+  it("loads a report route and exposes succeeded reports from the report index", async () => {
+    const api = apiStub({
+      listTasks: vi.fn().mockResolvedValue([summary("succeeded", "task/report")]),
+    });
+    window.history.replaceState({}, "", "/reports/task%2Freport");
+    render(<App api={api} />);
+    expect(await screen.findByText("验收有效")).toBeVisible();
+    expect(api.getReport).toHaveBeenCalledWith("task/report", expect.any(AbortSignal));
+
+    actPop("/reports");
+    expect(await screen.findByRole("link", { name: "查看 task/report 的验收报告" })).toHaveAttribute(
+      "href",
+      "/reports/task%2Freport",
+    );
   });
 
   it("ignores a stale workbench overview response after its API changes", async () => {

@@ -1,7 +1,7 @@
 import { vi } from "vitest";
 
 import type { EvaluationApi } from "../api";
-import type { Capabilities, HealthResponse, TaskCreate, TaskRecord, TaskSummary } from "../types";
+import type { Capabilities, HealthResponse, ReportResponse, TaskCreate, TaskRecord, TaskSummary } from "../types";
 
 export function deferred<T>(): {
   promise: Promise<T>;
@@ -33,6 +33,65 @@ export const health: HealthResponse = {
   worker_lease_active: true,
   queued_tasks: 1,
   running_tasks: 1,
+};
+
+export const report: ReportResponse = {
+  task_id: "task-report",
+  acceptance_valid: true,
+  off: {
+    arm: "off",
+    resolution: "unresolved",
+    input_tokens: 1_963_221,
+    output_tokens: null,
+    elapsed_seconds: 125.55,
+    patch_bytes: 1_024,
+  },
+  on: {
+    arm: "on",
+    resolution: "resolved",
+    input_tokens: 1_122_207,
+    output_tokens: 12_345,
+    elapsed_seconds: 100,
+    patch_bytes: 2_048,
+  },
+  comparison: {
+    input_tokens: { off: 1_963_221, on: 1_122_207, delta: -841_014, percent: -42.839 },
+    output_tokens: null,
+    elapsed_seconds: { off: 125.55, on: 100, delta: -25.55, percent: -20.3505 },
+    patch_bytes: { off: 1_024, on: 2_048, delta: 1_024, percent: 100 },
+  },
+  evidence: {
+    off: {
+      mcp_requests: 0,
+      prompt_sources: 0,
+      plugin_checkout_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      plugin_id: "powercontext",
+      plugin_installed: true,
+      plugin_version: "0.1.0",
+      scope_id: "eval:run-123:off",
+      server_ready: true,
+    },
+    on: {
+      mcp_requests: 10,
+      prompt_sources: 2,
+      plugin_checkout_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      plugin_id: "powercontext",
+      plugin_installed: true,
+      plugin_version: "0.1.0",
+      scope_id: "eval:run-123:on",
+      server_ready: true,
+    },
+  },
+  revisions: {
+    powercontext: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    codex: "gpt-5.6-sol",
+  },
+  configuration: {
+    model: "gpt-5.6-sol",
+    reasoning_effort: "medium",
+    run_id: "run-123",
+  },
+  generated_at: "2026-07-29T01:02:03Z",
 };
 
 export const request: TaskCreate = {
@@ -160,6 +219,8 @@ export function apiStub(overrides: Partial<Record<keyof EvaluationApi, unknown>>
     getTask: vi.fn().mockResolvedValue(record("queued")),
     createTask: vi.fn().mockResolvedValue(record("queued")),
     cancelTask: vi.fn().mockResolvedValue(record("cancelled")),
+    getReport: vi.fn().mockResolvedValue(report),
+    getRawReport: vi.fn().mockResolvedValue("# report"),
     subscribeTaskEvents: vi.fn().mockReturnValue({ close: vi.fn() }),
     ...overrides,
   } as unknown as EvaluationApi;
