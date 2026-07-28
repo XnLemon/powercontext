@@ -56,6 +56,15 @@ def test_resolve_full_commit_and_lowercases_sha(source: GitSource, git_fixture: 
     assert resolved.sha == git_fixture.feature_sha
 
 
+def test_resolve_rejects_exact_tag_that_points_to_blob(source: GitSource, git_fixture: GitFixture) -> None:
+    blob_sha = git(git_fixture.work, "hash-object", "README.md").stdout.strip()
+    git(git_fixture.work, "update-ref", "refs/tags/blob-only", blob_sha)
+    git(git_fixture.work, "push", "origin", "refs/tags/blob-only")
+
+    with pytest.raises(GitSourceError, match="could not resolve to a commit"):
+        source.resolve(git_fixture.remote, PowerContextRef(kind="tag", value="blob-only"))
+
+
 def test_resolve_latest_uses_clean_local_head(source: GitSource, git_fixture: GitFixture) -> None:
     resolved = source.resolve(git_fixture.work, PowerContextRef(kind="latest"))
 
@@ -189,24 +198,6 @@ class FailIfProcessRuns(ProcessRunner):
         raise AssertionError("normalization and cache key calculation must not access the network")
 
 
-class ResolveWithoutNetwork(ProcessRunner):
-    def __init__(self, sha: str) -> None:
-        self.sha = sha
-
-    def run(
-        self,
-        argv: Sequence[str],
-        *,
-        cwd: str | Path,
-        timeout: float | None = None,
-        env: Mapping[str, str] | None = None,
-        check: bool = True,
-        secrets: Sequence[str] = (),
-    ) -> CommandResult:
-        stdout = f"{self.sha}\n" if argv[1:3] == ["rev-parse", "--verify"] else ""
-        return CommandResult(tuple(argv), str(cwd), 0, stdout, "")
-
-
 @pytest.mark.parametrize(
     ("raw_source", "normalized"),
     [
@@ -219,6 +210,7 @@ class ResolveWithoutNetwork(ProcessRunner):
             "ssh://example.com:2222/org/repo.git",
         ),
         ("git@example.com:org/repo.git", "example.com:org/repo.git"),
+        ("example.com:org/repo.git", "example.com:org/repo.git"),
     ],
 )
 def test_credential_url_normalization_and_cache_path_never_leak_secrets(
@@ -245,15 +237,17 @@ def test_local_source_normalizes_to_absolute_resolved_path(tmp_path: Path) -> No
     assert source.normalize_source(relative) == str(relative.resolve())
 
 
-def test_scp_style_source_uses_sanitized_identity_during_resolution(tmp_path: Path) -> None:
-    sha = "a" * 40
+def test_scp_style_source_sanitization_and_cache_key_do_not_run_process(tmp_path: Path) -> None:
     raw_source = "private-token@example.com:org/repo.git"
-    source = GitSource(cache_root=tmp_path / "cache", runner=ResolveWithoutNetwork(sha))
+    source = GitSource(cache_root=tmp_path / "cache", runner=FailIfProcessRuns())
 
-    resolved = source.resolve(raw_source, PowerContextRef(kind="commit", value=sha))
+    normalized = source.normalize_source(raw_source)
+    cache_path = source.cache_path_for(raw_source)
+    anonymous_cache_path = source.cache_path_for("example.com:org/repo.git")
 
-    assert resolved.source == "example.com:org/repo.git"
-    rendered = repr(resolved)
+    assert normalized == "example.com:org/repo.git"
+    assert cache_path == anonymous_cache_path
+    rendered = f"{normalized}\n{cache_path}"
     assert "private-token" not in rendered
 
 

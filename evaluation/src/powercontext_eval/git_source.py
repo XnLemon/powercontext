@@ -15,7 +15,7 @@ from powercontext_eval.process import CommandResult, ProcessRunner
 
 _FULL_LOWERCASE_SHA = re.compile(r"[0-9a-f]{40}")
 _SUPPORTED_URL_SCHEMES = frozenset({"http", "https", "ssh"})
-_SCP_STYLE_URL = re.compile(r"^(?P<user>[^/@:\s]+)@(?P<host>[^/:\s]+):(?P<path>.+)$")
+_SCP_STYLE_URL = re.compile(r"^(?:(?P<user>[^/@:\s]+)@)?(?P<host>[^/:\s]+):(?P<path>.+)$")
 
 
 @dataclass(frozen=True)
@@ -262,6 +262,13 @@ def _source_details(source: str | Path) -> _SourceDetails:
     if not raw or "\0" in raw:
         raise GitSourceError("Git source must be a non-empty path or URL without NUL")
 
+    scp_match = _SCP_STYLE_URL.fullmatch(raw) if "://" not in raw else None
+    if scp_match is not None:
+        normalized = f"{scp_match.group('host')}:{scp_match.group('path')}"
+        user = scp_match.group("user")
+        secrets = tuple(secret for secret in (raw, unquote(user) if user else None) if secret)
+        return _SourceDetails(normalized=normalized, transport=raw, local_path=None, secrets=secrets)
+
     parsed = urlsplit(raw)
     if parsed.scheme:
         if parsed.scheme not in _SUPPORTED_URL_SCHEMES:
@@ -276,12 +283,6 @@ def _source_details(source: str | Path) -> _SourceDetails:
         netloc = f"{host}:{port}" if port is not None else host
         normalized = urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
         secrets = _url_secrets(raw, parsed.username, parsed.password, parsed.query, parsed.fragment)
-        return _SourceDetails(normalized=normalized, transport=raw, local_path=None, secrets=secrets)
-
-    scp_match = _SCP_STYLE_URL.fullmatch(raw)
-    if scp_match is not None:
-        normalized = f"{scp_match.group('host')}:{scp_match.group('path')}"
-        secrets = tuple(secret for secret in (raw, unquote(scp_match.group("user"))) if secret)
         return _SourceDetails(normalized=normalized, transport=raw, local_path=None, secrets=secrets)
 
     local_path = Path(source).expanduser().resolve()
