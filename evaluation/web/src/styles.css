@@ -303,9 +303,7 @@ button:disabled {
   color: var(--ink);
 }
 
-.text-button,
-.task-link {
-  padding: 4px 0;
+.text-button {
   border: 0;
   background: transparent;
   color: var(--green-dark);
@@ -314,6 +312,25 @@ button:disabled {
   text-align: left;
   text-decoration: underline;
   text-underline-offset: 3px;
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0 8px;
+}
+
+.task-link {
+  border: 0;
+  background: transparent;
+  color: var(--green-dark);
+  cursor: pointer;
+  font-weight: 700;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0 8px;
 }
 
 .text-button--danger {
@@ -383,12 +400,12 @@ dd {
   font-size: 12px;
 }
 
-.filter-control {
+.filter-field {
   width: 170px;
 }
 
-.filter-control select {
-  min-height: 38px;
+.filter-field select {
+  min-height: 44px;
 }
 
 .table-scroll {
@@ -590,7 +607,7 @@ td small {
     flex-direction: column;
   }
 
-  .filter-control {
+  .filter-field {
     width: 100%;
   }
 }

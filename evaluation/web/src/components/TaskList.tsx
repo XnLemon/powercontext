@@ -73,7 +73,7 @@ export function TaskList({ api, onSelect }: TaskListProps) {
           <p className="eyebrow">任务队列</p>
           <h2>全部任务</h2>
         </div>
-        <label className="filter-control">
+        <label className="filter-field">
           状态筛选
           <select value={filter} onChange={(event) => setFilter(event.target.value as TaskStatus | "")}>
             <option value="">全部状态</option>
