@@ -36,6 +36,8 @@ PLUGIN_ID = "powercontext@powercontext"
 _SAFE_RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _CONTAINER_UID_GID = "2950:100"
+_CONTAINER_CODEX = "/tools/codex-dir/codex"
+_CONTAINER_UV = "/tools/uv-dir/uv"
 LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
 _PLUGIN_RELATIVE = Path("integrations/codex/plugins/powercontext")
 
@@ -620,7 +622,7 @@ class DockerSut:
             self._readiness(container, paths)
             plugin = self._plugin_list(container, paths)
             codex = CodexRunner(_DockerExecRunner(self._docker, container)).run(
-                CodexInvocation(arm, inside_disposable_container=True, executable="/tools/codex"),
+                CodexInvocation(arm, inside_disposable_container=True, executable=_CONTAINER_CODEX),
                 prompt=prompt,
                 cwd=paths.workspace,
                 store=store,
@@ -780,12 +782,12 @@ class DockerSut:
             "--mount",
             f"type=bind,src={paths.runtime},dst=/runtime",
             "--mount",
-            f"type=bind,src={config.uv_binary},dst=/tools/uv,readonly",
+            _tool_directory_mount(config.uv_binary, "/tools/uv-dir"),
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=512m",
             *_docker_env_args({**common_environment, "UV_PROJECT_ENVIRONMENT": "/runtime/pc-env"}),
             config.task_image,
-            "/tools/uv",
+            _CONTAINER_UV,
             "sync",
             "--frozen",
             "--project",
@@ -821,12 +823,12 @@ class DockerSut:
                 "--mount",
                 f"type=bind,src={paths.runtime},dst=/runtime",
                 "--mount",
-                f"type=bind,src={config.uv_binary},dst=/tools/uv,readonly",
+                _tool_directory_mount(config.uv_binary, "/tools/uv-dir"),
                 "--tmpfs",
                 "/tmp:rw,noexec,nosuid,size=256m",
                 *_docker_env_args({**common_environment, "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env"}),
                 config.task_image,
-                "/tools/uv",
+                _CONTAINER_UV,
                 "sync",
                 "--frozen",
                 "--project",
@@ -860,7 +862,7 @@ class DockerSut:
             "--mount",
             f"type=bind,src={paths.runtime},dst=/runtime",
             "--mount",
-            f"type=bind,src={config.codex_binary},dst=/tools/codex,readonly",
+            _tool_directory_mount(config.codex_binary, "/tools/codex-dir"),
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=256m",
             *_docker_env_args(
@@ -872,7 +874,7 @@ class DockerSut:
                 }
             ),
             config.task_image,
-            "/tools/codex",
+            _CONTAINER_CODEX,
             "plugin",
         )
         self._docker.run(
@@ -927,9 +929,9 @@ class DockerSut:
             "--mount",
             f"type=bind,src={config.source_checkout},dst=/source,readonly",
             "--mount",
-            f"type=bind,src={config.codex_binary},dst=/tools/codex,readonly",
+            _tool_directory_mount(config.codex_binary, "/tools/codex-dir"),
             "--mount",
-            f"type=bind,src={config.uv_binary},dst=/tools/uv,readonly",
+            _tool_directory_mount(config.uv_binary, "/tools/uv-dir"),
             "--mount",
             f"type=bind,src={auth},dst=/runtime/codex-home/auth.json,readonly",
             "--tmpfs",
@@ -943,7 +945,10 @@ class DockerSut:
                     "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env",
                     "UV_CACHE_DIR": "/runtime/uv-cache",
                     "UV_OFFLINE": "1",
-                    "PATH": "/tools:/runtime/pc-env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "PATH": (
+                        "/tools/uv-dir:/tools/codex-dir:/runtime/pc-env/bin:"
+                        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                    ),
                 }
             ),
             config.task_image,
@@ -975,7 +980,7 @@ class DockerSut:
 
     def _verify_codex_version(self, container: str, paths: ArmPaths, store: ArtifactStore) -> None:
         result = self._docker.run(
-            ("docker", "exec", container, "/tools/codex", "--version"),
+            ("docker", "exec", container, _CONTAINER_CODEX, "--version"),
             cwd=paths.runtime,
             timeout=30,
         )
@@ -989,7 +994,7 @@ class DockerSut:
 
     def _plugin_list(self, container: str, paths: ArmPaths) -> tuple[str, str]:
         result = self._docker.run(
-            ("docker", "exec", container, "/tools/codex", "plugin", "list", "--json"),
+            ("docker", "exec", container, _CONTAINER_CODEX, "plugin", "list", "--json"),
             cwd=paths.runtime,
             timeout=30,
         )
@@ -1090,6 +1095,13 @@ def _reserve_port(address: str) -> int:
 
 def _docker_env_args(environment: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(part for key, value in environment.items() for part in ("-e", f"{key}={value}"))
+
+
+def _tool_directory_mount(binary: Path, destination: str) -> str:
+    resolved = binary.resolve(strict=True)
+    if resolved.name not in {"codex", "uv"}:
+        raise UnsafeSutConfiguration("Tool binary has an unexpected name")
+    return f"type=bind,src={resolved.parent},dst={destination},readonly"
 
 
 def _reject_retained_secrets(data: bytes, variants: tuple[str, ...]) -> None:

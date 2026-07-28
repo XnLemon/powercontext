@@ -358,7 +358,10 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
     assert "POWERCONTEXT_CODEX_SCOPE_ID=eval:run-1:on" in joined
     mounts = [run[index + 1] for index, value in enumerate(run) if value in {"--mount", "-v"}]
     assert all(
-        any(allowed in mount for allowed in ("/workspace", "/runtime", "/source", "/tools/codex", "/tools/uv", "/auth"))
+        any(
+            allowed in mount
+            for allowed in ("/workspace", "/runtime", "/source", "/tools/codex-dir", "/tools/uv-dir", "/auth")
+        )
         for mount in mounts
     )
     assert transcript[-2][:3] == ("docker", "rm", "-f")
@@ -366,8 +369,16 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
     assert relay.events == [("start", "172.29.0.1"), ("stop", "exact")]
     assert any(command[-5:] == ("plugin", "marketplace", "add", "/source", "--json") for command in transcript)
     assert any(command[-4:] == ("plugin", "add", "powercontext@powercontext", "--json") for command in transcript)
-    assert ("docker", "exec", "powercontext-eval-run-1-on", "/tools/codex", "plugin", "list", "--json") in transcript
-    assert ("docker", "exec", "powercontext-eval-run-1-on", "/tools/codex", "--version") in transcript
+    assert (
+        "docker",
+        "exec",
+        "powercontext-eval-run-1-on",
+        "/tools/codex-dir/codex",
+        "plugin",
+        "list",
+        "--json",
+    ) in transcript
+    assert ("docker", "exec", "powercontext-eval-run-1-on", "/tools/codex-dir/codex", "--version") in transcript
     assert json.loads((paths.result_root / "codex/provenance.json").read_text()) == {
         "actual_version": "0.145.0",
         "expected_version": "0.145.0",
