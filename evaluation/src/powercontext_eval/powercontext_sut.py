@@ -330,6 +330,7 @@ class ArmPaths:
             )
             while chunk := os.read(source_fd, 64 * 1024):
                 os.write(destination_fd, chunk)
+            os.fchmod(destination_fd, 0o600)
             os.fsync(destination_fd)
         except FileExistsError as error:
             raise UnsafeSutConfiguration("Ephemeral auth destination already exists") from error
@@ -337,7 +338,6 @@ class ArmPaths:
             os.close(source_fd)
             if destination_fd >= 0:
                 os.close(destination_fd)
-        os.chmod(destination, 0o600, follow_symlinks=False)
         return destination
 
 
