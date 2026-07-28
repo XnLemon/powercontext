@@ -94,6 +94,10 @@ class TaskEventStream:
         next_heartbeat = started + self._heartbeat_seconds
         while not await self._request.is_disconnected():
             now = self._monotonic()
+            if now >= next_heartbeat:
+                yield ": heartbeat\n\n"
+                next_heartbeat = now + self._heartbeat_seconds
+                now = self._monotonic()
             if now >= next_poll:
                 record = (
                     await self._load(self._task_id)

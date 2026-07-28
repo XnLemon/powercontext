@@ -507,6 +507,42 @@ def test_event_stream_clamps_heartbeat_to_fifteen_seconds(store: TaskStore) -> N
     assert sleeps == [15]
 
 
+def test_event_stream_prioritizes_due_heartbeat_over_due_database_poll(store: TaskStore) -> None:
+    record, _ = store.create(TaskCreate.model_validate(payload("heartbeat-priority-key")), now=NOW)
+    now = 0.0
+    load_times: list[float] = []
+
+    async def load(task_id: str) -> Any:
+        nonlocal now
+        load_times.append(now)
+        if len(load_times) > 1:
+            now += 5
+        return store.get(task_id)
+
+    async def sleep(_seconds: float) -> None:
+        nonlocal now
+        now = 15
+
+    async def scenario() -> None:
+        stream = TaskEventStream(
+            _Request(),
+            store,
+            record.task_id,
+            poll_seconds=10,
+            heartbeat_seconds=15,
+            sleep=sleep,
+            monotonic=lambda: now,
+            wall_clock=lambda: NOW,
+            load=load,
+        ).__aiter__()
+        await _next(stream)
+        assert await _next(stream) == ": heartbeat\n\n"
+        assert now == 15
+
+    asyncio.run(scenario())
+    assert load_times == [0]
+
+
 def test_frontend_fallback_is_confined_and_does_not_capture_api(config: WebConfig, store: TaskStore) -> None:
     assets = config.frontend_dist / "assets"
     assets.mkdir(parents=True)
