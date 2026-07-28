@@ -223,6 +223,111 @@ describe("EvaluationApi HTTP", () => {
       message: "The evaluation request was cancelled.",
     });
   });
+
+  it.each([
+    {
+      name: "nested task request",
+      method: "getTask" as const,
+      payload: { ...queuedTask, request: { ...validTask, model: "unknown-model" } },
+    },
+    {
+      name: "task lifecycle mismatch",
+      method: "getTask" as const,
+      payload: { ...queuedTask, status: "succeeded", started_at: null, finished_at: null, result: null },
+    },
+    {
+      name: "capability literal and extra field",
+      method: "getCapabilities" as const,
+      payload: {
+        benchmarks: ["swebench-pro"],
+        instances: [validTask.instance_id],
+        models: ["unknown-model"],
+        reasoning_efforts: ["medium"],
+        treatment_modes: ["off_on"],
+        secret: "must not be accepted",
+      },
+    },
+    {
+      name: "negative health count",
+      method: "getHealth" as const,
+      payload: { service: "ok", worker_lease_active: true, queued_tasks: -1, running_tasks: 0 },
+    },
+  ])("rejects malformed $name with a safe fixed error", async ({ method, payload }) => {
+    const { api } = apiWithResponse(jsonResponse(payload));
+    const operation =
+      method === "getTask"
+        ? api.getTask("task-1")
+        : method === "getCapabilities"
+          ? api.getCapabilities()
+          : api.getHealth();
+
+    await expect(operation).rejects.toMatchObject({
+      name: "ApiError",
+      code: "invalid_response",
+      message: "The evaluation service could not complete the request.",
+    });
+    await expect(operation).rejects.not.toThrow(/unknown-model|secret/i);
+  });
+
+  it("rejects malformed nested report evidence", async () => {
+    const malformedReport = {
+      task_id: "task-1",
+      acceptance_valid: true,
+      off: {
+        arm: "off",
+        resolution: "unresolved",
+        input_tokens: null,
+        output_tokens: null,
+        elapsed_seconds: null,
+        patch_bytes: null,
+      },
+      on: {
+        arm: "on",
+        resolution: "resolved",
+        input_tokens: 1,
+        output_tokens: 1,
+        elapsed_seconds: 1,
+        patch_bytes: 1,
+      },
+      comparison: {
+        input_tokens: null,
+        output_tokens: null,
+        elapsed_seconds: null,
+        patch_bytes: null,
+      },
+      evidence: {
+        off: {
+          mcp_requests: 0,
+          prompt_sources: 0,
+          plugin_checkout_sha: "abc",
+          plugin_id: "powercontext",
+          plugin_installed: "yes",
+          plugin_version: "0.1.0",
+          scope_id: "scope",
+          server_ready: true,
+        },
+        on: {
+          mcp_requests: 0,
+          prompt_sources: 0,
+          plugin_checkout_sha: "abc",
+          plugin_id: "powercontext",
+          plugin_installed: true,
+          plugin_version: "0.1.0",
+          scope_id: "scope",
+          server_ready: true,
+        },
+      },
+      revisions: { powercontext: "abc" },
+      configuration: { model: "gpt-5.6-sol" },
+      generated_at: "2026-07-29T00:02:00Z",
+    };
+    const { api } = apiWithResponse(jsonResponse(malformedReport));
+
+    await expect(api.getReport("task-1")).rejects.toMatchObject({
+      code: "invalid_response",
+      message: "The evaluation service could not complete the request.",
+    });
+  });
 });
 
 type Listener = (event: Event) => void;
@@ -327,5 +432,37 @@ describe("EvaluationApi task events", () => {
     subscription.close();
     subscription.close();
     expect(source?.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects malformed nested events without exposing their payload", () => {
+    let source: FakeEventSource | undefined;
+    const events = vi.fn();
+    const errors = vi.fn();
+    const api = new EvaluationApi({
+      eventSourceFactory: (url) => {
+        source = new FakeEventSource(url);
+        return source;
+      },
+    });
+
+    api.subscribeTaskEvents("task-1", events, errors);
+    source?.emit(
+      "task",
+      JSON.stringify({
+        task_id: "task-1",
+        status: "running",
+        phase: "private-invalid-phase",
+        version: 1,
+        occurred_at: "not-a-timestamp",
+      }),
+    );
+
+    expect(events).not.toHaveBeenCalled();
+    expect(errors).toHaveBeenCalledWith({
+      code: "invalid_event",
+      message: "A live update could not be read safely.",
+      reconnecting: true,
+    });
+    expect(JSON.stringify(errors.mock.calls)).not.toMatch(/private-invalid-phase/);
   });
 });
