@@ -1,11 +1,12 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TaskList } from "./TaskList";
-import { apiStub, record, summary } from "../test/fixtures";
+import { apiStub, deferred, instanceId, record, summary } from "../test/fixtures";
 
 describe("TaskList", () => {
+  afterEach(() => vi.useRealTimers());
   it("shows truthful distinct statuses, fields, running emphasis, queue position, and no percent", async () => {
     const tasks = ["queued", "running", "succeeded", "failed", "interrupted", "cancelled"].map((status) =>
       summary(status as ReturnType<typeof summary>["status"]),
@@ -38,7 +39,12 @@ describe("TaskList", () => {
     await waitFor(() => expect(screen.getAllByText("已取消").some((element) => element.matches(".status"))).toBe(true));
 
     fireEvent.change(screen.getByLabelText("状态筛选"), { target: { value: "running" } });
-    await waitFor(() => expect(listTasks).toHaveBeenLastCalledWith({ limit: 50, offset: 0, status: "running" }));
+    await waitFor(() =>
+      expect(listTasks).toHaveBeenLastCalledWith(
+        { limit: 50, offset: 0, status: "running" },
+        expect.any(AbortSignal),
+      ),
+    );
     expect(screen.getByText("没有符合条件的任务。")).toBeVisible();
   });
 
@@ -73,5 +79,45 @@ describe("TaskList", () => {
     await user.click(cancel);
     await waitFor(() => expect(cancelTask).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getAllByText("已取消").some((element) => element.matches(".status"))).toBe(true));
+  });
+
+  it("ignores an older list response after the status filter changes", async () => {
+    const all = deferred<ReturnType<typeof summary>[]>();
+    const running = deferred<ReturnType<typeof summary>[]>();
+    const listTasks = vi.fn().mockReturnValueOnce(all.promise).mockReturnValueOnce(running.promise);
+    render(<TaskList api={apiStub({ listTasks })} onSelect={() => undefined} />);
+    fireEvent.change(screen.getByLabelText("状态筛选"), { target: { value: "running" } });
+    running.resolve([summary("running", "task-new")]);
+    expect(await screen.findByText("task-new")).toBeVisible();
+    all.resolve([summary("queued", "task-stale")]);
+    await waitFor(() => expect(screen.queryByText("task-stale")).not.toBeInTheDocument());
+    expect(listTasks.mock.calls[0]?.[1]).toBeInstanceOf(AbortSignal);
+  });
+
+  it("shows truthful queue wait, semantic caption, machine-readable time, and full truncated identifiers", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-29T01:02:05Z"));
+    render(
+      <TaskList
+        api={apiStub({
+          listTasks: vi.fn().mockResolvedValue([
+            summary("queued", "task-queued"),
+            summary("running", "task-running"),
+            summary("cancelled", "task-cancelled"),
+          ]),
+        })}
+        onSelect={() => undefined}
+      />,
+    );
+    await vi.waitFor(() => expect(screen.getByText("2 分 5 秒")).toBeVisible());
+    expect(screen.getByText("1 分钟")).toBeVisible();
+    expect(screen.getByText("2 分钟")).toBeVisible();
+    expect(screen.getByRole("table")).toHaveAccessibleName("测试任务队列");
+    expect(screen.getAllByRole("time")[0]).toHaveAttribute("datetime", "2026-07-29T01:00:00Z");
+    const instance = screen.getAllByTitle(instanceId)[0];
+    expect(instance).toHaveAccessibleName(instanceId);
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(screen.getByText("3 分 5 秒")).toBeVisible();
+    vi.useRealTimers();
   });
 });

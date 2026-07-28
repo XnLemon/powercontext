@@ -3,6 +3,20 @@ import { vi } from "vitest";
 import type { EvaluationApi } from "../api";
 import type { Capabilities, HealthResponse, TaskCreate, TaskRecord, TaskSummary } from "../types";
 
+export function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(reason?: unknown): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
 export const instanceId =
   "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9" as const;
 

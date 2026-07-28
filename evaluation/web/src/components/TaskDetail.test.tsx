@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { TaskEvent } from "../types";
 import { TaskDetail } from "./TaskDetail";
-import { apiStub, record } from "../test/fixtures";
+import { apiStub, deferred, record } from "../test/fixtures";
 
 describe("TaskDetail", () => {
   afterEach(() => vi.useRealTimers());
@@ -103,5 +103,23 @@ describe("TaskDetail", () => {
     act(() => onError());
     await act(async () => vi.advanceTimersByTimeAsync(5000));
     expect(getTask).toHaveBeenCalledTimes(4);
+  });
+
+  it("ignores a stale task response after the route changes", async () => {
+    const first = deferred<ReturnType<typeof record>>();
+    const second = deferred<ReturnType<typeof record>>();
+    const getTask = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const changed = vi.fn();
+    const api = apiStub({ getTask });
+    const { rerender } = render(<TaskDetail api={api} taskId="task-a" onTaskChanged={changed} />);
+    rerender(<TaskDetail api={api} taskId="task-b" onTaskChanged={changed} />);
+
+    second.resolve(record("queued", "task-b"));
+    expect(await screen.findByText("task-b")).toBeVisible();
+    first.resolve(record("failed", "task-a"));
+    await act(async () => first.promise);
+    expect(screen.queryByText("task-a")).not.toBeInTheDocument();
+    expect(changed).not.toHaveBeenCalledWith(expect.objectContaining({ task_id: "task-a" }));
+    expect(getTask.mock.calls[0]?.[1]).toBeInstanceOf(AbortSignal);
   });
 });

@@ -10,6 +10,10 @@ interface TaskFormProps {
 
 const revisionPattern = /^(latest|commit:[0-9a-fA-F]{40})$/;
 
+function hasOption(options: readonly string[], value: string): boolean {
+  return options.includes(value);
+}
+
 function idempotencyKey(): string {
   if (typeof crypto.randomUUID === "function") return `web-${crypto.randomUUID()}`;
   return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -19,6 +23,11 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [loadingError, setLoadingError] = useState(false);
   const [revision, setRevision] = useState("latest");
+  const [benchmark, setBenchmark] = useState("");
+  const [instanceId, setInstanceId] = useState("");
+  const [model, setModel] = useState("");
+  const [reasoningEffort, setReasoningEffort] = useState("");
+  const [treatmentMode, setTreatmentMode] = useState("");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
   const [created, setCreated] = useState<TaskRecord | null>(null);
@@ -28,7 +37,18 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
     setLoadingError(false);
     api
       .getCapabilities()
-      .then(setCapabilities)
+      .then((next) => {
+        setCapabilities(next);
+        setBenchmark((value) => (hasOption(next.benchmarks, value) ? value : (next.benchmarks[0] ?? "")));
+        setInstanceId((value) => (hasOption(next.instances, value) ? value : (next.instances[0] ?? "")));
+        setModel((value) => (hasOption(next.models, value) ? value : (next.models[0] ?? "")));
+        setReasoningEffort((value) =>
+          hasOption(next.reasoning_efforts, value) ? value : (next.reasoning_efforts[0] ?? ""),
+        );
+        setTreatmentMode((value) =>
+          hasOption(next.treatment_modes, value) ? value : (next.treatment_modes[0] ?? ""),
+        );
+      })
       .catch(() => setLoadingError(true));
   };
   useEffect(load, [api]);
@@ -41,16 +61,12 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
       return;
     }
     if (capabilities === null) return;
-    const benchmark = capabilities.benchmarks[0];
-    const instanceId = capabilities.instances[0];
-    const model = capabilities.models[0];
-    const reasoningEffort = capabilities.reasoning_efforts[0];
     if (
-      benchmark === undefined ||
-      instanceId === undefined ||
-      model === undefined ||
-      reasoningEffort === undefined ||
-      !capabilities.treatment_modes.includes("off_on")
+      !hasOption(capabilities.benchmarks, benchmark) ||
+      !hasOption(capabilities.instances, instanceId) ||
+      !hasOption(capabilities.models, model) ||
+      !hasOption(capabilities.reasoning_efforts, reasoningEffort) ||
+      !hasOption(capabilities.treatment_modes, treatmentMode)
     ) {
       setMessage("当前没有可提交的固定测试配置。");
       return;
@@ -61,13 +77,13 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
       instance_id: instanceId,
       model,
       reasoning_effort: reasoningEffort,
-      treatment_mode: "off_on",
+      treatment_mode: treatmentMode,
     } as const;
     const fingerprint = JSON.stringify(intent);
     if (intentKey.current?.fingerprint !== fingerprint) {
       intentKey.current = { fingerprint, key: idempotencyKey() };
     }
-    const task: TaskCreate = { ...intent, idempotency_key: intentKey.current.key };
+    const task = { ...intent, idempotency_key: intentKey.current.key } as unknown as TaskCreate;
     setPending(true);
     try {
       const result = await api.createTask(task);
@@ -126,7 +142,13 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
         </label>
         <label>
           基准测试
-          <select defaultValue={capabilities.benchmarks[0]}>
+          <select
+            value={benchmark}
+            onChange={(event) => {
+              intentKey.current = null;
+              setBenchmark(event.target.value);
+            }}
+          >
             {capabilities.benchmarks.map((value) => (
               <option key={value}>{value}</option>
             ))}
@@ -134,7 +156,13 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
         </label>
         <label>
           测试实例
-          <select defaultValue={capabilities.instances[0]}>
+          <select
+            value={instanceId}
+            onChange={(event) => {
+              intentKey.current = null;
+              setInstanceId(event.target.value);
+            }}
+          >
             {capabilities.instances.map((value) => (
               <option key={value}>{value}</option>
             ))}
@@ -143,7 +171,13 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
         <div className="form-row">
           <label>
             模型
-            <select defaultValue={capabilities.models[0]}>
+            <select
+              value={model}
+              onChange={(event) => {
+                intentKey.current = null;
+                setModel(event.target.value);
+              }}
+            >
               {capabilities.models.map((value) => (
                 <option key={value}>{value}</option>
               ))}
@@ -151,7 +185,13 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
           </label>
           <label>
             推理强度
-            <select defaultValue={capabilities.reasoning_efforts[0]}>
+            <select
+              value={reasoningEffort}
+              onChange={(event) => {
+                intentKey.current = null;
+                setReasoningEffort(event.target.value);
+              }}
+            >
               {capabilities.reasoning_efforts.map((value) => (
                 <option key={value}>{value}</option>
               ))}
@@ -160,10 +200,16 @@ export function TaskForm({ api, onCreated }: TaskFormProps) {
         </div>
         <label>
           测试方式
-          <select defaultValue="off_on">
+          <select
+            value={treatmentMode}
+            onChange={(event) => {
+              intentKey.current = null;
+              setTreatmentMode(event.target.value);
+            }}
+          >
             {capabilities.treatment_modes.map((value) => (
               <option value={value} key={value}>
-                OFF / ON 对照
+                {value === "off_on" ? "OFF / ON 对照" : value}
               </option>
             ))}
           </select>

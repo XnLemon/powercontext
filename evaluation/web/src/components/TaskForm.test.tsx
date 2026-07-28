@@ -107,4 +107,49 @@ describe("TaskForm", () => {
     expect(await screen.findByText(/task-next/)).toBeVisible();
     expect(createTask.mock.calls[4]?.[0].idempotency_key).not.toBe(editedKey);
   });
+
+  it("submits visible non-first server selections and rotates the intent key when a selection changes", async () => {
+    const user = userEvent.setup();
+    const multiCapabilities = {
+      benchmarks: ["swebench-pro", "server-benchmark"],
+      instances: [instanceId, "server-instance"],
+      models: ["gpt-5.6-sol", "server-model"],
+      reasoning_efforts: ["medium", "high"],
+      treatment_modes: ["off_on", "server-treatment"],
+    };
+    const createTask = vi.fn().mockRejectedValue(new Error("network"));
+    render(
+      <TaskForm
+        api={apiStub({
+          getCapabilities: vi.fn().mockResolvedValue(multiCapabilities),
+          createTask,
+        })}
+        onCreated={() => undefined}
+      />,
+    );
+    await screen.findByRole("option", { name: "server-model" });
+
+    await user.selectOptions(screen.getByLabelText("基准测试"), "server-benchmark");
+    await user.selectOptions(screen.getByLabelText("测试实例"), "server-instance");
+    await user.selectOptions(screen.getByLabelText("模型"), "server-model");
+    await user.selectOptions(screen.getByLabelText("推理强度"), "high");
+    await user.selectOptions(screen.getByLabelText("测试方式"), "server-treatment");
+    await user.click(screen.getByRole("button", { name: "提交测试任务" }));
+    await waitFor(() => expect(createTask).toHaveBeenCalledTimes(1));
+    expect(createTask.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        benchmark: "server-benchmark",
+        instance_id: "server-instance",
+        model: "server-model",
+        reasoning_effort: "high",
+        treatment_mode: "server-treatment",
+      }),
+    );
+    const firstKey = createTask.mock.calls[0]?.[0].idempotency_key;
+
+    await user.selectOptions(screen.getByLabelText("模型"), "gpt-5.6-sol");
+    await user.click(screen.getByRole("button", { name: "提交测试任务" }));
+    await waitFor(() => expect(createTask).toHaveBeenCalledTimes(2));
+    expect(createTask.mock.calls[1]?.[0].idempotency_key).not.toBe(firstKey);
+  });
 });

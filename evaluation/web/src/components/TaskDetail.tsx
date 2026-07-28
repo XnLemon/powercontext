@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { EvaluationApi } from "../api";
 import type { FailureCategory, TaskRecord } from "../types";
@@ -32,15 +32,22 @@ export function TaskDetail({ api, taskId, onTaskChanged }: TaskDetailProps) {
   const [task, setTask] = useState<TaskRecord | null>(null);
   const [error, setError] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+  const requestGeneration = useRef(0);
+  const requestController = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
+    requestController.current?.abort();
+    const controller = new AbortController();
+    requestController.current = controller;
+    const generation = ++requestGeneration.current;
     try {
-      const nextTask = await api.getTask(taskId);
+      const nextTask = await api.getTask(taskId, controller.signal);
+      if (controller.signal.aborted || generation !== requestGeneration.current) return;
       setTask(nextTask);
       onTaskChanged?.(nextTask);
       setError(false);
     } catch {
-      setError(true);
+      if (!controller.signal.aborted && generation === requestGeneration.current) setError(true);
     }
   }, [api, onTaskChanged, taskId]);
 
@@ -56,7 +63,11 @@ export function TaskDetail({ api, taskId, onTaskChanged }: TaskDetailProps) {
       },
       () => setReconnecting(true),
     );
-    return () => subscription.close();
+    return () => {
+      subscription.close();
+      requestController.current?.abort();
+      requestGeneration.current += 1;
+    };
   }, [api, taskId, load]);
 
   useEffect(() => {

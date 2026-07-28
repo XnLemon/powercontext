@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { EvaluationApi } from "./api";
 import { AppShell } from "./components/AppShell";
@@ -89,14 +89,30 @@ function Workbench({ api, navigate }: { api: EvaluationApi; navigate(path: strin
   const [focusTask, setFocusTask] = useState<TaskRecord | null>(null);
   const [tasks, setTasks] = useState<TaskSummary[] | null>(null);
   const [overviewError, setOverviewError] = useState(false);
+  const overviewGeneration = useRef(0);
+  const overviewController = useRef<AbortController | null>(null);
   const loadOverview = useCallback(() => {
+    overviewController.current?.abort();
+    const controller = new AbortController();
+    overviewController.current = controller;
+    const generation = ++overviewGeneration.current;
     setOverviewError(false);
     api
-      .listTasks({ limit: 50, offset: 0 })
-      .then(setTasks)
-      .catch(() => setOverviewError(true));
+      .listTasks({ limit: 50, offset: 0 }, controller.signal)
+      .then((nextTasks) => {
+        if (!controller.signal.aborted && generation === overviewGeneration.current) setTasks(nextTasks);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted && generation === overviewGeneration.current) setOverviewError(true);
+      });
   }, [api]);
-  useEffect(loadOverview, [loadOverview]);
+  useEffect(() => {
+    loadOverview();
+    return () => {
+      overviewController.current?.abort();
+      overviewGeneration.current += 1;
+    };
+  }, [loadOverview]);
 
   const running = tasks?.find((task) => task.status === "running");
   const latestSucceeded = tasks?.find((task) => task.status === "succeeded");

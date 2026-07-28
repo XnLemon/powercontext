@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { apiStub, record, summary } from "./test/fixtures";
+import { apiStub, deferred, record, summary } from "./test/fixtures";
 
 describe("App", () => {
   beforeEach(() => window.history.replaceState({}, "", "/"));
@@ -49,6 +49,20 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("link", { name: "验收报告" }));
     expect(await screen.findByRole("heading", { name: "验收报告" })).toBeVisible();
     expect(screen.getByText("请选择已完成任务的报告链接进行查看。")).toBeVisible();
+  });
+
+  it("ignores a stale workbench overview response after its API changes", async () => {
+    const stale = deferred<ReturnType<typeof summary>[]>();
+    const fresh = deferred<ReturnType<typeof summary>[]>();
+    const firstApi = apiStub({ listTasks: vi.fn().mockReturnValue(stale.promise) });
+    const secondList = vi.fn().mockReturnValue(fresh.promise);
+    const { rerender } = render(<App api={firstApi} />);
+    rerender(<App api={apiStub({ listTasks: secondList })} />);
+    fresh.resolve([summary("succeeded", "task-fresh")]);
+    expect(await screen.findByText("task-fresh")).toBeVisible();
+    stale.resolve([summary("running", "task-stale")]);
+    await waitFor(() => expect(screen.queryByText("task-stale")).not.toBeInTheDocument());
+    expect(secondList.mock.calls[0]?.[1]).toBeInstanceOf(AbortSignal);
   });
 });
 
