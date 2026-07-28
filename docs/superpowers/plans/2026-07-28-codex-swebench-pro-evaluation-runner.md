@@ -275,6 +275,7 @@ Expected: imports fail because process and Git adapters do not exist.
 - hash a credential-free normalized source string to choose its mirror cache;
 - reject password/query/fragment credentials before creating a cache and require a Git credential helper;
 - use command-scoped URL rewriting for username-only SSH/SCP transports so a raw transport is never persisted;
+- redact both raw percent-encoded and decoded username components when Git or SSH echoes a partial transport;
 - use only `clone --mirror`, `fetch --prune`, `ls-remote`, `rev-parse`, `clone --no-checkout`, and
   `checkout --detach`, plus `update-ref` for immutable pins and `config --get-all remote.origin.url` to validate
   existing mirrors;

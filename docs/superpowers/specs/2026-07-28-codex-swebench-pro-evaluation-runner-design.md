@@ -225,7 +225,8 @@ Credential-bearing proxy URLs, their raw percent-encoded userinfo components, an
 automatically treated as redaction inputs. Embedded Git passwords, query credentials, and fragments are rejected
 before cache creation; authenticated Git sources must use an external credential helper. Username-only SSH/SCP
 transports may use a command-scoped Git URL rewrite, but the cached mirror origin and provenance always contain
-only the sanitized source.
+only the sanitized source. Their raw percent-encoded and decoded username components are both redaction inputs
+because Git or SSH may echo only `user@host` rather than the complete source.
 
 Both homes receive the same pinned Codex CLI, authentication, model, reasoning level, prompt, task repository,
 shell environment policy, sandbox mode, time limit, and resource budget. The first paid experiment pins Codex CLI
