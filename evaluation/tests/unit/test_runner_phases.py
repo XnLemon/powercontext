@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,7 +11,14 @@ from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluati
 from powercontext_eval.codex import CodexOutcome
 from powercontext_eval.models import Arm
 from powercontext_eval.report import ReportBundle
-from powercontext_eval.runner import INSTANCE_ID, MinimalRunConfig, PhaseCallback, RunPhase, run_minimal_swebench_pro
+from powercontext_eval.runner import (
+    INSTANCE_ID,
+    MinimalRunConfig,
+    MinimalRunResult,
+    PhaseCallback,
+    RunPhase,
+    run_minimal_swebench_pro,
+)
 
 
 def test_run_phases_have_stable_order_and_values() -> None:
@@ -57,7 +65,7 @@ def _run_with_fakes(
     monkeypatch: pytest.MonkeyPatch,
     events: list[object],
     on_phase: PhaseCallback | None = None,
-) -> tuple[MinimalRunConfig, object]:
+) -> tuple[MinimalRunConfig, MinimalRunResult]:
     config = _config(tmp_path)
     materialized = tmp_path / "materialized"
     materialized.mkdir()
@@ -89,8 +97,13 @@ def _run_with_fakes(
             return OfficialEvaluation(INSTANCE_ID, True, "", "")
 
     class FakeSut:
-        def run_pair(self, *args: object, before_arm: object = None, **kwargs: object) -> dict[Arm, object]:
-            assert callable(before_arm)
+        def run_pair(
+            self,
+            *args: object,
+            before_arm: Callable[[Arm], None] | None = None,
+            **kwargs: object,
+        ) -> dict[Arm, object]:
+            assert before_arm is not None
             for arm in (Arm.OFF, Arm.ON):
                 before_arm(arm)
                 events.append(arm)
