@@ -967,20 +967,23 @@ class DockerSut:
         self._docker.run(command, cwd=paths.runtime, timeout=60)
 
     def _readiness(self, container: str, paths: ArmPaths) -> None:
-        self._docker.run(
-            (
-                "docker",
-                "exec",
-                container,
-                "/runtime/pc-env/bin/powercontext",
-                "doctor",
-                "--server-url",
-                "http://127.0.0.1:8000",
-                "--json",
-            ),
-            cwd=paths.runtime,
-            timeout=60,
+        command = (
+            "docker",
+            "exec",
+            container,
+            "/runtime/pc-env/bin/powercontext",
+            "doctor",
+            "--server-url",
+            "http://127.0.0.1:8000",
+            "--json",
         )
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            result = self._docker.run(command, cwd=paths.runtime, timeout=10, check=False)
+            if result.returncode == 0:
+                return
+            time.sleep(0.5)
+        raise InvalidTreatment("PowerContext Server did not become ready")
 
     def _verify_codex_version(self, container: str, paths: ArmPaths, store: ArtifactStore) -> None:
         result = self._docker.run(
