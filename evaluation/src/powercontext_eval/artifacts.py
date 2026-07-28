@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import stat
-import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePath
+from types import MappingProxyType
 from typing import Any
 
 from powercontext_eval.models import Arm
@@ -25,6 +26,23 @@ class UnsafeArtifactPath(ArtifactError):
 
 class SecretDetected(ArtifactError):
     """Artifact bytes contain a configured forbidden value."""
+
+
+class ArtifactAlreadyExists(ArtifactError):
+    """An exclusive artifact target already exists."""
+
+
+class ArtifactDurabilityUnknown(ArtifactError):
+    """A commit-point failure left an artifact's durable state unknown."""
+
+    def __init__(self, target_name: str, recovery_name: str | None = None) -> None:
+        super().__init__("Artifact durability is unknown; inspect typed recovery metadata")
+        self.target_name = target_name
+        self.recovery_name = recovery_name
+
+
+class StateAlreadyExists(ArtifactAlreadyExists):
+    """An arm state file already exists and must not be overwritten."""
 
 
 class InvalidStateTransition(ArtifactError):
@@ -67,35 +85,15 @@ _TRANSITIONS: Mapping[ArmState, frozenset[ArmState]] = {
 
 
 class ArtifactStore:
-    """Write only explicitly supplied artifact bytes beneath a trusted root."""
+    """Write artifacts through directory descriptors anchored at the filesystem root."""
 
     def __init__(self, root: str | os.PathLike[str], *, forbidden_values: Sequence[str | bytes] = ()) -> None:
         self.root = Path(root).absolute()
         if "\x00" in os.fspath(root) or ".." in self.root.parts:
             raise UnsafeArtifactPath("Artifact root contains an unsafe component")
         self._forbidden = tuple(self._encode_forbidden(value) for value in forbidden_values)
-        self._root_chain = self._initialize_root()
-
-    def _initialize_root(self) -> tuple[tuple[Path, int, int], ...]:
-        """Create the root one component at a time without following symlinks."""
-
-        anchor = Path(self.root.anchor)
-        current = anchor
-        verified: list[tuple[Path, int, int]] = []
-        for part in self.root.parts[1:]:
-            self._verify_directory(current)
-            current = current / part
-            try:
-                current.mkdir()
-            except FileExistsError:
-                pass
-            metadata = self._directory_metadata(current)
-            verified.append((current, metadata.st_dev, metadata.st_ino))
-            self._revalidate_chain(verified)
-        if not verified:
-            metadata = self._directory_metadata(anchor)
-            verified.append((anchor, metadata.st_dev, metadata.st_ino))
-        return tuple(verified)
+        root_fd = self._open_root(create=True)
+        os.close(root_fd)
 
     @staticmethod
     def _encode_forbidden(value: str | bytes) -> bytes:
@@ -105,28 +103,40 @@ class ArtifactStore:
         return encoded
 
     @staticmethod
-    def _directory_metadata(path: Path) -> os.stat_result:
+    def _directory_flags() -> int:
+        return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+    @classmethod
+    def _open_directory(cls, parent_fd: int, name: str, *, create: bool) -> int:
         try:
-            metadata = path.lstat()
+            return os.open(name, cls._directory_flags(), dir_fd=parent_fd)
+        except FileNotFoundError:
+            if not create:
+                raise
+            try:
+                os.mkdir(name, 0o700, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            except FileExistsError:
+                pass
+            try:
+                return os.open(name, cls._directory_flags(), dir_fd=parent_fd)
+            except OSError as error:
+                raise UnsafeArtifactPath("Artifact directory is unsafe") from error
         except OSError as error:
-            raise UnsafeArtifactPath("Artifact directory cannot be inspected") from error
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            raise UnsafeArtifactPath("Artifact path component is not a real directory")
-        return metadata
+            raise UnsafeArtifactPath("Artifact directory is unsafe") from error
 
-    @classmethod
-    def _verify_directory(cls, path: Path) -> None:
-        cls._directory_metadata(path)
-
-    @classmethod
-    def _revalidate_chain(cls, chain: Sequence[tuple[Path, int, int]]) -> None:
-        for path, expected_device, expected_inode in chain:
-            metadata = cls._directory_metadata(path)
-            if (metadata.st_dev, metadata.st_ino) != (expected_device, expected_inode):
-                raise UnsafeArtifactPath("Artifact directory identity changed")
-
-    def _verify_root_chain(self) -> None:
-        self._revalidate_chain(self._root_chain)
+    def _open_root(self, *, create: bool) -> int:
+        anchor_fd = os.open(self.root.anchor, self._directory_flags())
+        current_fd = anchor_fd
+        try:
+            for component in self.root.parts[1:]:
+                next_fd = self._open_directory(current_fd, component, create=create)
+                os.close(current_fd)
+                current_fd = next_fd
+            return current_fd
+        except BaseException:
+            os.close(current_fd)
+            raise
 
     @staticmethod
     def _validate_relative(relative_path: str | os.PathLike[str]) -> tuple[str, ...]:
@@ -142,75 +152,284 @@ class ArtifactStore:
             raise UnsafeArtifactPath("Artifact path must remain beneath the artifact root")
         return parts
 
-    def _verify_contained(self, path: Path) -> None:
-        try:
-            path.relative_to(self.root)
-        except ValueError as error:
-            raise UnsafeArtifactPath("Artifact path escaped the artifact root") from error
-
-    def _target(self, relative_path: str | os.PathLike[str]) -> Path:
+    def _open_parent(self, relative_path: str | os.PathLike[str], *, create: bool) -> tuple[int, tuple[str, ...]]:
         parts = self._validate_relative(relative_path)
-        self._verify_root_chain()
-        parent = self.root
-        for part in parts[:-1]:
-            parent = parent / part
-            self._verify_contained(parent)
-            try:
-                parent.mkdir()
-            except FileExistsError:
-                pass
-            self._verify_directory(parent)
-
-        target = parent / parts[-1]
-        self._verify_contained(target)
+        current_fd = self._open_root(create=create)
         try:
-            mode = target.lstat().st_mode
+            for component in parts[:-1]:
+                next_fd = self._open_directory(current_fd, component, create=create)
+                os.close(current_fd)
+                current_fd = next_fd
+            return current_fd, parts
+        except BaseException:
+            os.close(current_fd)
+            raise
+
+    def _verify_logical_parent(self, parts: tuple[str, ...], parent_fd: int) -> None:
+        """Rewalk the logical path and require it to identify the held parent."""
+
+        logical_fd = self._open_root(create=False)
+        try:
+            for component in parts[:-1]:
+                next_fd = self._open_directory(logical_fd, component, create=False)
+                os.close(logical_fd)
+                logical_fd = next_fd
+            held = os.fstat(parent_fd)
+            logical = os.fstat(logical_fd)
+            if (held.st_dev, held.st_ino) != (logical.st_dev, logical.st_ino):
+                raise UnsafeArtifactPath("Artifact parent identity changed")
+        except (FileNotFoundError, UnsafeArtifactPath) as error:
+            raise UnsafeArtifactPath("Artifact logical parent is no longer safe") from error
+        finally:
+            os.close(logical_fd)
+
+    @staticmethod
+    def _target_metadata(parent_fd: int, name: str) -> os.stat_result | None:
+        try:
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
-            pass
-        else:
-            if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-                raise UnsafeArtifactPath("Artifact target is not a regular file")
-        return target
+            return None
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise UnsafeArtifactPath("Artifact target is not a regular file")
+        return metadata
 
     def _reject_secrets(self, data: bytes) -> None:
         if any(secret in data for secret in self._forbidden):
             raise SecretDetected("Artifact contains a forbidden value")
 
-    def write_bytes(self, relative_path: str | os.PathLike[str], data: bytes) -> Path:
-        """Atomically write exact bytes after path and secret validation."""
+    @staticmethod
+    def _random_name(target_name: str, kind: str) -> str:
+        return f".{target_name}.{kind}-{secrets.token_hex(16)}"
 
+    @classmethod
+    def _create_temp(cls, parent_fd: int, target_name: str) -> tuple[int, str]:
+        for _ in range(32):
+            name = cls._random_name(target_name, "tmp")
+            try:
+                descriptor = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                return descriptor, name
+            except FileExistsError:
+                continue
+        raise ArtifactError("Could not allocate an artifact temporary file")
+
+    @staticmethod
+    def _write_all(descriptor: int, data: bytes) -> None:
+        view = memoryview(data)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise OSError("Artifact temporary write made no progress")
+            written += count
+        os.fsync(descriptor)
+
+    @staticmethod
+    def _same_inode(first: os.stat_result, second: os.stat_result) -> bool:
+        return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+
+    @staticmethod
+    def _name_exists(parent_fd: int, name: str | None) -> bool:
+        if name is None:
+            return False
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return True
+
+    def _assert_temp_named(self, parent_fd: int, temporary_name: str, temporary_fd: int) -> None:
+        expected = os.fstat(temporary_fd)
+        try:
+            named = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError as error:
+            raise UnsafeArtifactPath("Artifact temporary file moved") from error
+        if not stat.S_ISREG(named.st_mode) or not self._same_inode(expected, named):
+            raise UnsafeArtifactPath("Artifact temporary file identity changed")
+
+    @classmethod
+    def _unlink_inode(cls, parent_fd: int, preferred_name: str, expected: os.stat_result) -> bool:
+        names = [preferred_name]
+        try:
+            names.extend(name for name in os.listdir(parent_fd) if name != preferred_name)
+        except OSError:
+            pass
+        for name in names:
+            try:
+                candidate = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(candidate.st_mode) and cls._same_inode(expected, candidate):
+                try:
+                    os.unlink(name, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                except FileNotFoundError:
+                    continue
+                return True
+        return False
+
+    @classmethod
+    def _unlink_name_if_inode(cls, parent_fd: int, name: str, expected: os.stat_result) -> bool:
+        try:
+            candidate = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        if not cls._same_inode(expected, candidate):
+            return False
+        os.unlink(name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        return True
+
+    @classmethod
+    def _create_backup(cls, parent_fd: int, target_name: str) -> str:
+        for _ in range(32):
+            backup_name = cls._random_name(target_name, "backup")
+            try:
+                os.link(
+                    target_name,
+                    backup_name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                return backup_name
+            except FileExistsError:
+                continue
+        raise ArtifactError("Could not allocate an artifact rollback link")
+
+    def _publish(
+        self,
+        parent_fd: int,
+        parts: tuple[str, ...],
+        temporary_fd: int,
+        temporary_name: str,
+        *,
+        exclusive: bool,
+    ) -> None:
+        target_name = parts[-1]
+        temporary_metadata = os.fstat(temporary_fd)
+        backup_name: str | None = None
+        published = False
+        try:
+            target_metadata = self._target_metadata(parent_fd, target_name)
+            if exclusive and target_metadata is not None:
+                raise ArtifactAlreadyExists("Artifact already exists")
+            if not exclusive and target_metadata is not None:
+                backup_name = self._create_backup(parent_fd, target_name)
+                os.fsync(parent_fd)
+
+            self._verify_logical_parent(parts, parent_fd)
+            self._assert_temp_named(parent_fd, temporary_name, temporary_fd)
+            if exclusive:
+                try:
+                    os.link(
+                        temporary_name,
+                        target_name,
+                        src_dir_fd=parent_fd,
+                        dst_dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError as error:
+                    raise ArtifactAlreadyExists("Artifact already exists") from error
+            else:
+                os.replace(
+                    temporary_name,
+                    target_name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+            published = True
+            os.fsync(parent_fd)
+            published_metadata = os.stat(target_name, dir_fd=parent_fd, follow_symlinks=False)
+            if not self._same_inode(temporary_metadata, published_metadata):
+                raise UnsafeArtifactPath("Published artifact identity changed")
+            self._verify_logical_parent(parts, parent_fd)
+        except BaseException as publish_error:
+            if published:
+                try:
+                    if backup_name is not None:
+                        os.replace(backup_name, target_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                        os.fsync(parent_fd)
+                        backup_name = None
+                    else:
+                        self._unlink_name_if_inode(parent_fd, target_name, temporary_metadata)
+                except (ArtifactError, OSError):
+                    raise ArtifactDurabilityUnknown(target_name, backup_name) from publish_error
+            try:
+                if backup_name is not None:
+                    os.unlink(backup_name, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                self._unlink_inode(parent_fd, temporary_name, temporary_metadata)
+            except (ArtifactError, OSError):
+                raise ArtifactDurabilityUnknown(target_name, backup_name) from publish_error
+            raise
+        else:
+            try:
+                if backup_name is not None:
+                    os.unlink(backup_name, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                if exclusive:
+                    self._unlink_inode(parent_fd, temporary_name, temporary_metadata)
+            except BaseException as cleanup_error:
+                recovery_name = backup_name if self._name_exists(parent_fd, backup_name) else None
+                if exclusive and self._name_exists(parent_fd, temporary_name):
+                    recovery_name = temporary_name
+                raise ArtifactDurabilityUnknown(target_name, recovery_name) from cleanup_error
+
+    def _store_bytes(self, relative_path: str | os.PathLike[str], data: bytes, *, exclusive: bool) -> Path:
         if not isinstance(data, bytes):
             raise TypeError("Artifact data must be bytes")
         self._reject_secrets(data)
-        target = self._target(relative_path)
-        parent = target.parent
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.tmp-", dir=parent)
-        temporary = Path(temporary_name)
+        parent_fd, parts = self._open_parent(relative_path, create=True)
+        temporary_fd = -1
+        temporary_name = ""
         try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-            self._verify_root_chain()
-            self._verify_directory(parent)
-            self._verify_contained(target)
-            try:
-                target_mode = target.lstat().st_mode
-            except FileNotFoundError:
-                pass
-            else:
-                if stat.S_ISLNK(target_mode) or not stat.S_ISREG(target_mode):
-                    raise UnsafeArtifactPath("Artifact target changed during the write")
-            os.replace(temporary, target)
-        except BaseException:
-            temporary.unlink(missing_ok=True)
+            temporary_fd, temporary_name = self._create_temp(parent_fd, parts[-1])
+            self._write_all(temporary_fd, data)
+            self._publish(
+                parent_fd,
+                parts,
+                temporary_fd,
+                temporary_name,
+                exclusive=exclusive,
+            )
+        except ArtifactDurabilityUnknown:
             raise
-        return target
+        except BaseException:
+            if temporary_fd >= 0:
+                self._unlink_inode(parent_fd, temporary_name, os.fstat(temporary_fd))
+            raise
+        finally:
+            if temporary_fd >= 0:
+                os.close(temporary_fd)
+            os.close(parent_fd)
+        return self.root.joinpath(*parts)
+
+    def write_bytes(self, relative_path: str | os.PathLike[str], data: bytes) -> Path:
+        """Atomically write exact bytes after path and secret validation."""
+
+        return self._store_bytes(relative_path, data, exclusive=False)
+
+    def create_bytes(self, relative_path: str | os.PathLike[str], data: bytes) -> Path:
+        """Atomically create exact bytes without replacing an existing target."""
+
+        return self._store_bytes(relative_path, data, exclusive=True)
 
     def write_text(self, relative_path: str | os.PathLike[str], text: str) -> Path:
         """Atomically write UTF-8 text exactly as supplied."""
 
         return self.write_bytes(relative_path, text.encode("utf-8"))
+
+    def create_text(self, relative_path: str | os.PathLike[str], text: str) -> Path:
+        """Atomically create UTF-8 text without replacing an existing target."""
+
+        return self.create_bytes(relative_path, text.encode("utf-8"))
 
     def write_json(self, relative_path: str | os.PathLike[str], value: Any) -> Path:
         """Atomically write canonical, human-readable UTF-8 JSON."""
@@ -219,6 +438,47 @@ class ArtifactStore:
             "utf-8"
         )
         return self.write_bytes(relative_path, encoded)
+
+    def create_json(self, relative_path: str | os.PathLike[str], value: Any) -> Path:
+        """Atomically create canonical JSON without replacing an existing target."""
+
+        encoded = (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n").encode(
+            "utf-8"
+        )
+        return self.create_bytes(relative_path, encoded)
+
+
+def _require_string_mapping_keys(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                raise TypeError("JSON object keys must be strings")
+            _require_string_mapping_keys(nested)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            _require_string_mapping_keys(nested)
+
+
+def _canonical_json_value(value: Any) -> Any:
+    _require_string_mapping_keys(value)
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False, separators=(",", ":"))
+    return json.loads(encoded)
+
+
+def _freeze_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json(nested) for key, nested in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json(nested) for nested in value)
+    return value
+
+
+def _thaw_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(nested) for key, nested in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(nested) for nested in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -237,7 +497,7 @@ class ArmStateSnapshot:
             "arm": self.arm.value,
             "state": self.state.value,
             "sequence": self.sequence,
-            "evidence": dict(self.evidence),
+            "evidence": _thaw_json(self.evidence),
         }
 
 
@@ -258,8 +518,16 @@ class ArmStateMachine:
         self._arm = Arm(arm)
         self._state = initial_state
         self._sequence = initial_sequence
-        self._snapshot = ArmStateSnapshot(self._arm, self._state, self._sequence, {})
-        self._store.write_json(self._state_path, self._snapshot.as_json())
+        self._snapshot = ArmStateSnapshot(
+            self._arm,
+            self._state,
+            self._sequence,
+            _freeze_json(_canonical_json_value({})),
+        )
+        try:
+            self._store.create_json(self._state_path, self._snapshot.as_json())
+        except ArtifactAlreadyExists as error:
+            raise StateAlreadyExists("Arm state already exists") from error
 
     @property
     def state(self) -> ArmState:
@@ -283,7 +551,8 @@ class ArmStateMachine:
         if parsed_target not in _TRANSITIONS.get(self._state, frozenset()):
             raise InvalidStateTransition(f"Transition from {self._state.value} to {parsed_target.value} is not allowed")
 
-        snapshot = ArmStateSnapshot(self._arm, parsed_target, self._sequence + 1, dict(evidence))
+        frozen_evidence = _freeze_json(_canonical_json_value(evidence))
+        snapshot = ArmStateSnapshot(self._arm, parsed_target, self._sequence + 1, frozen_evidence)
         self._store.write_json(self._state_path, snapshot.as_json())
         self._state = parsed_target
         self._sequence = snapshot.sequence

@@ -203,6 +203,16 @@ def test_similar_non_sensitive_configuration_names_remain_reportable() -> None:
     assert "environmental_mode" in report
 
 
+@pytest.mark.parametrize("sensitive_key", ["ａｐｉ＿ｋｅｙ", "ａｃｃｅｓｓＴｏｋｅｎ", "tоken", "seсret"])
+def test_render_rejects_nfkc_or_non_ascii_sensitive_keys_without_leaking_value(sensitive_key: str) -> None:
+    secret_value = "unicode-do-not-leak"
+    bundle = _valid_bundle().model_copy(update={"configuration": {sensitive_key: secret_value}})
+    with pytest.raises(InvalidReportBundle) as caught:
+        render_report(bundle)
+    assert secret_value not in str(caught.value)
+    assert secret_value not in render_report(_valid_bundle())
+
+
 def test_renderer_has_no_process_network_time_or_filesystem_side_effects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

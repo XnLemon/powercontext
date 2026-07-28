@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections.abc import Mapping
 from typing import Literal
 
@@ -79,7 +80,13 @@ class ReportBundle(BaseModel):
             "refreshtoken",
             "secretkey",
         }
-        for key in values:
+        normalized_values: dict[str, str] = {}
+        for original_key, value in values.items():
+            key = unicodedata.normalize("NFKC", original_key)
+            if not key.isascii():
+                raise ValueError("Report mapping keys must contain only ASCII characters")
+            if key in normalized_values:
+                raise ValueError("Report mapping keys collide after normalization")
             words = [
                 word.casefold()
                 for chunk in re.split(r"[^A-Za-z0-9]+", key)
@@ -93,7 +100,8 @@ class ReportBundle(BaseModel):
                 or adjacent_compounds & forbidden_compounds
             ):
                 raise ValueError("Report mapping contains a forbidden field name")
-        return values
+            normalized_values[key] = value
+        return normalized_values
 
 
 class InvalidReportBundle(ValueError):
