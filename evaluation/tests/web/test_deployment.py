@@ -84,7 +84,7 @@ def test_deployment_assets_do_not_manage_or_depend_on_existing_services() -> Non
 
 
 def test_example_environment_uses_only_supported_named_configuration() -> None:
-    example = (DEPLOY / "evaluation-console.env.example").read_text()
+    example = (DEPLOY / "powercontext-eval.env.example").read_text()
     keys = set(re.findall(r"^(POWERCONTEXT_EVAL_[A-Z_]+)=", example, re.MULTILINE))
     assert keys == EXPECTED_ENVIRONMENT_KEYS
 
@@ -111,5 +111,8 @@ def test_operator_guide_documents_safety_acceptance_and_rollback_contracts() -> 
         "secret scan",
         "queue",
         "artifacts",
+        '/data/powercontext-eval/bin/uv run --project evaluation pytest -c evaluation/pyproject.toml evaluation/tests -m "not live" -q',
+        "/data/powercontext-eval/bin/uv run --directory evaluation ty check src tests",
+        "evaluation/deploy/powercontext-eval.env.example",
     }
     assert all(term.lower() in guide.lower() for term in required)

@@ -5,10 +5,12 @@ import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
+from starlette.requests import Request
 
 from powercontext_eval.artifacts import ArmState
 from powercontext_eval.report import ArmReport, MetricSet, ReportBundle
@@ -57,7 +59,7 @@ def client(config: WebConfig, store: TaskStore) -> TestClient:
     return TestClient(create_app(config, store))
 
 
-def assert_safe(response: object) -> None:
+def assert_safe(response: Response) -> None:
     assert SECRET not in response.text
 
 
@@ -365,6 +367,10 @@ class _Request:
         return self.disconnected
 
 
+def _as_request(request: _Request | None = None) -> Request:
+    return cast(Request, request or _Request())
+
+
 async def _next(stream: Any) -> str:
     return await anext(stream)
 
@@ -392,7 +398,7 @@ def test_event_stream_suppresses_unchanged_versions_emits_change_and_final_then_
 
     async def scenario() -> None:
         stream = TaskEventStream(
-            request,
+            _as_request(request),
             store,
             record.task_id,
             poll_seconds=0.1,
@@ -427,7 +433,7 @@ def test_event_stream_heartbeat_at_fifteen_seconds_and_disconnect_exit(store: Ta
 
     async def scenario() -> None:
         stream = TaskEventStream(
-            request,
+            _as_request(request),
             store,
             record.task_id,
             poll_seconds=30,
@@ -466,7 +472,7 @@ def test_event_stream_does_not_hold_sqlite_transaction_during_wait(config: WebCo
 
     async def scenario() -> None:
         stream = TaskEventStream(
-            request,
+            _as_request(request),
             store,
             record.task_id,
             poll_seconds=0.1,
@@ -497,7 +503,7 @@ def test_event_stream_loads_sqlite_without_blocking_event_loop(
 
     async def scenario() -> None:
         stream = TaskEventStream(
-            _Request(),
+            _as_request(),
             store,
             record.task_id,
             poll_seconds=1,
@@ -534,7 +540,7 @@ def test_event_stream_heartbeat_is_not_delayed_by_thirty_second_poll(store: Task
 
     async def scenario() -> None:
         stream = TaskEventStream(
-            request,
+            _as_request(request),
             store,
             record.task_id,
             poll_seconds=30,
@@ -565,7 +571,7 @@ def test_event_stream_clamps_heartbeat_to_fifteen_seconds(store: TaskStore) -> N
 
     async def scenario() -> None:
         stream = TaskEventStream(
-            _Request(),
+            _as_request(),
             store,
             record.task_id,
             poll_seconds=30,
@@ -601,7 +607,7 @@ def test_event_stream_prioritizes_due_heartbeat_over_due_database_poll(store: Ta
 
     async def scenario() -> None:
         stream = TaskEventStream(
-            _Request(),
+            _as_request(),
             store,
             record.task_id,
             poll_seconds=10,
@@ -639,7 +645,7 @@ def test_event_stream_races_pending_poll_with_heartbeat_and_reuses_result(store:
 
     async def scenario() -> None:
         stream = TaskEventStream(
-            _Request(),
+            _as_request(),
             store,
             record.task_id,
             poll_seconds=10,

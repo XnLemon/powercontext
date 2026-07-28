@@ -11,10 +11,10 @@ From `/data/powercontext-eval/deploy/powercontext`:
 
 ```sh
 /data/powercontext-eval/bin/uv sync --project evaluation --frozen
-/data/powercontext-eval/bin/uv run --project evaluation pytest
+/data/powercontext-eval/bin/uv run --project evaluation pytest -c evaluation/pyproject.toml evaluation/tests -m "not live" -q
 /data/powercontext-eval/bin/uv run --project evaluation ruff check evaluation
 /data/powercontext-eval/bin/uv run --project evaluation ruff format --check evaluation
-/data/powercontext-eval/bin/uv run --project evaluation ty check --project evaluation
+/data/powercontext-eval/bin/uv run --directory evaluation ty check src tests
 cd evaluation/web
 npm ci
 npm test -- --run
@@ -31,7 +31,7 @@ Create the configuration without exposing its eventual contents in logs:
 
 ```sh
 install -d -m 0700 /data/powercontext-eval/config
-install -m 0600 evaluation/deploy/evaluation-console.env.example \
+install -m 0600 evaluation/deploy/powercontext-eval.env.example \
   /data/powercontext-eval/config/evaluation-console.env
 chmod 0600 /data/powercontext-eval/config/evaluation-console.env
 ${EDITOR:?set EDITOR} /data/powercontext-eval/config/evaluation-console.env

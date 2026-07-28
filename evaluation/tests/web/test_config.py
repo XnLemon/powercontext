@@ -484,14 +484,16 @@ def test_task_record_rejects_inverted_timestamp_order(status: TaskStatus, fields
 )
 def test_report_arm_rejects_negative_or_non_finite_metrics(field: str, value: float) -> None:
     with pytest.raises(ValidationError):
-        ArmResponse(
-            arm="off",
-            state=ArmState.TREATMENT_VALIDATED,
-            resolution="resolved",
-            passed=True,
-            treatment_valid=True,
-            **{field: value},
-        )  # ty: ignore[invalid-argument-type]
+        ArmResponse.model_validate(
+            {
+                "arm": "off",
+                "state": ArmState.TREATMENT_VALIDATED,
+                "resolution": "resolved",
+                "passed": True,
+                "treatment_valid": True,
+                field: value,
+            }
+        )
 
 
 def test_report_response_nested_mappings_are_immutable() -> None:
