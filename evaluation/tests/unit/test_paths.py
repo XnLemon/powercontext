@@ -19,7 +19,10 @@ def test_evaluation_paths_separate_ephemeral_work_from_retained_artifacts(tmp_pa
 @pytest.mark.parametrize(
     "run_id",
     [
+        ".",
         "..",
+        "C:",
+        "C:foo",
         "run/01",
         r"run\01",
         "run..01",

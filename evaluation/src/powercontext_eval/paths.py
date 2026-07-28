@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from re import fullmatch
 
 from powercontext_eval.models import Arm
 
@@ -14,7 +15,12 @@ class EvaluationPaths:
     run_id: str
 
     def __post_init__(self) -> None:
-        if not self.run_id or ".." in self.run_id or "/" in self.run_id or "\\" in self.run_id:
+        if (
+            not self.run_id
+            or self.run_id in {".", ".."}
+            or ".." in self.run_id
+            or fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", self.run_id) is None
+        ):
             raise ValueError(f"Unsafe run ID: {self.run_id!r}")
 
     @property

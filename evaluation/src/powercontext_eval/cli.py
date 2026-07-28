@@ -2,7 +2,12 @@
 
 import typer
 
-app = typer.Typer(no_args_is_help=True)
+app = typer.Typer(no_args_is_help=True, help="PowerContext evaluation runner.")
+
+
+@app.callback()
+def root() -> None:
+    """Run reproducible PowerContext evaluations."""
 
 
 def main() -> None:

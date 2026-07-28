@@ -52,6 +52,36 @@ def test_powercontext_ref_strictly_rejects_non_string_values() -> None:
         PowerContextRef(kind="branch", value=b"main")  # ty: ignore[invalid-argument-type]
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"kind": "latest", "value": "main"},
+        {"kind": "branch"},
+        {"kind": "tag"},
+        {"kind": "commit", "value": "0123456"},
+        {"kind": "commit"},
+    ],
+)
+def test_powercontext_ref_constructor_rejects_invalid_kind_value_combinations(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        PowerContextRef(**payload)  # ty: ignore[invalid-argument-type]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"kind": "latest", "value": "main"},
+        {"kind": "branch"},
+        {"kind": "tag"},
+        {"kind": "commit", "value": "0123456"},
+        {"kind": "commit"},
+    ],
+)
+def test_powercontext_ref_model_validate_rejects_invalid_kind_value_combinations(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        PowerContextRef.model_validate(payload)
+
+
 def test_arm_values_are_stable_strings() -> None:
     assert Arm.OFF == "off"
     assert Arm.ON == "on"

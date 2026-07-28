@@ -4,7 +4,7 @@ from enum import StrEnum
 from re import fullmatch
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class Arm(StrEnum):
@@ -21,6 +21,20 @@ class PowerContextRef(BaseModel):
 
     kind: Literal["latest", "branch", "tag", "commit"]
     value: str | None = None
+
+    @model_validator(mode="after")
+    def validate_kind_value(self) -> Self:
+        """Enforce the invariant shared by every construction path."""
+
+        if self.kind == "latest":
+            if self.value is not None:
+                raise ValueError("Latest refs must not have a value")
+            return self
+        if not self.value:
+            raise ValueError(f"{self.kind.title()} refs require a value")
+        if self.kind == "commit" and fullmatch(r"[0-9a-fA-F]{40}", self.value) is None:
+            raise ValueError("Commit refs must contain exactly 40 hexadecimal characters")
+        return self
 
     @classmethod
     def parse(cls, raw: str) -> Self:
