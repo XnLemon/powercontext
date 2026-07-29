@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from powercontext_eval.artifacts import ArmState
 from powercontext_eval.runner import INSTANCE_ID
+from powercontext_eval.web.batches import BatchCreate, PairCategory
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.models import (
     ArmResponse,
@@ -197,7 +198,7 @@ def test_task_create_rejects_unsupported_revision(powercontext_ref: str) -> None
     ("field", "value"),
     [
         ("benchmark", "swebench"),
-        ("instance_id", "other-instance"),
+        ("instance_id", "unsafe/instance"),
         ("model", "gpt-5"),
         ("reasoning_effort", "high"),
         ("treatment_mode", "on"),
@@ -208,6 +209,60 @@ def test_task_create_rejects_unsupported_revision(powercontext_ref: str) -> None
 def test_task_create_rejects_values_outside_capabilities(field: str, value: str) -> None:
     with pytest.raises(ValidationError):
         TaskCreate.model_validate(valid_task(**{field: value}))
+
+
+def test_task_create_accepts_catalog_instance_ids() -> None:
+    request = TaskCreate.model_validate(valid_task(instance_id="instance_owner__repo-b"))
+
+    assert request.instance_id == "instance_owner__repo-b"
+
+
+def test_batch_create_pins_the_public_v2_task_set() -> None:
+    request = BatchCreate(
+        powercontext_ref="latest",
+        benchmark="swebench-pro",
+        task_set="swebench-pro-public-v2",
+        model="gpt-5.6-sol",
+        reasoning_effort="medium",
+        treatment_mode="off_on",
+        idempotency_key="batch-request",
+    )
+
+    assert request.task_set == "swebench-pro-public-v2"
+    assert [category.value for category in PairCategory] == [
+        "off_fail_on_pass",
+        "off_pass_on_fail",
+        "both_pass",
+        "both_fail",
+        "execution_failure",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("powercontext_ref", "branch:main"),
+        ("benchmark", "swebench"),
+        ("task_set", "sample"),
+        ("model", "gpt-5"),
+        ("reasoning_effort", "high"),
+        ("treatment_mode", "on"),
+        ("idempotency_key", "unsafe key"),
+    ],
+)
+def test_batch_create_rejects_values_outside_fixed_batch_contract(field: str, value: str) -> None:
+    payload = {
+        "powercontext_ref": "latest",
+        "benchmark": "swebench-pro",
+        "task_set": "swebench-pro-public-v2",
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "medium",
+        "treatment_mode": "off_on",
+        "idempotency_key": "batch-request",
+    }
+
+    with pytest.raises(ValidationError):
+        BatchCreate.model_validate({**payload, field: value})
 
 
 def test_task_create_rejects_unknown_fields() -> None:

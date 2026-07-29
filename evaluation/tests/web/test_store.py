@@ -1,9 +1,11 @@
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from powercontext_eval.paths import EvaluationPaths
+from powercontext_eval.web.batches import BatchCreate, BatchStatus
 from powercontext_eval.web.models import (
     FailureCategory,
     SafeFailure,
@@ -22,6 +24,18 @@ def request(key: str) -> TaskCreate:
         powercontext_ref="commit:" + "a" * 40,
         benchmark="swebench-pro",
         instance_id="instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9",
+        model="gpt-5.6-sol",
+        reasoning_effort="medium",
+        treatment_mode="off_on",
+        idempotency_key=key,
+    )
+
+
+def batch_request(key: str) -> BatchCreate:
+    return BatchCreate(
+        powercontext_ref="latest",
+        benchmark="swebench-pro",
+        task_set="swebench-pro-public-v2",
         model="gpt-5.6-sol",
         reasoning_effort="medium",
         treatment_mode="off_on",
@@ -48,6 +62,109 @@ def test_initialize_is_idempotent_and_creates_expected_schema(database: Path) ->
     store.initialize()
 
     assert store.list_tasks(status=None, limit=10, offset=0) == []
+
+
+def test_initialize_migrates_legacy_task_without_deleting_it(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE tasks (
+                queue_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL UNIQUE,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                request_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                phase TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                version INTEGER NOT NULL DEFAULT 0,
+                failure_category TEXT,
+                failure_phase TEXT,
+                failure_summary TEXT,
+                result_json TEXT
+            );
+            CREATE TABLE worker_lease (
+                singleton INTEGER PRIMARY KEY,
+                worker_id TEXT NOT NULL,
+                task_id TEXT NOT NULL UNIQUE REFERENCES tasks(task_id),
+                expires_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks(task_id, idempotency_key, request_json, status, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("run-legacy", "legacy-key", request("legacy-key").model_dump_json(), "queued", NOW.isoformat()),
+        )
+    store = TaskStore(database, lease_duration=timedelta(seconds=60))
+
+    store.initialize()
+
+    legacy = store.get("run-legacy")
+    assert legacy.batch_id is None
+    assert legacy.source_index is None
+    assert legacy.instance_id == request("legacy-key").instance_id
+    assert store.list_batches() == []
+
+
+def test_create_batch_expands_every_instance_atomically_in_source_order(store: TaskStore, tmp_path: Path) -> None:
+    instance_ids = (
+        "instance_owner__repo-a",
+        "instance_owner__repo-b",
+        "instance_owner__repo-c",
+    )
+
+    batch, created = store.create_batch(batch_request("batch-key"), instance_ids, now=NOW)
+
+    assert created is True
+    assert batch.total_tasks == 3
+    assert batch.status is BatchStatus.QUEUED
+    children = store.list_batch_tasks(batch.batch_id)
+    assert [task.instance_id for task in children] == list(instance_ids)
+    assert [task.source_index for task in children] == [0, 1, 2]
+    assert all(task.batch_id == batch.batch_id for task in children)
+    assert all(EvaluationPaths(tmp_path, task.task_id) for task in children)
+    assert store.health_snapshot(now=NOW)["queued_tasks"] == 3
+
+
+def test_create_batch_replays_idempotency_key_without_duplicate_children(store: TaskStore) -> None:
+    instance_ids = ("instance_owner__repo-a", "instance_owner__repo-b")
+    original, original_created = store.create_batch(batch_request("batch-replay"), instance_ids, now=NOW)
+
+    replay, replay_created = store.create_batch(
+        batch_request("batch-replay"),
+        ("instance_other__repo-x",),
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert original_created is True
+    assert replay_created is False
+    assert replay == original
+    assert [task.instance_id for task in store.list_batch_tasks(replay.batch_id)] == list(instance_ids)
+
+
+def test_create_batch_failure_leaves_neither_batch_nor_children(store: TaskStore) -> None:
+    with pytest.raises(ValueError):
+        store.create_batch(
+            batch_request("batch-rollback"),
+            ("instance_owner__repo-a", "unsafe/instance"),
+            now=NOW,
+        )
+
+    assert store.list_batches() == []
+    assert store.list_tasks(status=None, limit=10, offset=0) == []
+
+
+def test_create_batch_rejects_duplicate_instance_ids(store: TaskStore) -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        store.create_batch(
+            batch_request("batch-duplicates"),
+            ("instance_owner__repo-a", "instance_owner__repo-a"),
+            now=NOW,
+        )
 
 
 def test_create_replays_idempotency_key_without_reordering(store: TaskStore) -> None:

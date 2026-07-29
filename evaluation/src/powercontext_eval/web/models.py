@@ -56,7 +56,7 @@ class FailureCategory(StrEnum):
 class TaskCreate(FrozenModel):
     powercontext_ref: str
     benchmark: Literal["swebench-pro"]
-    instance_id: Literal["instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"]
+    instance_id: str = Field(min_length=1, max_length=300, pattern=r"^[A-Za-z0-9._-]+$")
     model: Literal["gpt-5.6-sol"]
     reasoning_effort: Literal["medium"]
     treatment_mode: Literal["off_on"]
@@ -94,6 +94,9 @@ class TaskRecord(FrozenModel):
     task_id: str
     request: TaskCreate
     status: TaskStatus
+    batch_id: str | None = None
+    instance_id: str | None = None
+    source_index: Annotated[int, Field(ge=0)] | None = None
     phase: TaskPhase | None = None
     created_at: datetime
     started_at: datetime | None = None

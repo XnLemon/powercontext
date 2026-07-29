@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from powercontext_eval.paths import EvaluationPaths
+from powercontext_eval.web.batches import BatchCreate, BatchRecord, BatchStatus, derive_batch_status
 from powercontext_eval.web.models import (
     FailureCategory,
     SafeFailure,
@@ -29,6 +30,10 @@ class TaskStoreError(RuntimeError):
 
 class TaskNotFound(TaskStoreError):
     """The requested task does not exist."""
+
+
+class BatchNotFound(TaskStoreError):
+    """The requested batch does not exist."""
 
 
 class TaskConflict(TaskStoreError):
@@ -84,11 +89,23 @@ class TaskStore:
         with self._write() as connection:
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS batches (
+                    batch_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id TEXT NOT NULL UNIQUE,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    request_json TEXT NOT NULL,
+                    total_tasks INTEGER NOT NULL CHECK (total_tasks > 0),
+                    created_at TEXT NOT NULL,
+                    resolved_powercontext_sha TEXT
+                );
                 CREATE TABLE IF NOT EXISTS tasks (
                     queue_seq INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT NOT NULL UNIQUE,
                     idempotency_key TEXT NOT NULL UNIQUE,
                     request_json TEXT NOT NULL,
+                    batch_id TEXT REFERENCES batches(batch_id),
+                    instance_id TEXT,
+                    source_index INTEGER,
                     status TEXT NOT NULL,
                     phase TEXT,
                     created_at TEXT NOT NULL,
@@ -100,8 +117,6 @@ class TaskStore:
                     failure_summary TEXT,
                     result_json TEXT
                 );
-                CREATE INDEX IF NOT EXISTS tasks_status_queue
-                    ON tasks(status, queue_seq);
                 CREATE TABLE IF NOT EXISTS worker_lease (
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                     worker_id TEXT NOT NULL,
@@ -110,6 +125,125 @@ class TaskStore:
                 );
                 """
             )
+            columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(tasks)").fetchall()}
+            if "batch_id" not in columns:
+                connection.execute("ALTER TABLE tasks ADD COLUMN batch_id TEXT REFERENCES batches(batch_id)")
+            if "instance_id" not in columns:
+                connection.execute("ALTER TABLE tasks ADD COLUMN instance_id TEXT")
+            if "source_index" not in columns:
+                connection.execute("ALTER TABLE tasks ADD COLUMN source_index INTEGER")
+            connection.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS tasks_status_queue
+                    ON tasks(status, queue_seq);
+                CREATE UNIQUE INDEX IF NOT EXISTS tasks_batch_instance
+                    ON tasks(batch_id, instance_id)
+                    WHERE batch_id IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS tasks_batch_source_index
+                    ON tasks(batch_id, source_index)
+                    WHERE batch_id IS NOT NULL;
+                """
+            )
+
+    def create_batch(
+        self,
+        request: BatchCreate,
+        instance_ids: Sequence[str],
+        *,
+        now: datetime,
+    ) -> tuple[BatchRecord, bool]:
+        """Create a durable batch and all of its queued children atomically."""
+
+        ordered_ids = tuple(instance_ids)
+        if not ordered_ids:
+            raise ValueError("A batch must contain at least one instance")
+        if len(set(ordered_ids)) != len(ordered_ids):
+            raise ValueError("A batch cannot contain duplicate instance IDs")
+        created_at = _timestamp(now)
+        with self._write() as connection:
+            existing = connection.execute(
+                "SELECT * FROM batches WHERE idempotency_key = ?",
+                (request.idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                return self._batch_record(connection, existing), False
+
+            placeholder = f"pending-batch-{uuid.uuid4().hex}"
+            cursor = connection.execute(
+                """
+                INSERT INTO batches(
+                    batch_id, idempotency_key, request_json, total_tasks, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    placeholder,
+                    request.idempotency_key,
+                    request.model_dump_json(),
+                    len(ordered_ids),
+                    created_at,
+                ),
+            )
+            sequence = cursor.lastrowid
+            if sequence is None:  # pragma: no cover - SQLite guarantees this for INTEGER PRIMARY KEY
+                raise TaskStoreError("SQLite did not assign a batch sequence")
+            batch_id = _batch_id(now, sequence)
+            connection.execute(
+                "UPDATE batches SET batch_id = ? WHERE batch_seq = ?",
+                (batch_id, sequence),
+            )
+            for source_index, instance_id in enumerate(ordered_ids):
+                child = TaskCreate(
+                    powercontext_ref=request.powercontext_ref,
+                    benchmark=request.benchmark,
+                    instance_id=instance_id,
+                    model=request.model,
+                    reasoning_effort=request.reasoning_effort,
+                    treatment_mode=request.treatment_mode,
+                    idempotency_key=f"{batch_id}.{source_index:04d}",
+                )
+                connection.execute(
+                    """
+                    INSERT INTO tasks(
+                        task_id, idempotency_key, request_json, batch_id, instance_id,
+                        source_index, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        _batch_task_id(now, sequence, source_index),
+                        child.idempotency_key,
+                        child.model_dump_json(),
+                        batch_id,
+                        instance_id,
+                        source_index,
+                        TaskStatus.QUEUED.value,
+                        created_at,
+                    ),
+                )
+            return self._batch_record(connection, self._select_batch(connection, batch_id)), True
+
+    def get_batch(self, batch_id: str) -> BatchRecord:
+        """Return one batch with lifecycle state derived from its children."""
+
+        with self._connection() as connection:
+            return self._batch_record(connection, self._select_batch(connection, batch_id))
+
+    def list_batches(self) -> list[BatchRecord]:
+        """List batches in stable creation order."""
+
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM batches ORDER BY batch_seq ASC").fetchall()
+            return [self._batch_record(connection, row) for row in rows]
+
+    def list_batch_tasks(self, batch_id: str) -> list[TaskRecord]:
+        """List every child task in immutable dataset source order."""
+
+        with self._connection() as connection:
+            self._select_batch(connection, batch_id)
+            rows = connection.execute(
+                "SELECT * FROM tasks WHERE batch_id = ? ORDER BY source_index ASC",
+                (batch_id,),
+            ).fetchall()
+            return [self._record(row) for row in rows]
 
     def create(self, request: TaskCreate, *, now: datetime) -> tuple[TaskRecord, bool]:
         """Create a queued task, or replay the task for an idempotency key."""
@@ -434,6 +568,54 @@ class TaskStore:
         return row
 
     @staticmethod
+    def _select_batch(connection: sqlite3.Connection, batch_id: str) -> sqlite3.Row:
+        row = connection.execute("SELECT * FROM batches WHERE batch_id = ?", (batch_id,)).fetchone()
+        if row is None:
+            raise BatchNotFound(f"Batch not found: {batch_id}")
+        return row
+
+    @staticmethod
+    def _batch_record(connection: sqlite3.Connection, row: sqlite3.Row) -> BatchRecord:
+        batch_id = row["batch_id"]
+        if not isinstance(batch_id, str):
+            raise TypeError("Stored batch ID is not text")
+        child_rows = connection.execute(
+            """
+            SELECT status, started_at, finished_at
+            FROM tasks
+            WHERE batch_id = ?
+            ORDER BY source_index ASC
+            """,
+            (batch_id,),
+        ).fetchall()
+        statuses = tuple(TaskStatus(child["status"]) for child in child_rows)
+        status = derive_batch_status(statuses)
+        starts = [
+            _parse_timestamp(child["started_at"])
+            for child in child_rows
+            if child["started_at"] is not None
+        ]
+        finishes = [
+            _parse_timestamp(child["finished_at"])
+            for child in child_rows
+            if child["finished_at"] is not None
+        ]
+        terminal = status in {BatchStatus.COMPLETED, BatchStatus.CANCELLED}
+        return BatchRecord.model_validate(
+            {
+                "batch_id": batch_id,
+                "request": BatchCreate.model_validate_json(row["request_json"], strict=True),
+                "total_tasks": row["total_tasks"],
+                "status": status,
+                "created_at": _parse_timestamp(row["created_at"]),
+                "started_at": min(starts) if starts else None,
+                "finished_at": max(finishes) if terminal and finishes else None,
+                "resolved_powercontext_sha": row["resolved_powercontext_sha"],
+            },
+            strict=True,
+        )
+
+    @staticmethod
     def _record(row: sqlite3.Row) -> TaskRecord:
         task_id = row["task_id"]
         if not isinstance(task_id, str):
@@ -464,6 +646,9 @@ class TaskStore:
                 "task_id": task_id,
                 "request": request,
                 "status": TaskStatus(row["status"]),
+                "batch_id": row["batch_id"],
+                "instance_id": row["instance_id"] or request.instance_id,
+                "source_index": row["source_index"],
                 "phase": TaskPhase(row["phase"]) if row["phase"] is not None else None,
                 "created_at": _parse_timestamp(row["created_at"]),
                 "started_at": _parse_optional_timestamp(row["started_at"]),
@@ -518,5 +703,22 @@ def _parse_optional_timestamp(value: Any) -> datetime | None:
 def _task_id(now: datetime, sequence: int) -> str:
     _timestamp(now)
     task_id = f"run-{now.astimezone(UTC):%Y%m%d-%H%M%S-%f}-{sequence:010d}-{uuid.uuid4().hex[:8]}"
+    EvaluationPaths(Path("."), task_id)
+    return task_id
+
+
+def _batch_id(now: datetime, sequence: int) -> str:
+    _timestamp(now)
+    batch_id = f"batch-{now.astimezone(UTC):%Y%m%d-%H%M%S-%f}-{sequence:010d}-{uuid.uuid4().hex[:8]}"
+    EvaluationPaths(Path("."), batch_id)
+    return batch_id
+
+
+def _batch_task_id(now: datetime, batch_sequence: int, source_index: int) -> str:
+    _timestamp(now)
+    task_id = (
+        f"run-{now.astimezone(UTC):%Y%m%d-%H%M%S-%f}-"
+        f"b{batch_sequence:010d}-t{source_index:04d}"
+    )
     EvaluationPaths(Path("."), task_id)
     return task_id
