@@ -1095,7 +1095,7 @@ audit records this explicitly instead of claiming a full type-check pass.
 For each of the 23 acceptance criteria in the design, record the proving test, API response, rendered UI behavior, or
 deployment check. Any criterion without direct evidence remains incomplete.
 
-- [ ] **Step 7: Commit the completed implementation**
+- [x] **Step 7: Commit the completed implementation**
 
 ```bash
 git add evaluation docs/superpowers/specs/2026-07-29-subscription-controlled-batch-execution-design.md \
@@ -1103,7 +1103,7 @@ git add evaluation docs/superpowers/specs/2026-07-29-subscription-controlled-bat
 git commit -m "feat(eval): operate subscription-controlled batches"
 ```
 
-- [ ] **Step 8: Deploy to m0 without starting real work**
+- [x] **Step 8: Deploy to m0 without starting real work**
 
 1. Back up `/data/powercontext-eval/web/tasks.sqlite3`, runtime environment, systemd units, frontend, and current SHA.
 2. Stop Worker, then Web.
@@ -1115,11 +1115,15 @@ git commit -m "feat(eval): operate subscription-controlled batches"
 8. verify service health, database counts, PowerMem PID, and unrelated Docker containers;
 9. leave no queued or running real benchmark task.
 
-- [ ] **Step 9: Visually inspect the deployed desktop UI**
+- [x] **Step 9: Visually inspect the deployed desktop UI**
 
 Open the m0 console through a local SSH tunnel. Verify launcher, confirmation, usage card, controls, threshold editing,
 events, attempt history, and existing three-level report navigation at desktop width. Capture screenshots only from
 non-running validation data.
+
+Recorded 2026-07-30: the deployed desktop UI showed the 731-task preview, current account usage, the historical
+cancelled batch, aggregate report, task filters/list, task attempt history, and task-detail expansion at 1440 px with
+no horizontal overflow. No confirmation action was taken.
 
 - [ ] **Step 10: Request separate approval for a real 731-task run**
 

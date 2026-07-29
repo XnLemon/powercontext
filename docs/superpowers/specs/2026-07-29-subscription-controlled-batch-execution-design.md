@@ -648,13 +648,20 @@ This table records direct evidence, rather than treating the design checklist it
 | 17 | Verified locally | all estimation unit tests and unavailable/preliminary launcher rendering |
 | 18 | Verified locally | controls account-usage card and aggregate batch Token cards are separate components |
 | 19 | Verified locally | browser E2E covers aggregate, filtered list, task detail, attempt selection, and exact ON injection |
-| 20 | Pending m0 verification | deployment contract and operator tests pass; live m0 backup, service, visual, and zero-real-work checks remain |
+| 20 | Verified on m0 | protected backup, exact-commit deployment, 611-test regression, desktop visual inspection, one unchanged historical batch, and zero queued/running real tasks |
 | 21 | Verified locally | immutable retry store/API/component tests and first-failure-then-success browser E2E |
 | 22 | Verified locally | `test_valid_official_outcomes_are_never_retryable` and attempt-history UI test |
 | 23 | Verified locally | `test_worker_executes_only_the_new_attempt_when_a_failed_task_is_retried` and E2E retained-attempt check |
 
-Local verification on 2026-07-30 produced 611 passing Python tests, 64 passing frontend tests, a successful production
+Local verification on 2026-07-30 produced 611 passing Python tests, 65 passing frontend tests, a successful production
 build, two passing browser E2E scenarios, passing Ruff/format checks, and passing type checks for the changed runtime
 and deterministic deployment-test surfaces. Full evaluation-project `ty check src tests` still reports 52 pre-existing
 test-fixture typing diagnostics; the immediately preceding `0f089a8` baseline reports the same diagnostics, so this is
 recorded as baseline debt rather than a regression or a successful full type check.
+
+The m0 acceptance pass retained the pre-release database, environment, units, frontend, source bundle, and prior SHA
+under `/data/powercontext-eval/backups/release-20260729T165132Z`. The deployed services reported zero queued and zero
+running real tasks, the read-only preview validated all 731 catalog tasks without adding a batch, and the m0 Python
+suite passed 611 tests. PowerMem kept its original server process and the unrelated `new-api`, `new-api-mysql`, and
+`new-api-redis` containers remained running. Desktop inspection covered launcher, preview confirmation, aggregate
+report, filters/list, task detail, and complete task expansion without confirming a real run.

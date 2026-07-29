@@ -17,6 +17,21 @@ function number(value: number): string {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
 
+function readableProblemStatement(value: string): string {
+  return value
+    .split("\n")
+    .map((line) => {
+      if (!line.startsWith("\"") || !line.endsWith("\"")) return line;
+      try {
+        const decoded: unknown = JSON.parse(line);
+        return typeof decoded === "string" ? decoded : line;
+      } catch {
+        return line;
+      }
+    })
+    .join("\n");
+}
+
 export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRunDetailProps) {
   const [batch, setBatch] = useState<BatchRecord | null>(null);
   const [detail, setDetail] = useState<BatchTaskDetail | null>(null);
@@ -85,9 +100,10 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
   const offTokens = task.tokens.off;
   const onTokens = task.tokens.on;
   const delta = task.tokens.delta;
-  const problemPreview = detail.problem_statement.length > 360
-    ? `${detail.problem_statement.slice(0, 360)}…`
-    : detail.problem_statement;
+  const problemStatement = readableProblemStatement(detail.problem_statement);
+  const problemPreview = problemStatement.length > 360
+    ? `${problemStatement.slice(0, 360)}…`
+    : problemStatement;
   const hasComparison = off !== null && on !== null;
   const didNotRun = task.status === "queued" || task.status === "cancelled";
 
@@ -146,13 +162,13 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
             <h2>原始任务</h2>
             <p>来自固定 SWE-bench Pro 数据集。</p>
           </div>
-          {detail.problem_statement.length > 360 && (
+          {problemStatement.length > 360 && (
             <button type="button" className="secondary-button" onClick={() => setExpanded((value) => !value)}>
               {expanded ? "收起完整任务描述" : "展开完整任务描述"}
             </button>
           )}
         </div>
-        <pre>{expanded ? detail.problem_statement : problemPreview}</pre>
+        <pre aria-label="任务描述">{expanded ? problemStatement : problemPreview}</pre>
       </section>
 
       <section className="report-section">

@@ -132,4 +132,30 @@ describe("TaskRunDetail", () => {
     expect(within(on).getAllByText("未解决")).toHaveLength(1);
     expect(screen.queryByText(/生命周期|处理有效性|补丁大小|N\/A|验收/)).not.toBeInTheDocument();
   });
+
+  it("decodes quoted dataset sections for display without exposing literal newline escapes", async () => {
+    const encodedSection = JSON.stringify(`**Title**\n\n${"Readable description. ".repeat(24)}`);
+    const encodedRequirement = JSON.stringify("- first requirement\n- second requirement");
+    const rawProblem = `${encodedSection}\n\nRequirements:\n${encodedRequirement}`;
+    const readableProblem = `${JSON.parse(encodedSection)}\n\nRequirements:\n${JSON.parse(encodedRequirement)}`;
+    const api = apiStub({
+      getBatch: vi.fn().mockResolvedValue(batchRecord({ status: "completed" })),
+      getBatchTask: vi.fn().mockResolvedValue({ ...batchTaskDetail, problem_statement: rawProblem }),
+    });
+
+    render(
+      <TaskRunDetail
+        api={api}
+        batchId="batch-001"
+        taskId="task-001"
+        search=""
+        navigate={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "单任务详情" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "展开完整任务描述" }));
+    expect(screen.getByLabelText("任务描述")).toHaveTextContent(readableProblem, { normalizeWhitespace: false });
+    expect(screen.queryByText(/\\n/)).not.toBeInTheDocument();
+  });
 });
