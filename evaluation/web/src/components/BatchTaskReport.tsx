@@ -249,7 +249,14 @@ function TaskRow({
   const category = categories.find(({ value }) => value === task.pair_category)?.label ?? pendingLabel;
   return (
     <tr>
-      <td><span className="task-cell-id">{task.task_id}</span><small>{task.instance_id}</small></td>
+      <td>
+        <span className="task-cell-id">{task.task_id}</span>
+        <small>{task.instance_id}</small>
+        <small>
+          {task.attempt_count} 次尝试
+          {task.retryable ? " · 可重试" : ""}
+        </small>
+      </td>
       <td>{task.repository}</td>
       {executionFailure ? (
         <td colSpan={3}><strong className="execution-failure">评测执行失败</strong><small>{task.failure_summary}</small></td>

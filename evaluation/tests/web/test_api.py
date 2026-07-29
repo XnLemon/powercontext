@@ -1321,6 +1321,15 @@ def test_batch_report_uses_the_successful_retry_once_and_reads_its_attempt_artif
 
     report = client.get(f"/api/batches/{batch['batch_id']}/report")
     task_page = client.get(f"/api/batches/{batch['batch_id']}/tasks")
+    latest_detail = client.get(f"/api/batches/{batch['batch_id']}/tasks/{task.task_id}")
+    first_detail = client.get(
+        f"/api/batches/{batch['batch_id']}/tasks/{task.task_id}",
+        params={"attempt_id": f"{task.task_id}.attempt-0001"},
+    )
+    missing_attempt = client.get(
+        f"/api/batches/{batch['batch_id']}/tasks/{task.task_id}",
+        params={"attempt_id": f"{task.task_id}.attempt-9999"},
+    )
 
     assert report.status_code == 200
     assert report.json()["comparable_pairs"] == 1
@@ -1329,6 +1338,12 @@ def test_batch_report_uses_the_successful_retry_once_and_reads_its_attempt_artif
     item = task_page.json()["items"][0]
     assert item["attempt_number"] == item["attempt_count"] == 2
     assert item["pair_category"] == "off_fail_on_pass"
+    assert latest_detail.json()["task"]["attempt_number"] == 2
+    assert first_detail.status_code == 200
+    assert first_detail.json()["task"]["attempt_number"] == 1
+    assert first_detail.json()["task"]["failure_summary"] == "First attempt failed"
+    assert missing_attempt.status_code == 404
+    assert missing_attempt.json()["error"]["code"] == "attempt_not_found"
     assert [attempt.failure_summary for attempt in store.list_task_attempts(batch["batch_id"], task.task_id)] == [
         "First attempt failed",
         None,

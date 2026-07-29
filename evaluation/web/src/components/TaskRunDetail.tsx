@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react
 
 import type { EvaluationApi } from "../api";
 import type { BatchRecord, BatchTaskDetail, TaskDetailArm } from "../types";
+import { AttemptHistory } from "./AttemptHistory";
 import { ContextTimeline } from "./ContextTimeline";
 
 interface TaskRunDetailProps {
@@ -20,6 +21,8 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
   const [batch, setBatch] = useState<BatchRecord | null>(null);
   const [detail, setDetail] = useState<BatchTaskDetail | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [selectedAttemptId, setSelectedAttemptId] = useState<string | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const [error, setError] = useState(false);
   const generation = useRef(0);
   const controller = useRef<AbortController | null>(null);
@@ -32,7 +35,7 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
     setError(false);
     Promise.all([
       api.getBatch(batchId, nextController.signal),
-      api.getBatchTask(batchId, taskId, nextController.signal),
+      api.getBatchTask(batchId, taskId, nextController.signal, selectedAttemptId ?? undefined),
     ])
       .then(([nextBatch, nextDetail]) => {
         if (nextController.signal.aborted || currentGeneration !== generation.current) return;
@@ -42,7 +45,7 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
       .catch(() => {
         if (!nextController.signal.aborted && currentGeneration === generation.current) setError(true);
       });
-  }, [api, batchId, taskId]);
+  }, [api, batchId, refreshVersion, selectedAttemptId, taskId]);
 
   useEffect(() => {
     setExpanded(false);
@@ -52,6 +55,10 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
       generation.current += 1;
     };
   }, [load]);
+
+  useEffect(() => {
+    setSelectedAttemptId(null);
+  }, [taskId]);
 
   const listPath = `/report/${encodeURIComponent(batchId)}/tasks${search}`;
   const onBack = (event: MouseEvent<HTMLAnchorElement>) => {
@@ -122,6 +129,17 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
         <span>{batch.request.task_set}</span>
       </section>
 
+      <AttemptHistory
+        api={api}
+        batchId={batchId}
+        task={task}
+        onSelect={setSelectedAttemptId}
+        onRetried={() => {
+          setSelectedAttemptId(null);
+          setRefreshVersion((value) => value + 1);
+        }}
+      />
+
       <section className="report-section task-problem">
         <div className="section-heading">
           <div>
@@ -178,7 +196,12 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
           <p>任务未执行，因此没有上下文时间线。</p>
         </section>
       ) : (
-        <ContextTimeline api={api} batchId={batchId} taskId={taskId} />
+        <ContextTimeline
+          api={api}
+          batchId={batchId}
+          taskId={taskId}
+          {...(task.attempt_id === null ? {} : { attemptId: task.attempt_id })}
+        />
       )}
     </div>
   );

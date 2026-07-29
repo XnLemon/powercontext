@@ -7,11 +7,12 @@ interface ContextTimelineProps {
   api: EvaluationApi;
   batchId: string;
   taskId: string;
+  attemptId?: string;
 }
 
 const PAGE_SIZE = 200;
 
-export function ContextTimeline({ api, batchId, taskId }: ContextTimelineProps) {
+export function ContextTimeline({ api, batchId, taskId, attemptId }: ContextTimelineProps) {
   const [arm, setArm] = useState<"off" | "on">("on");
   const [events, setEvents] = useState<ContextEvent[] | null>(null);
   const [selected, setSelected] = useState<ContextEvent | null>(null);
@@ -33,7 +34,11 @@ export function ContextTimeline({ api, batchId, taskId }: ContextTimelineProps) 
             batchId,
             taskId,
             arm,
-            { limit: PAGE_SIZE, offset },
+            {
+              limit: PAGE_SIZE,
+              offset,
+              ...(attemptId === undefined ? {} : { attempt_id: attemptId }),
+            },
             controller.signal,
           );
           if (controller.signal.aborted || currentGeneration !== generation.current) return;
@@ -52,7 +57,7 @@ export function ContextTimeline({ api, batchId, taskId }: ContextTimelineProps) 
       controller.abort();
       generation.current += 1;
     };
-  }, [api, arm, batchId, taskId]);
+  }, [api, arm, attemptId, batchId, taskId]);
 
   return (
     <section className="report-section context-section" aria-labelledby="context-heading">

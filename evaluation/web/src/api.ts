@@ -774,9 +774,15 @@ export class EvaluationApi {
     return this.#json(batchPath(batchId, suffix), validateBatchTaskPage, withSignal(signal));
   }
 
-  getBatchTask(batchId: string, taskId: string, signal?: AbortSignal): Promise<BatchTaskDetail> {
+  getBatchTask(
+    batchId: string,
+    taskId: string,
+    signal?: AbortSignal,
+    attemptId?: string,
+  ): Promise<BatchTaskDetail> {
+    const query = attemptId === undefined ? "" : `?attempt_id=${encodeURIComponent(attemptId)}`;
     return this.#json(
-      batchPath(batchId, `/tasks/${encodeURIComponent(taskId)}`),
+      batchPath(batchId, `/tasks/${encodeURIComponent(taskId)}${query}`),
       validateBatchTaskDetail,
       withSignal(signal),
     );
@@ -792,6 +798,7 @@ export class EvaluationApi {
     const query = new URLSearchParams();
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     if (options.offset !== undefined) query.set("offset", String(options.offset));
+    if (options.attempt_id !== undefined) query.set("attempt_id", options.attempt_id);
     const querySuffix = query.size === 0 ? "" : `?${query.toString()}`;
     return this.#json(
       batchPath(batchId, `/tasks/${encodeURIComponent(taskId)}/context/${arm}${querySuffix}`),
@@ -806,9 +813,11 @@ export class EvaluationApi {
     arm: "off" | "on",
     sequence: number,
     signal?: AbortSignal,
+    attemptId?: string,
   ): Promise<ContextEvent> {
+    const query = attemptId === undefined ? "" : `?attempt_id=${encodeURIComponent(attemptId)}`;
     return this.#json(
-      batchPath(batchId, `/tasks/${encodeURIComponent(taskId)}/context/${arm}/${sequence}`),
+      batchPath(batchId, `/tasks/${encodeURIComponent(taskId)}/context/${arm}/${sequence}${query}`),
       validateContextEvent,
       withSignal(signal),
     );

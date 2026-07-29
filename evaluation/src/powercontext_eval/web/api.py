@@ -639,6 +639,40 @@ def create_app(
         except BatchNotFound:
             return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
 
+    def selected_batch_task(batch_id: str, task_id: str, attempt_id: str | None) -> TaskRecord | None:
+        current = task_store.get_batch_task(batch_id, task_id)
+        if attempt_id is None or attempt_id == current.attempt_id:
+            return current
+        attempt = next(
+            (
+                candidate
+                for candidate in task_store.list_task_attempts(batch_id, task_id)
+                if candidate.attempt_id == attempt_id
+            ),
+            None,
+        )
+        if attempt is None:
+            return None
+        payload = current.model_dump(mode="python")
+        payload.update(
+            {
+                "attempt_id": attempt.attempt_id,
+                "attempt_number": attempt.attempt_number,
+                "retryable": False,
+                "status": attempt.status,
+                "phase": attempt.phase,
+                "created_at": attempt.created_at,
+                "started_at": attempt.started_at,
+                "finished_at": attempt.finished_at,
+                "version": attempt.version,
+                "failure_category": attempt.failure_category,
+                "failure_phase": attempt.failure_phase,
+                "failure_summary": attempt.failure_summary,
+                "result": attempt.result,
+            }
+        )
+        return TaskRecord.model_validate(payload, strict=True)
+
     @app.get("/api/batches/{batch_id}/report")
     def batch_report(batch_id: str) -> Response:
         selected = batch_inputs(batch_id)
@@ -687,14 +721,20 @@ def create_app(
         return JSONResponse(content=page.model_dump(mode="json"), headers=_NO_STORE)
 
     @app.get("/api/batches/{batch_id}/tasks/{task_id}")
-    def batch_task_detail(batch_id: str, task_id: str) -> Response:
+    def batch_task_detail(
+        batch_id: str,
+        task_id: str,
+        attempt_id: Annotated[str | None, Query(max_length=500)] = None,
+    ) -> Response:
         try:
             batch = task_store.get_batch(batch_id)
-            task = task_store.get_batch_task(batch_id, task_id)
+            task = selected_batch_task(batch_id, task_id, attempt_id)
         except BatchNotFound:
             return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
         except TaskNotFound:
             return _error(404, "task_not_found", "The requested evaluation task does not exist.")
+        if task is None:
+            return _error(404, "attempt_not_found", "The requested task attempt does not exist.")
         try:
             detail = load_batch_task_detail(
                 batch,
@@ -706,13 +746,21 @@ def create_app(
             return _error(409, "report_unavailable", "The task detail report is not available.")
         return JSONResponse(content=detail.model_dump(mode="json"), headers=_NO_STORE)
 
-    def context_inputs(batch_id: str, task_id: str) -> tuple[BatchRecord, TaskRecord] | JSONResponse:
+    def context_inputs(
+        batch_id: str,
+        task_id: str,
+        attempt_id: str | None,
+    ) -> tuple[BatchRecord, TaskRecord] | JSONResponse:
         try:
-            return task_store.get_batch(batch_id), task_store.get_batch_task(batch_id, task_id)
+            batch = task_store.get_batch(batch_id)
+            task = selected_batch_task(batch_id, task_id, attempt_id)
         except BatchNotFound:
             return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
         except TaskNotFound:
             return _error(404, "task_not_found", "The requested evaluation task does not exist.")
+        if task is None:
+            return _error(404, "attempt_not_found", "The requested task attempt does not exist.")
+        return batch, task
 
     @app.get("/api/batches/{batch_id}/tasks/{task_id}/context/{arm}")
     def task_context(
@@ -721,8 +769,9 @@ def create_app(
         arm: Literal["off", "on"],
         limit: Annotated[int, Query(ge=1, le=200)] = 100,
         offset: Annotated[int, Query(ge=0)] = 0,
+        attempt_id: Annotated[str | None, Query(max_length=500)] = None,
     ) -> Response:
-        selected = context_inputs(batch_id, task_id)
+        selected = context_inputs(batch_id, task_id, attempt_id)
         if isinstance(selected, JSONResponse):
             return selected
         batch, task = selected
@@ -745,8 +794,9 @@ def create_app(
         task_id: str,
         arm: Literal["off", "on"],
         sequence: int,
+        attempt_id: Annotated[str | None, Query(max_length=500)] = None,
     ) -> Response:
-        selected = context_inputs(batch_id, task_id)
+        selected = context_inputs(batch_id, task_id, attempt_id)
         if isinstance(selected, JSONResponse):
             return selected
         batch, task = selected

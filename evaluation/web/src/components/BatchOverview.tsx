@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react
 
 import type { EvaluationApi } from "../api";
 import type { BatchRecord, BatchReport, PairCategory, TokenMetricAggregate } from "../types";
+import { BatchControls } from "./BatchControls";
 
 interface BatchOverviewProps {
   api: EvaluationApi;
@@ -101,6 +102,8 @@ export function BatchOverview({ api, batchId, navigate }: BatchOverviewProps) {
         </div>
         <span className="batch-status">{status} · {progress}</span>
       </header>
+
+      <BatchControls api={api} batch={batch} report={report} onUpdated={load} />
 
       <section className="kpi-grid" aria-label="正确性汇总">
         <MetricCard label="总任务数" value={number(report.total_tasks)} detail={`${progress} 已结束`} />

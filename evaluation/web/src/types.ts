@@ -517,6 +517,7 @@ export interface BatchTaskListOptions {
 export interface ContextPageOptions {
   limit?: number;
   offset?: number;
+  attempt_id?: string;
 }
 
 export interface BatchEventSubscription {
