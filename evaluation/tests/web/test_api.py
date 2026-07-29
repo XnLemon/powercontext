@@ -268,7 +268,8 @@ def test_structured_and_raw_reports_use_validated_artifacts(
     client: TestClient, config: WebConfig, store: TaskStore
 ) -> None:
     task = client.post("/api/tasks", json=payload("report-key")).json()
-    claimed = store.claim_next("worker", now=NOW)
+    created_at = datetime.fromisoformat(task["created_at"])
+    claimed = store.claim_next("worker", now=created_at)
     assert claimed is not None
     worker_run_dir = config.run_root / "runs" / task["task_id"]
     _write_report(config.run_root / "runs", task["task_id"])
@@ -281,7 +282,7 @@ def test_structured_and_raw_reports_use_validated_artifacts(
             off_resolved=True,
             on_resolved=True,
         ),
-        now=NOW + timedelta(seconds=1),
+        now=created_at + timedelta(seconds=1),
     )
 
     structured = client.get(f"/api/tasks/{task['task_id']}/report")
@@ -311,7 +312,8 @@ def test_report_api_reads_the_canonical_worker_artifact_directory(
     client: TestClient, config: WebConfig, store: TaskStore
 ) -> None:
     task = client.post("/api/tasks", json=payload("worker-report-key")).json()
-    claimed = store.claim_next("worker", now=NOW)
+    created_at = datetime.fromisoformat(task["created_at"])
+    claimed = store.claim_next("worker", now=created_at)
     assert claimed is not None
     worker_run_dir = config.run_root / "runs" / task["task_id"]
     _write_report(config.run_root / "runs", task["task_id"])
@@ -324,7 +326,7 @@ def test_report_api_reads_the_canonical_worker_artifact_directory(
             off_resolved=True,
             on_resolved=True,
         ),
-        now=NOW + timedelta(seconds=1),
+        now=created_at + timedelta(seconds=1),
     )
 
     assert client.get(f"/api/tasks/{task['task_id']}/report").status_code == 200
