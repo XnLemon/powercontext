@@ -631,7 +631,7 @@ This table records direct evidence, rather than treating the design checklist it
 | ---: | --- | --- |
 | 1 | Verified locally | `BatchLauncher.test.tsx` preview/confirm test and controlled-batch browser E2E |
 | 2 | Verified locally | `test_batch_preview_is_read_only_and_exposes_fixed_facts_usage_and_estimate` |
-| 3 | Verified locally | `test_probe_reads_normalized_subscription_usage_and_sends_exact_protocol`; launcher and controls tests display used, remaining, window, reset, and observation facts |
+| 3 | Verified on m0 | persistent-stdio probe tests plus a sanitized live m0 snapshot; launcher and controls tests display used, remaining, window, reset, and observation facts |
 | 4 | Verified locally | Launcher test rejects currency/amount wording; operator guide defines subscription-only semantics |
 | 5 | Verified locally | `test_preview_request_defaults_to_eighty_percent` and deployment environment contract |
 | 6 | Verified locally | `test_threshold_updates_use_optimistic_concurrency_and_do_not_auto_resume` and controls UI test |
@@ -653,7 +653,7 @@ This table records direct evidence, rather than treating the design checklist it
 | 22 | Verified locally | `test_valid_official_outcomes_are_never_retryable` and attempt-history UI test |
 | 23 | Verified locally | `test_worker_executes_only_the_new_attempt_when_a_failed_task_is_retried` and E2E retained-attempt check |
 
-Local verification on 2026-07-30 produced 610 passing Python tests, 64 passing frontend tests, a successful production
+Local verification on 2026-07-30 produced 611 passing Python tests, 64 passing frontend tests, a successful production
 build, two passing browser E2E scenarios, passing Ruff/format checks, and passing type checks for the changed runtime
 and deterministic deployment-test surfaces. Full evaluation-project `ty check src tests` still reports 52 pre-existing
 test-fixture typing diagnostics; the immediately preceding `0f089a8` baseline reports the same diagnostics, so this is

@@ -27,13 +27,20 @@ def fake_codex(tmp_path: Path) -> Path:
 import json
 import os
 from pathlib import Path
+import select
 import sys
 import time
 
 home = Path(os.environ["CODEX_HOME"])
 auth_path = home / "auth.json"
 auth = json.loads(auth_path.read_text())
-requests = [json.loads(line) for line in sys.stdin if line.strip()]
+requests = []
+for _request in range(4):
+    line = sys.stdin.readline()
+    if not line:
+        break
+    if line.strip():
+        requests.append(json.loads(line))
 record_path = auth.get("record_path")
 if record_path:
     Path(record_path).write_text(json.dumps({
@@ -46,6 +53,10 @@ if record_path:
 
 mode = auth.get("mode", "normal")
 secret = auth.get("secret", "")
+if mode == "require_open_stdin":
+    readable, _, _ = select.select([sys.stdin], [], [], 0)
+    if readable and sys.stdin.read(1) == "":
+        raise SystemExit(0)
 if mode == "hang":
     time.sleep(10)
 if mode == "nonzero":
@@ -177,6 +188,12 @@ def test_probe_reads_normalized_subscription_usage_and_sends_exact_protocol(
     assert record["auth_mode"] == "0o600"
     assert record["proxy"] == "http://127.0.0.1:7890"
     assert not Path(record["codex_home"]).exists()
+
+
+def test_probe_keeps_app_server_stdin_open_until_all_responses_arrive(tmp_path: Path, fake_codex: Path) -> None:
+    snapshot = probe(fake_codex, write_auth(tmp_path, mode="require_open_stdin")).read(now=NOW)
+
+    assert snapshot.used_percent == 9
 
 
 def test_probe_prefers_the_named_codex_bucket_over_legacy_fallback(tmp_path: Path, fake_codex: Path) -> None:

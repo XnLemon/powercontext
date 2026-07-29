@@ -85,7 +85,7 @@ class ProcessRunner:
         cwd_text = os.fspath(cwd)
         if "\0" in cwd_text:
             raise ValueError("cwd must not contain NUL")
-        child_env = _build_environment(env)
+        child_env = build_process_environment(env)
         redactor = _Redactor((*secrets, *_proxy_secrets(child_env)))
 
         try:
@@ -309,7 +309,9 @@ def _validate_argv(argv: Sequence[str]) -> tuple[str, ...]:
     return tuple(argv)
 
 
-def _build_environment(overrides: Mapping[str, str] | None) -> dict[str, str]:
+def build_process_environment(overrides: Mapping[str, str] | None) -> dict[str, str]:
+    """Build the restricted child environment used by every managed process."""
+
     environment = {
         key: value for key, value in os.environ.items() if key in _INHERITED_ENVIRONMENT_KEYS or key.startswith("LC_")
     }
@@ -378,4 +380,5 @@ __all__ = [
     "CommandResult",
     "CommandTimedOut",
     "ProcessRunner",
+    "build_process_environment",
 ]

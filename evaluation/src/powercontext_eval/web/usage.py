@@ -5,8 +5,12 @@ from __future__ import annotations
 import json
 import math
 import os
+import select
 import shutil
+import signal
+import subprocess
 import tempfile
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,8 +18,7 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from powercontext_eval.errors import CommandError, CommandTimedOut
-from powercontext_eval.process import ProcessRunner
+from powercontext_eval.process import build_process_environment
 
 CLIENT_INFO = {
     "name": "powercontext_eval",
@@ -76,7 +79,6 @@ class CodexUsageProbe:
         proxy_url: str,
         timeout_seconds: float = 15,
         output_limit_bytes: int = _DEFAULT_OUTPUT_LIMIT_BYTES,
-        process_runner: ProcessRunner | None = None,
     ) -> None:
         if not isinstance(codex_binary, Path) or not codex_binary.is_absolute():
             raise ValueError("codex_binary must be an absolute Path")
@@ -99,7 +101,6 @@ class CodexUsageProbe:
         self._proxy_url = proxy_url
         self._timeout_seconds = float(timeout_seconds)
         self._output_limit_bytes = output_limit_bytes
-        self._runner = process_runner or ProcessRunner()
 
     def read(self, *, now: datetime) -> UsageSnapshot:
         """Collect and normalize one snapshot without retaining raw account output."""
@@ -115,10 +116,6 @@ class CodexUsageProbe:
                 shutil.copyfile(self._auth_json, auth_copy)
                 auth_copy.chmod(0o600)
                 output = self._run(codex_home)
-        except CommandTimedOut:
-            raise UsageUnavailable("Codex usage probe timed out") from None
-        except CommandError:
-            raise UsageUnavailable("Codex usage probe failed") from None
         except OSError:
             raise UsageUnavailable("Codex usage probe failed") from None
 
@@ -145,21 +142,87 @@ class CodexUsageProbe:
             "all_proxy": self._proxy_url,
         }
 
-        with tempfile.TemporaryFile("w+b") as stdout:
-            self._runner.run(
-                (os.fspath(self._codex_binary), "app-server", "--listen", "stdio://"),
-                cwd=codex_home,
-                timeout=self._timeout_seconds,
-                env=proxy_environment,
-                input_bytes=request_bytes,
-                stdout_sink=stdout,
-            )
-            stdout.flush()
-            size = stdout.tell()
-            if size > self._output_limit_bytes:
-                raise UsageUnavailable("Codex usage probe exceeded its output limit")
-            stdout.seek(0)
-            return stdout.read()
+        process = subprocess.Popen(
+            (os.fspath(self._codex_binary), "app-server", "--listen", "stdio://"),
+            cwd=codex_home,
+            env=build_process_environment(proxy_environment),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=os.name == "posix",
+            shell=False,
+        )
+        output = bytearray()
+        deadline = time.monotonic() + self._timeout_seconds
+        try:
+            assert process.stdin is not None
+            assert process.stdout is not None
+            process.stdin.write(request_bytes)
+            process.stdin.flush()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise UsageUnavailable("Codex usage probe timed out")
+                readable, _, _ = select.select((process.stdout,), (), (), remaining)
+                if not readable:
+                    raise UsageUnavailable("Codex usage probe timed out")
+                chunk = os.read(process.stdout.fileno(), min(65_536, self._output_limit_bytes + 1))
+                if not chunk:
+                    returncode = process.poll()
+                    if returncode is None:
+                        continue
+                    if returncode != 0:
+                        raise UsageUnavailable("Codex usage probe failed")
+                    return bytes(output)
+                output.extend(chunk)
+                if len(output) > self._output_limit_bytes:
+                    raise UsageUnavailable("Codex usage probe exceeded its output limit")
+                if _response_ids(output) >= {0, 1, 2}:
+                    return bytes(output)
+        finally:
+            _stop_probe_process(process)
+
+
+def _response_ids(raw: bytearray) -> set[int]:
+    response_ids: set[int] = set()
+    for line in bytes(raw).splitlines():
+        try:
+            message = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(message, dict):
+            continue
+        response_id = message.get("id")
+        if isinstance(response_id, int) and not isinstance(response_id, bool):
+            response_ids.add(response_id)
+    return response_ids
+
+
+def _stop_probe_process(process: subprocess.Popen[bytes]) -> None:
+    if process.stdin is not None and not process.stdin.closed:
+        process.stdin.close()
+    if process.stdout is not None and not process.stdout.closed:
+        process.stdout.close()
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:  # pragma: no cover - the evaluation host is POSIX
+            process.terminate()
+        process.wait(timeout=1)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:  # pragma: no cover - the evaluation host is POSIX
+                process.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def is_fresh(snapshot: UsageSnapshot, *, now: datetime, max_age: timedelta) -> bool:
