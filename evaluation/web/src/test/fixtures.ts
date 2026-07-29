@@ -132,6 +132,41 @@ export const batchRequest: BatchCreate = {
   reasoning_effort: "medium",
   treatment_mode: "off_on",
   idempotency_key: "fixture-batch-key",
+  usage_pause_percent: 80,
+};
+
+export const usageSnapshot = {
+  limit_id: "codex" as const,
+  used_percent: 32,
+  remaining_percent: 68,
+  window_duration_minutes: 10_080,
+  resets_at: "2026-08-05T01:00:00Z",
+  observed_at: "2026-07-29T01:00:00Z",
+  rate_limit_reached_type: null,
+  plan_type: "pro",
+  account_tokens: 1234,
+  probe_version: 1 as const,
+};
+
+export const batchControl = {
+  intent: "run" as const,
+  usage_pause_percent: 80,
+  pause_reason: null,
+  updated_at: "2026-07-29T01:00:00Z",
+  version: 0,
+};
+
+export const batchEstimate = {
+  quality: "measured" as const,
+  basis: "current_batch" as const,
+  sample_size: 100,
+  remaining_tasks: 0,
+  remaining_tokens: 0,
+  remaining_duration_seconds: 0,
+  low_tokens: 0,
+  high_tokens: 0,
+  low_duration_seconds: 0,
+  high_duration_seconds: 0,
 };
 
 export function batchRecord(overrides: Partial<BatchRecord> = {}): BatchRecord {
@@ -140,6 +175,7 @@ export function batchRecord(overrides: Partial<BatchRecord> = {}): BatchRecord {
     request: batchRequest,
     total_tasks: 731,
     status: "queued",
+    control: batchControl,
     created_at: "2026-07-29T01:00:00Z",
     started_at: null,
     finished_at: null,
@@ -150,6 +186,7 @@ export function batchRecord(overrides: Partial<BatchRecord> = {}): BatchRecord {
 
 export const batchReport: BatchReport = {
   batch_id: "batch-001",
+  report_revision: 10_100,
   total_tasks: 100,
   terminal_tasks: 100,
   comparable_pairs: 100,
@@ -178,6 +215,9 @@ export const batchReport: BatchReport = {
     output: { off: 612_000, on: 668_000, delta: 56_000, off_measured_tasks: 100, on_measured_tasks: 100 },
     total: { off: 73_012_000, on: 80_468_000, delta: 7_456_000, off_measured_tasks: 100, on_measured_tasks: 100 },
   },
+  control: batchControl,
+  latest_usage: usageSnapshot,
+  estimate: batchEstimate,
   revisions: { powercontext: "a".repeat(40), dataset: "public-v2", harness: "harness-sha" },
   configuration: { model: "gpt-5.6-sol", reasoning_effort: "medium", task_set: "swebench-pro-public-v2" },
 };
@@ -185,6 +225,10 @@ export const batchReport: BatchReport = {
 export function batchTask(overrides: Partial<BatchTaskItem> = {}): BatchTaskItem {
   return {
     task_id: "task-001",
+    attempt_id: "task-001.attempt-0001",
+    attempt_number: 1,
+    attempt_count: 1,
+    retryable: false,
     instance_id: "instance_owner__repo-001",
     repository: "owner/repo",
     source_index: 0,
@@ -251,6 +295,10 @@ export function summary(
 ): TaskSummary {
   return {
     task_id: taskId,
+    attempt_id: `${taskId}.attempt-0001`,
+    attempt_number: 1,
+    attempt_count: 1,
+    retryable: status === "failed" || status === "interrupted",
     powercontext_ref: "latest",
     instance_id: instanceId,
     model: "gpt-5.6-sol",
@@ -272,6 +320,10 @@ export function summary(
 export function record(status: TaskRecord["status"], taskId = `task-${status}`): TaskRecord {
   const base = {
     task_id: taskId,
+    attempt_id: `${taskId}.attempt-0001`,
+    attempt_number: 1,
+    attempt_count: 1,
+    retryable: status === "failed" || status === "interrupted",
     request,
     created_at: "2026-07-29T01:00:00Z",
     version: 1,
@@ -355,8 +407,29 @@ export function apiStub(overrides: Partial<Record<keyof EvaluationApi, unknown>>
   return {
     listBatches: vi.fn().mockResolvedValue([]),
     getBatch: vi.fn().mockResolvedValue(batchRecord()),
+    previewBatch: vi.fn().mockResolvedValue({
+      powercontext_ref: "latest",
+      benchmark: "swebench-pro",
+      task_set: "swebench-pro-public-v2",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "medium",
+      treatment_mode: "off_on",
+      total_tasks: 731,
+      usage_pause_percent: 80,
+      usage: usageSnapshot,
+      estimate: { ...batchEstimate, basis: "historical_compatible" },
+      can_start: true,
+      block_reason: null,
+    }),
     createBatch: vi.fn().mockResolvedValue(batchRecord()),
+    pauseBatch: vi.fn().mockResolvedValue(batchRecord({ status: "paused" })),
+    resumeBatch: vi.fn().mockResolvedValue(batchRecord()),
     cancelBatch: vi.fn().mockResolvedValue(batchRecord({ status: "cancelled" })),
+    updateBatchThreshold: vi.fn().mockResolvedValue(batchRecord()),
+    getAccountUsage: vi.fn().mockResolvedValue(usageSnapshot),
+    listBatchControlEvents: vi.fn().mockResolvedValue([]),
+    listTaskAttempts: vi.fn().mockResolvedValue([]),
+    retryTask: vi.fn(),
     getBatchReport: vi.fn().mockResolvedValue(batchReport),
     listBatchTasks: vi.fn().mockResolvedValue(batchTaskPage),
     getBatchTask: vi.fn().mockResolvedValue(batchTaskDetail),

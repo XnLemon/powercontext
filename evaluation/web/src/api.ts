@@ -1,6 +1,8 @@
 import type {
   BatchCreate,
+  BatchControlEvent,
   BatchEventSubscription,
+  BatchPreview,
   BatchRecord,
   BatchReport,
   BatchTaskDetail,
@@ -16,10 +18,12 @@ import type {
   TaskCreate,
   TaskEvent,
   TaskEventSubscription,
+  TaskAttempt,
   TaskListOptions,
   TaskRecord,
   TaskStatus,
   TaskSummary,
+  UsageSnapshot,
 } from "./types";
 import { z } from "zod";
 
@@ -69,6 +73,7 @@ const timestampSchema = z.iso
 const nonnegativeIntegerSchema = z.number().int().nonnegative();
 const queuePositionSchema = z.number().int().positive().nullable();
 const nonnegativeNumberSchema = z.number().nonnegative();
+const percentageSchema = z.number().int().min(0).max(100);
 const taskStatusSchema = z.enum(TASK_STATUSES);
 const taskPhaseSchema = z.enum([
   "preparing",
@@ -111,6 +116,10 @@ const taskResultSchema = z.strictObject({
 
 const taskRecordBaseShape = {
   task_id: z.string(),
+  attempt_id: z.string().nullable(),
+  attempt_number: z.number().int().positive(),
+  attempt_count: z.number().int().positive(),
+  retryable: z.boolean(),
   request: taskCreateSchema,
   created_at: timestampSchema,
   version: nonnegativeIntegerSchema,
@@ -185,6 +194,10 @@ const taskRecordSchema = z
 
 const taskSummarySchema = z.strictObject({
   task_id: z.string(),
+  attempt_id: z.string().nullable(),
+  attempt_number: z.number().int().positive(),
+  attempt_count: z.number().int().positive(),
+  retryable: z.boolean(),
   powercontext_ref: z.string(),
   instance_id: z.string(),
   model: z.string(),
@@ -297,16 +310,63 @@ const batchCreateSchema = z.strictObject({
   reasoning_effort: z.literal("medium"),
   treatment_mode: z.literal("off_on"),
   idempotency_key: z.string().min(8).max(128).regex(/^[A-Za-z0-9._-]+$/),
+  usage_pause_percent: z.number().int().min(1).max(100),
+});
+const usageSnapshotSchema = z.strictObject({
+  limit_id: z.literal("codex"),
+  used_percent: percentageSchema,
+  remaining_percent: percentageSchema,
+  window_duration_minutes: z.number().int().positive(),
+  resets_at: timestampSchema,
+  observed_at: timestampSchema,
+  rate_limit_reached_type: z.string().nullable(),
+  plan_type: z.string().nullable(),
+  account_tokens: nonnegativeIntegerSchema.nullable(),
+  probe_version: z.literal(1),
+});
+const batchControlSchema = z.strictObject({
+  intent: z.enum(["run", "pause", "cancel"]),
+  usage_pause_percent: z.number().int().min(1).max(100),
+  pause_reason: z.enum(["user", "usage_threshold", "usage_unavailable", "quota_limit"]).nullable(),
+  updated_at: timestampSchema,
+  version: nonnegativeIntegerSchema,
+});
+const batchEstimateSchema = z.strictObject({
+  quality: z.enum(["unavailable", "preliminary", "measured"]),
+  basis: z.enum(["none", "current_batch", "historical_compatible"]),
+  sample_size: nonnegativeIntegerSchema,
+  remaining_tasks: nonnegativeIntegerSchema,
+  remaining_tokens: nonnegativeIntegerSchema.nullable(),
+  remaining_duration_seconds: nonnegativeIntegerSchema.nullable(),
+  low_tokens: nonnegativeIntegerSchema.nullable(),
+  high_tokens: nonnegativeIntegerSchema.nullable(),
+  low_duration_seconds: nonnegativeIntegerSchema.nullable(),
+  high_duration_seconds: nonnegativeIntegerSchema.nullable(),
 });
 const batchRecordSchema = z.strictObject({
   batch_id: z.string(),
   request: batchCreateSchema,
   total_tasks: z.number().int().positive(),
-  status: z.enum(["queued", "running", "completed", "cancelled"]),
+  status: z.enum(["queued", "running", "pausing", "paused", "cancelling", "completed", "cancelled"]),
+  control: batchControlSchema,
   created_at: timestampSchema,
   started_at: timestampSchema.nullable(),
   finished_at: timestampSchema.nullable(),
   resolved_powercontext_sha: z.string().regex(/^[0-9a-f]{40}$/).nullable(),
+});
+const batchPreviewSchema = z.strictObject({
+  powercontext_ref: z.union([z.literal("latest"), z.string().regex(/^commit:[0-9a-fA-F]{40}$/)]),
+  benchmark: z.literal("swebench-pro"),
+  task_set: z.literal("swebench-pro-public-v2"),
+  model: z.literal("gpt-5.6-sol"),
+  reasoning_effort: z.literal("medium"),
+  treatment_mode: z.literal("off_on"),
+  total_tasks: z.number().int().positive(),
+  usage_pause_percent: z.number().int().min(1).max(100),
+  usage: usageSnapshotSchema,
+  estimate: batchEstimateSchema,
+  can_start: z.boolean(),
+  block_reason: z.literal("usage_threshold_reached").nullable(),
 });
 const pairCategorySchema = z.enum([
   "off_fail_on_pass",
@@ -329,6 +389,7 @@ const tokenMetricAggregateSchema = z.strictObject({
 });
 const batchReportSchema = z.strictObject({
   batch_id: z.string(),
+  report_revision: nonnegativeIntegerSchema,
   total_tasks: z.number().int().positive(),
   terminal_tasks: nonnegativeIntegerSchema,
   comparable_pairs: nonnegativeIntegerSchema,
@@ -344,6 +405,9 @@ const batchReportSchema = z.strictObject({
     output: tokenMetricAggregateSchema,
     total: tokenMetricAggregateSchema,
   }),
+  control: batchControlSchema,
+  latest_usage: usageSnapshotSchema.nullable(),
+  estimate: batchEstimateSchema,
   revisions: z.record(z.string(), z.string()),
   configuration: z.record(z.string(), z.string()),
 });
@@ -360,6 +424,10 @@ const taskTokenDeltaSchema = z.strictObject({
 });
 const batchTaskItemSchema = z.strictObject({
   task_id: z.string(),
+  attempt_id: z.string().nullable(),
+  attempt_number: z.number().int().positive(),
+  attempt_count: z.number().int().positive(),
+  retryable: z.boolean(),
   instance_id: z.string(),
   repository: z.string(),
   source_index: nonnegativeIntegerSchema,
@@ -370,6 +438,44 @@ const batchTaskItemSchema = z.strictObject({
   tokens: taskTokenDeltaSchema,
   failure_category: z.string().nullable(),
   failure_summary: z.string().nullable(),
+});
+const taskAttemptSchema = z.strictObject({
+  attempt_id: z.string(),
+  task_id: z.string(),
+  attempt_number: z.number().int().positive(),
+  status: taskStatusSchema,
+  phase: taskPhaseSchema.nullable(),
+  created_at: timestampSchema,
+  started_at: timestampSchema.nullable(),
+  finished_at: timestampSchema.nullable(),
+  version: nonnegativeIntegerSchema,
+  failure_category: failureCategorySchema.nullable(),
+  failure_phase: taskPhaseSchema.nullable(),
+  failure_summary: z.string().max(500).nullable(),
+  result: taskResultSchema.nullable(),
+  retryable: z.boolean(),
+});
+const batchControlEventSchema = z.strictObject({
+  sequence: z.number().int().positive(),
+  batch_id: z.string(),
+  event_type: z.enum([
+    "batch_created",
+    "threshold_changed",
+    "pause_requested",
+    "paused",
+    "resume_requested",
+    "resumed",
+    "cancel_requested",
+    "cancelled",
+    "usage_threshold_reached",
+    "usage_unavailable",
+    "quota_limit_reached",
+    "batch_completed",
+    "task_retry_requested",
+  ]),
+  actor: z.enum(["user", "system"]),
+  details: z.record(z.string(), z.union([z.number().int(), z.string(), z.null()])),
+  occurred_at: timestampSchema,
 });
 const batchTaskPageSchema = z.strictObject({
   items: z.array(batchTaskItemSchema),
@@ -461,6 +567,10 @@ function validateBatch(value: unknown): BatchRecord {
   return validateWithSchema(batchRecordSchema, value);
 }
 
+function validateBatchPreview(value: unknown): BatchPreview {
+  return validateWithSchema(batchPreviewSchema, value);
+}
+
 function validateBatchReport(value: unknown): BatchReport {
   return validateWithSchema(batchReportSchema, value);
 }
@@ -479,6 +589,18 @@ function validateContextEvent(value: unknown): ContextEvent {
 
 function validateContextEventPage(value: unknown): ContextEventPage {
   return validateWithSchema(contextEventPageSchema, value);
+}
+
+function validateUsageSnapshot(value: unknown): UsageSnapshot {
+  return validateWithSchema(usageSnapshotSchema, value);
+}
+
+function validateTaskAttempt(value: unknown): TaskAttempt {
+  return validateWithSchema(taskAttemptSchema, value);
+}
+
+function validateBatchControlEvent(value: unknown): BatchControlEvent {
+  return validateWithSchema(batchControlEventSchema, value);
 }
 
 function mediaType(response: Response): string {
@@ -530,6 +652,18 @@ export class EvaluationApi {
     return this.#json(batchPath(batchId), validateBatch, withSignal(signal));
   }
 
+  previewBatch(
+    request: { powercontext_ref: string; usage_pause_percent: number },
+    signal?: AbortSignal,
+  ): Promise<BatchPreview> {
+    return this.#json(apiPath("/batches/preview"), validateBatchPreview, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      ...withSignal(signal),
+    });
+  }
+
   createBatch(batch: BatchCreate, signal?: AbortSignal): Promise<BatchRecord> {
     return this.#json(apiPath("/batches"), validateBatch, {
       method: "POST",
@@ -539,11 +673,86 @@ export class EvaluationApi {
     });
   }
 
+  pauseBatch(batchId: string, signal?: AbortSignal): Promise<BatchRecord> {
+    return this.#json(batchPath(batchId, "/pause"), validateBatch, {
+      method: "POST",
+      ...withSignal(signal),
+    });
+  }
+
+  resumeBatch(batchId: string, signal?: AbortSignal): Promise<BatchRecord> {
+    return this.#json(batchPath(batchId, "/resume"), validateBatch, {
+      method: "POST",
+      ...withSignal(signal),
+    });
+  }
+
   cancelBatch(batchId: string, signal?: AbortSignal): Promise<BatchRecord> {
     return this.#json(batchPath(batchId, "/cancel"), validateBatch, {
       method: "POST",
       ...withSignal(signal),
     });
+  }
+
+  updateBatchThreshold(
+    batchId: string,
+    usagePausePercent: number,
+    expectedVersion: number,
+    signal?: AbortSignal,
+  ): Promise<BatchRecord> {
+    return this.#json(batchPath(batchId, "/controls"), validateBatch, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        usage_pause_percent: usagePausePercent,
+        expected_version: expectedVersion,
+      }),
+      ...withSignal(signal),
+    });
+  }
+
+  getAccountUsage(signal?: AbortSignal): Promise<UsageSnapshot> {
+    return this.#json(apiPath("/account-usage"), validateUsageSnapshot, withSignal(signal));
+  }
+
+  listBatchControlEvents(batchId: string, signal?: AbortSignal): Promise<BatchControlEvent[]> {
+    return this.#json(
+      batchPath(batchId, "/control-events"),
+      (value) => {
+        if (!Array.isArray(value)) throw new ApiError(null, "invalid_response", GENERIC_ERROR_MESSAGE);
+        return value.map(validateBatchControlEvent);
+      },
+      withSignal(signal),
+    );
+  }
+
+  listTaskAttempts(batchId: string, taskId: string, signal?: AbortSignal): Promise<TaskAttempt[]> {
+    return this.#json(
+      batchPath(batchId, `/tasks/${encodeURIComponent(taskId)}/attempts`),
+      (value) => {
+        if (!Array.isArray(value)) throw new ApiError(null, "invalid_response", GENERIC_ERROR_MESSAGE);
+        return value.map(validateTaskAttempt);
+      },
+      withSignal(signal),
+    );
+  }
+
+  retryTask(
+    batchId: string,
+    taskId: string,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<TaskAttempt> {
+    return this.#json(
+      batchPath(batchId, `/tasks/${encodeURIComponent(taskId)}/retry`),
+      validateTaskAttempt,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idempotency_key: idempotencyKey }),
+        ...withSignal(signal),
+      },
+    );
   }
 
   getBatchReport(batchId: string, signal?: AbortSignal): Promise<BatchReport> {

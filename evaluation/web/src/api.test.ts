@@ -14,6 +14,10 @@ const validTask = {
 
 const queuedTask = {
   task_id: "task-1",
+  attempt_id: "task-1.attempt-0001",
+  attempt_number: 1,
+  attempt_count: 1,
+  retryable: false,
   request: validTask,
   status: "queued",
   phase: null,
@@ -53,12 +57,20 @@ describe("EvaluationApi HTTP", () => {
       reasoning_effort: "medium",
       treatment_mode: "off_on",
       idempotency_key: "batch-request-1",
+      usage_pause_percent: 80,
     } as const;
     const batch = {
       batch_id: "batch/1",
       request,
       total_tasks: 731,
       status: "queued",
+      control: {
+        intent: "run",
+        usage_pause_percent: 80,
+        pause_reason: null,
+        updated_at: "2026-07-29T00:00:00Z",
+        version: 0,
+      },
       created_at: "2026-07-29T00:00:00Z",
       started_at: null,
       finished_at: null,
@@ -96,6 +108,10 @@ describe("EvaluationApi HTTP", () => {
     const health = { service: "ok", worker_lease_active: false, queued_tasks: 1, running_tasks: 0 };
     const summary = {
       task_id: "task-1",
+      attempt_id: "task-1.attempt-0001",
+      attempt_number: 1,
+      attempt_count: 1,
+      retryable: false,
       powercontext_ref: "latest",
       instance_id: validTask.instance_id,
       model: "gpt-5.6-sol",

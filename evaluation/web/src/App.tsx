@@ -2,10 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 
 import { EvaluationApi } from "./api";
 import { AppShell } from "./components/AppShell";
+import { BatchLauncher } from "./components/BatchLauncher";
 import { BatchOverview } from "./components/BatchOverview";
 import { BatchTaskReport } from "./components/BatchTaskReport";
 import { ReportIndex } from "./components/ReportIndex";
-import { TaskForm } from "./components/TaskForm";
 import { TaskRunDetail } from "./components/TaskRunDetail";
 
 interface AppProps {
@@ -96,7 +96,7 @@ export function App({ api: injectedApi }: AppProps) {
           description="选择已有批次，或提交一次固定 731 任务的完整 OFF / ON 评测。"
         />
         <div className="batch-home-grid">
-          <TaskForm
+          <BatchLauncher
             api={api}
             onCreated={(batch) => navigate(`/report/${encodeURIComponent(batch.batch_id)}`)}
           />

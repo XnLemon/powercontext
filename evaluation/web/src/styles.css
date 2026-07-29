@@ -777,6 +777,103 @@ td small {
   font-size: 14px;
 }
 
+.launcher-form {
+  grid-template-columns: minmax(0, 1fr) 150px;
+  align-items: end;
+}
+
+.launcher-form .primary-button {
+  grid-column: 1 / -1;
+}
+
+.threshold-input {
+  display: grid;
+  grid-template-columns: 1fr 32px;
+  align-items: center;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+}
+
+.threshold-input:focus-within {
+  outline: 2px solid color-mix(in srgb, var(--green) 24%, transparent);
+  outline-offset: 1px;
+}
+
+.threshold-input input {
+  min-width: 0;
+  border: 0;
+}
+
+.threshold-input span {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.launch-preview {
+  display: grid;
+  gap: 18px;
+  margin-top: 22px;
+  padding: 20px;
+  border: 1px solid var(--green);
+  background: #f7f8f3;
+}
+
+.launch-preview__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.launch-preview__head h3 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.usage-reading {
+  color: var(--green-dark);
+  font-size: 14px;
+}
+
+.preview-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  border-top: 1px solid var(--line);
+}
+
+.preview-facts > div {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 8px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.preview-facts > div:nth-child(odd) {
+  padding-right: 18px;
+}
+
+.preview-facts dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.preview-facts dd {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.usage-blocked {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #bd5f56;
+  color: #9d3d35;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .batch-overview,
 .batch-task-report {
   display: grid;
@@ -1412,6 +1509,17 @@ td small {
   .event-detail {
     position: static;
     max-height: none;
+  }
+}
+
+@media (max-width: 620px) {
+  .launcher-form,
+  .preview-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .preview-facts > div:nth-child(odd) {
+    padding-right: 0;
   }
 }
 

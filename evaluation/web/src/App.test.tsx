@@ -17,7 +17,7 @@ describe("App batch report navigation", () => {
     expect(screen.getAllByRole("navigation")).toHaveLength(1);
     expect(screen.getAllByRole("link")).toHaveLength(3);
     expect(screen.queryByRole("link", { name: /工作台|测试任务|验收报告|单任务详情/ })).not.toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "运行完整评测" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "预览评测" })).toBeVisible();
     expect(await screen.findByText("Worker 工作中")).toBeVisible();
   });
 
@@ -42,7 +42,8 @@ describe("App batch report navigation", () => {
     const api = apiStub({ createBatch: vi.fn().mockResolvedValue(created) });
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "运行完整评测" }));
+    fireEvent.click(await screen.findByRole("button", { name: "预览评测" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认并开始评测" }));
 
     await waitFor(() => expect(window.location.pathname).toBe("/report/batch%2Fnew"));
     expect(await screen.findByRole("heading", { name: "总体报告" })).toBeVisible();

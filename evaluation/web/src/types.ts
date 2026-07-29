@@ -40,6 +40,10 @@ export interface TaskResult {
 
 interface TaskRecordBase {
   task_id: string;
+  attempt_id: string | null;
+  attempt_number: number;
+  attempt_count: number;
+  retryable: boolean;
   request: TaskCreate;
   created_at: string;
   version: number;
@@ -110,6 +114,10 @@ export type TaskRecord =
 
 export interface TaskSummary {
   task_id: string;
+  attempt_id: string | null;
+  attempt_number: number;
+  attempt_count: number;
+  retryable: boolean;
   powercontext_ref: string;
   instance_id: string;
   model: string;
@@ -234,7 +242,54 @@ export interface TaskEventSubscription {
   close(): void;
 }
 
-export type BatchStatus = "queued" | "running" | "completed" | "cancelled";
+export type BatchStatus =
+  | "queued"
+  | "running"
+  | "pausing"
+  | "paused"
+  | "cancelling"
+  | "completed"
+  | "cancelled";
+
+export type BatchControlIntent = "run" | "pause" | "cancel";
+export type BatchPauseReason = "user" | "usage_threshold" | "usage_unavailable" | "quota_limit";
+
+export interface UsageSnapshot {
+  limit_id: "codex";
+  used_percent: number;
+  remaining_percent: number;
+  window_duration_minutes: number;
+  resets_at: string;
+  observed_at: string;
+  rate_limit_reached_type: string | null;
+  plan_type: string | null;
+  account_tokens: number | null;
+  probe_version: 1;
+}
+
+export interface BatchControlState {
+  intent: BatchControlIntent;
+  usage_pause_percent: number;
+  pause_reason: BatchPauseReason | null;
+  updated_at: string;
+  version: number;
+}
+
+export type EstimateQuality = "unavailable" | "preliminary" | "measured";
+export type EstimateBasis = "none" | "current_batch" | "historical_compatible";
+
+export interface BatchEstimate {
+  quality: EstimateQuality;
+  basis: EstimateBasis;
+  sample_size: number;
+  remaining_tasks: number;
+  remaining_tokens: number | null;
+  remaining_duration_seconds: number | null;
+  low_tokens: number | null;
+  high_tokens: number | null;
+  low_duration_seconds: number | null;
+  high_duration_seconds: number | null;
+}
 
 export type PairCategory =
   | "off_fail_on_pass"
@@ -251,6 +306,7 @@ export interface BatchCreate {
   reasoning_effort: "medium";
   treatment_mode: "off_on";
   idempotency_key: string;
+  usage_pause_percent: number;
 }
 
 export interface BatchRecord {
@@ -258,10 +314,26 @@ export interface BatchRecord {
   request: BatchCreate;
   total_tasks: number;
   status: BatchStatus;
+  control: BatchControlState;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
   resolved_powercontext_sha: string | null;
+}
+
+export interface BatchPreview {
+  powercontext_ref: string;
+  benchmark: "swebench-pro";
+  task_set: "swebench-pro-public-v2";
+  model: "gpt-5.6-sol";
+  reasoning_effort: "medium";
+  treatment_mode: "off_on";
+  total_tasks: number;
+  usage_pause_percent: number;
+  usage: UsageSnapshot;
+  estimate: BatchEstimate;
+  can_start: boolean;
+  block_reason: "usage_threshold_reached" | null;
 }
 
 export interface ResolutionAggregate {
@@ -286,6 +358,7 @@ export interface TokenAggregate {
 
 export interface BatchReport {
   batch_id: string;
+  report_revision: number;
   total_tasks: number;
   terminal_tasks: number;
   comparable_pairs: number;
@@ -297,6 +370,9 @@ export interface BatchReport {
   pair_categories: Record<PairCategory, number>;
   task_statuses: Record<TaskStatus, number>;
   tokens: TokenAggregate;
+  control: BatchControlState;
+  latest_usage: UsageSnapshot | null;
+  estimate: BatchEstimate;
   revisions: Record<string, string>;
   configuration: Record<string, string>;
 }
@@ -316,6 +392,10 @@ export interface TaskTokenDelta {
 
 export interface BatchTaskItem {
   task_id: string;
+  attempt_id: string | null;
+  attempt_number: number;
+  attempt_count: number;
+  retryable: boolean;
   instance_id: string;
   repository: string;
   source_index: number;
@@ -326,6 +406,45 @@ export interface BatchTaskItem {
   tokens: TaskTokenDelta;
   failure_category: string | null;
   failure_summary: string | null;
+}
+
+export interface TaskAttempt {
+  attempt_id: string;
+  task_id: string;
+  attempt_number: number;
+  status: TaskStatus;
+  phase: TaskPhase | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  version: number;
+  failure_category: FailureCategory | null;
+  failure_phase: TaskPhase | null;
+  failure_summary: string | null;
+  result: TaskResult | null;
+  retryable: boolean;
+}
+
+export interface BatchControlEvent {
+  sequence: number;
+  batch_id: string;
+  event_type:
+    | "batch_created"
+    | "threshold_changed"
+    | "pause_requested"
+    | "paused"
+    | "resume_requested"
+    | "resumed"
+    | "cancel_requested"
+    | "cancelled"
+    | "usage_threshold_reached"
+    | "usage_unavailable"
+    | "quota_limit_reached"
+    | "batch_completed"
+    | "task_retry_requested";
+  actor: "user" | "system";
+  details: Record<string, number | string | null>;
+  occurred_at: string;
 }
 
 export interface BatchTaskPage {
