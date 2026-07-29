@@ -20,16 +20,24 @@ from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
+from powercontext_eval.benchmarks.swebench_pro.catalog import CatalogError, SweBenchProCatalog
+from powercontext_eval.web.batches import BatchCreate, BatchRecord, PairCategory
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.models import Capabilities, HealthResponse, TaskCreate, TaskRecord, TaskStatus, TaskSummary
 from powercontext_eval.web.reporting import (
+    BenchmarkCatalog,
     InvalidReportArtifact,
     ReportingError,
     UnsafeReportPath,
+    load_batch_report,
+    load_batch_task_detail,
+    load_batch_task_page,
+    load_context_event,
+    load_context_page,
     load_raw_report,
     load_report,
 )
-from powercontext_eval.web.store import TaskConflict, TaskNotFound, TaskStore
+from powercontext_eval.web.store import BatchNotFound, TaskConflict, TaskNotFound, TaskStore
 
 _TERMINAL = {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.INTERRUPTED, TaskStatus.CANCELLED}
 _NO_STORE = {"Cache-Control": "no-store"}
@@ -60,6 +68,10 @@ def _summary_payload(summary: TaskSummary, store: TaskStore) -> dict[str, Any]:
     payload = summary.model_dump(mode="json")
     payload["queue_position"] = store.queue_position(summary.task_id)
     return payload
+
+
+def _batch_payload(record: BatchRecord) -> dict[str, Any]:
+    return record.model_dump(mode="json")
 
 
 class TaskEventStream:
@@ -297,10 +309,23 @@ def _snapshot_frontend(frontend: Path, root: Path) -> _FrontendSnapshot | None:
             os.close(descriptor)
 
 
-def create_app(config: WebConfig, store: TaskStore | None = None) -> FastAPI:
+def create_app(
+    config: WebConfig,
+    store: TaskStore | None = None,
+    *,
+    catalog: BenchmarkCatalog | None = None,
+) -> FastAPI:
     """Create an API application; evaluation execution remains worker-owned."""
     task_store = store or TaskStore(config.database_path, lease_duration=timedelta(seconds=config.lease_seconds))
     task_store.initialize()
+    benchmark_catalog = catalog
+
+    def get_catalog() -> BenchmarkCatalog:
+        nonlocal benchmark_catalog
+        if benchmark_catalog is None:
+            benchmark_catalog = SweBenchProCatalog.load(config.dataset_path)
+        return benchmark_catalog
+
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
@@ -325,6 +350,206 @@ def create_app(config: WebConfig, store: TaskStore | None = None) -> FastAPI:
     @app.get("/api/capabilities")
     def capabilities() -> Capabilities:
         return Capabilities()
+
+    @app.post("/api/batches")
+    def create_batch(request: BatchCreate) -> Response:
+        try:
+            selected_catalog = get_catalog()
+            record, created = task_store.create_batch(
+                request,
+                selected_catalog.instance_ids,
+                now=datetime.now(UTC),
+            )
+        except CatalogError:
+            return _error(503, "benchmark_unavailable", "The pinned benchmark task set is unavailable.")
+        return JSONResponse(
+            status_code=201 if created else 200,
+            content=_batch_payload(record),
+            headers=_NO_STORE,
+        )
+
+    @app.get("/api/batches")
+    def list_batches() -> Response:
+        return JSONResponse(
+            content=[_batch_payload(batch) for batch in task_store.list_batches()],
+            headers=_NO_STORE,
+        )
+
+    @app.get("/api/batches/{batch_id}")
+    def get_batch(batch_id: str) -> Response:
+        try:
+            return JSONResponse(content=_batch_payload(task_store.get_batch(batch_id)), headers=_NO_STORE)
+        except BatchNotFound:
+            return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
+
+    @app.post("/api/batches/{batch_id}/cancel")
+    def cancel_batch(batch_id: str) -> Response:
+        try:
+            record = task_store.cancel_batch_queued(batch_id, now=datetime.now(UTC))
+        except BatchNotFound:
+            return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
+        except TaskConflict:
+            return _error(409, "batch_conflict", "The evaluation batch has no queued tasks to cancel.")
+        return JSONResponse(content=_batch_payload(record), headers=_NO_STORE)
+
+    @app.get("/api/batches/{batch_id}/events")
+    def batch_events(batch_id: str, request: Request) -> Response:
+        try:
+            task_store.get_batch(batch_id)
+        except BatchNotFound:
+            return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
+
+        async def stream() -> AsyncIterator[str]:
+            previous: str | None = None
+            heartbeat_at = time.monotonic() + 15
+            while not await request.is_disconnected():
+                record = await asyncio.to_thread(task_store.get_batch, batch_id)
+                serialized = json.dumps(_batch_payload(record), separators=(",", ":"))
+                if serialized != previous:
+                    yield f"event: batch\ndata: {serialized}\n\n"
+                    previous = serialized
+                    heartbeat_at = time.monotonic() + 15
+                    if record.status.value in {"completed", "cancelled"}:
+                        return
+                elif time.monotonic() >= heartbeat_at:
+                    yield ": heartbeat\n\n"
+                    heartbeat_at = time.monotonic() + 15
+                await asyncio.sleep(config.poll_seconds)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={**_NO_STORE, "X-Accel-Buffering": "no"},
+        )
+
+    def batch_inputs(batch_id: str) -> tuple[BatchRecord, list[TaskRecord]] | JSONResponse:
+        try:
+            batch = task_store.get_batch(batch_id)
+            return batch, task_store.list_batch_tasks(batch_id)
+        except BatchNotFound:
+            return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
+
+    @app.get("/api/batches/{batch_id}/report")
+    def batch_report(batch_id: str) -> Response:
+        selected = batch_inputs(batch_id)
+        if isinstance(selected, JSONResponse):
+            return selected
+        batch, tasks = selected
+        try:
+            report = load_batch_report(
+                batch,
+                tasks,
+                runs_root=config.run_root / "runs",
+                catalog=get_catalog(),
+            )
+        except (CatalogError, ReportingError, OSError, ValueError):
+            return _error(409, "report_unavailable", "The batch report is not available.")
+        return JSONResponse(content=report.model_dump(mode="json"), headers=_NO_STORE)
+
+    @app.get("/api/batches/{batch_id}/tasks")
+    def batch_tasks(
+        batch_id: str,
+        category: PairCategory | None = None,
+        q: Annotated[str | None, Query(max_length=200)] = None,
+        sort: Literal["source", "token_delta_asc", "token_delta_desc"] = "source",
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> Response:
+        selected = batch_inputs(batch_id)
+        if isinstance(selected, JSONResponse):
+            return selected
+        batch, tasks = selected
+        try:
+            page = load_batch_task_page(
+                batch,
+                tasks,
+                runs_root=config.run_root / "runs",
+                catalog=get_catalog(),
+                category=category,
+                query=q,
+                sort=sort,
+                limit=limit,
+                offset=offset,
+            )
+        except (CatalogError, ReportingError, OSError, ValueError):
+            return _error(409, "report_unavailable", "The batch task report is not available.")
+        return JSONResponse(content=page.model_dump(mode="json"), headers=_NO_STORE)
+
+    @app.get("/api/batches/{batch_id}/tasks/{task_id}")
+    def batch_task_detail(batch_id: str, task_id: str) -> Response:
+        try:
+            batch = task_store.get_batch(batch_id)
+            task = task_store.get_batch_task(batch_id, task_id)
+        except BatchNotFound:
+            return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
+        except TaskNotFound:
+            return _error(404, "task_not_found", "The requested evaluation task does not exist.")
+        try:
+            detail = load_batch_task_detail(
+                batch,
+                task,
+                runs_root=config.run_root / "runs",
+                catalog=get_catalog(),
+            )
+        except (CatalogError, ReportingError, OSError, ValueError):
+            return _error(409, "report_unavailable", "The task detail report is not available.")
+        return JSONResponse(content=detail.model_dump(mode="json"), headers=_NO_STORE)
+
+    def context_inputs(batch_id: str, task_id: str) -> tuple[BatchRecord, TaskRecord] | JSONResponse:
+        try:
+            return task_store.get_batch(batch_id), task_store.get_batch_task(batch_id, task_id)
+        except BatchNotFound:
+            return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
+        except TaskNotFound:
+            return _error(404, "task_not_found", "The requested evaluation task does not exist.")
+
+    @app.get("/api/batches/{batch_id}/tasks/{task_id}/context/{arm}")
+    def task_context(
+        batch_id: str,
+        task_id: str,
+        arm: Literal["off", "on"],
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> Response:
+        selected = context_inputs(batch_id, task_id)
+        if isinstance(selected, JSONResponse):
+            return selected
+        batch, task = selected
+        try:
+            page = load_context_page(
+                batch,
+                task,
+                runs_root=config.run_root / "runs",
+                arm=arm,
+                limit=limit,
+                offset=offset,
+            )
+        except (ReportingError, OSError, ValueError):
+            return _error(409, "context_unavailable", "The task context timeline is not available.")
+        return JSONResponse(content=page.model_dump(mode="json"), headers=_NO_STORE)
+
+    @app.get("/api/batches/{batch_id}/tasks/{task_id}/context/{arm}/{sequence}")
+    def task_context_event(
+        batch_id: str,
+        task_id: str,
+        arm: Literal["off", "on"],
+        sequence: int,
+    ) -> Response:
+        selected = context_inputs(batch_id, task_id)
+        if isinstance(selected, JSONResponse):
+            return selected
+        batch, task = selected
+        try:
+            event = load_context_event(
+                batch,
+                task,
+                runs_root=config.run_root / "runs",
+                arm=arm,
+                sequence=sequence,
+            )
+        except (ReportingError, OSError, ValueError):
+            return _error(409, "context_unavailable", "The task context event is not available.")
+        return JSONResponse(content=event.model_dump(mode="json"), headers=_NO_STORE)
 
     @app.post("/api/tasks")
     def create_task(task: TaskCreate) -> Response:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -65,6 +65,136 @@ class BatchRecord(_FrozenModel):
         if value is not None and (value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value)):
             raise ValueError("Timestamps must use UTC")
         return value
+
+
+class ResolutionAggregate(_FrozenModel):
+    resolved: Annotated[int, Field(ge=0)]
+    total: Annotated[int, Field(ge=1)]
+    rate_percent: Annotated[float, Field(ge=0, le=100, allow_inf_nan=False)]
+
+
+class TokenMetricAggregate(_FrozenModel):
+    off: Annotated[int, Field(ge=0)]
+    on: Annotated[int, Field(ge=0)]
+    delta: int
+    off_measured_tasks: Annotated[int, Field(ge=0)]
+    on_measured_tasks: Annotated[int, Field(ge=0)]
+
+
+class TokenAggregate(_FrozenModel):
+    input: TokenMetricAggregate
+    output: TokenMetricAggregate
+    total: TokenMetricAggregate
+
+
+class BatchReportResponse(_FrozenModel):
+    batch_id: str
+    total_tasks: Annotated[int, Field(ge=1)]
+    terminal_tasks: Annotated[int, Field(ge=0)]
+    comparable_pairs: Annotated[int, Field(ge=0)]
+    execution_failures: Annotated[int, Field(ge=0)]
+    cancelled_tasks: Annotated[int, Field(ge=0)]
+    off: ResolutionAggregate
+    on: ResolutionAggregate
+    resolution_rate_delta_points: Annotated[float, Field(allow_inf_nan=False)]
+    pair_categories: dict[PairCategory, Annotated[int, Field(ge=0)]]
+    task_statuses: dict[TaskStatus, Annotated[int, Field(ge=0)]]
+    tokens: TokenAggregate
+    revisions: dict[str, str]
+    configuration: dict[str, str]
+
+
+class TaskArmSummary(_FrozenModel):
+    resolved: bool
+    input_tokens: Annotated[int, Field(ge=0)] | None = None
+    output_tokens: Annotated[int, Field(ge=0)] | None = None
+    total_tokens: Annotated[int, Field(ge=0)] | None = None
+
+
+class TaskTokenDelta(_FrozenModel):
+    off: Annotated[int, Field(ge=0)] | None = None
+    on: Annotated[int, Field(ge=0)] | None = None
+    delta: int | None = None
+
+
+class BatchTaskItem(_FrozenModel):
+    task_id: str
+    instance_id: str
+    repository: str
+    source_index: Annotated[int, Field(ge=0)]
+    status: TaskStatus
+    pair_category: PairCategory | None = None
+    off: TaskArmSummary | None = None
+    on: TaskArmSummary | None = None
+    tokens: TaskTokenDelta
+    failure_category: str | None = None
+    failure_summary: str | None = None
+
+
+class BatchTaskPage(_FrozenModel):
+    items: tuple[BatchTaskItem, ...]
+    total: Annotated[int, Field(ge=0)]
+    limit: Annotated[int, Field(ge=1)]
+    offset: Annotated[int, Field(ge=0)]
+
+
+class OfficialTestGroup(_FrozenModel):
+    passed: Annotated[int, Field(ge=0)]
+    total: Annotated[int, Field(ge=0)]
+    failed: tuple[str, ...]
+
+
+class TaskDetailArm(_FrozenModel):
+    resolved: bool
+    patch_applied: bool | None = None
+    fail_to_pass: OfficialTestGroup
+    pass_to_pass: OfficialTestGroup
+    log_excerpt: str | None = Field(default=None, max_length=4_000)
+    input_tokens: Annotated[int, Field(ge=0)] | None = None
+    output_tokens: Annotated[int, Field(ge=0)] | None = None
+    total_tokens: Annotated[int, Field(ge=0)] | None = None
+
+
+class RequiredTests(_FrozenModel):
+    fail_to_pass: tuple[str, ...]
+    pass_to_pass: tuple[str, ...]
+    selected_test_files_to_run: str
+    test_patch: str
+
+
+class BatchTaskDetailResponse(_FrozenModel):
+    task: BatchTaskItem
+    problem_statement: str
+    required_tests: RequiredTests
+    off: TaskDetailArm | None = None
+    on: TaskDetailArm | None = None
+
+
+class ContextEventResponse(_FrozenModel):
+    sequence: Annotated[int, Field(ge=1)]
+    observed_at: datetime
+    elapsed_ms: Annotated[int, Field(ge=0)]
+    arm: Literal["off", "on"]
+    actor: str
+    event_type: str
+    input: dict[str, Any] | None = None
+    output: dict[str, Any] | None = None
+    source_artifact: str
+    source_sequence: Annotated[int, Field(ge=0)]
+
+    @field_validator("observed_at")
+    @classmethod
+    def context_timestamp_is_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
+            raise ValueError("Context timestamps must use UTC")
+        return value
+
+
+class ContextEventPage(_FrozenModel):
+    items: tuple[ContextEventResponse, ...]
+    total: Annotated[int, Field(ge=0)]
+    limit: Annotated[int, Field(ge=1)]
+    offset: Annotated[int, Field(ge=0)]
 
 
 def derive_batch_status(statuses: tuple[TaskStatus, ...]) -> BatchStatus:

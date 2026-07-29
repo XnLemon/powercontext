@@ -263,6 +263,42 @@ class TaskStore:
             ).fetchall()
             return [self._record(row) for row in rows]
 
+    def get_batch_task(self, batch_id: str, task_id: str) -> TaskRecord:
+        """Return one task only when it belongs to the requested batch."""
+
+        with self._connection() as connection:
+            self._select_batch(connection, batch_id)
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE batch_id = ? AND task_id = ?",
+                (batch_id, task_id),
+            ).fetchone()
+            if row is None:
+                raise TaskNotFound(f"Task not found in batch: {task_id}")
+            return self._record(row)
+
+    def cancel_batch_queued(self, batch_id: str, *, now: datetime) -> BatchRecord:
+        """Cancel every child that has not started, without interrupting a running child."""
+
+        finished_at = _timestamp(now)
+        with self._write() as connection:
+            self._select_batch(connection, batch_id)
+            cursor = connection.execute(
+                """
+                UPDATE tasks
+                SET status = ?, finished_at = ?, version = version + 1
+                WHERE batch_id = ? AND status = ?
+                """,
+                (
+                    TaskStatus.CANCELLED.value,
+                    finished_at,
+                    batch_id,
+                    TaskStatus.QUEUED.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise TaskConflict("Batch has no queued tasks to cancel")
+            return self._batch_record(connection, self._select_batch(connection, batch_id))
+
     def create(self, request: TaskCreate, *, now: datetime) -> tuple[TaskRecord, bool]:
         """Create a queued task, or replay the task for an idempotency key."""
         created_at = _timestamp(now)

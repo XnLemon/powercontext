@@ -5,6 +5,7 @@ import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -13,10 +14,10 @@ from httpx import Response
 from starlette.requests import Request
 
 from powercontext_eval.artifacts import ArmState
-from powercontext_eval.report import ArmReport, MetricSet, ReportBundle
+from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, TestGroupReport
 from powercontext_eval.web.api import TaskEventStream, create_app
 from powercontext_eval.web.config import WebConfig
-from powercontext_eval.web.models import TaskCreate, TaskResult
+from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskCreate, TaskPhase, TaskResult
 from powercontext_eval.web.store import TaskStore
 
 NOW = datetime(2026, 7, 29, 1, 2, 3, tzinfo=UTC)
@@ -780,3 +781,379 @@ def test_frontend_rejects_dist_outside_root_deploy(tmp_path: Path, config: WebCo
     lexical_escape = config.model_copy(update={"frontend_dist": config.root / "deploy" / ".." / "outside-dist"})
     escaped_client = TestClient(create_app(lexical_escape, store))
     assert escaped_client.get("/").status_code == 503
+
+
+class _BatchCatalog:
+    instance_ids = tuple(f"instance_org__repo-{letter}" for letter in "abcde")
+
+    def __init__(self) -> None:
+        self.instances = {
+            instance_id: SimpleNamespace(
+                instance_id=instance_id,
+                repo=f"org/repo-{letter}",
+                problem_statement=f"Fix the complete problem for repository {letter}.",
+                fail_to_pass=(f"test_fix_{letter}",),
+                pass_to_pass=(f"test_regression_{letter}",),
+                test_patch=f"diff --git a/test_{letter}.py b/test_{letter}.py\n",
+                selected_test_files_to_run=json.dumps([f"test_{letter}.py"]),
+            )
+            for letter, instance_id in zip("abcde", self.instance_ids, strict=True)
+        }
+
+    def require(self, instance_id: str) -> object:
+        return self.instances[instance_id]
+
+
+def _batch_payload(key: str = "batch-api-key") -> dict[str, str]:
+    return {
+        "powercontext_ref": "commit:" + "a" * 40,
+        "benchmark": "swebench-pro",
+        "task_set": "swebench-pro-public-v2",
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "medium",
+        "treatment_mode": "off_on",
+        "idempotency_key": key,
+    }
+
+
+def _write_batch_artifacts(
+    config: WebConfig,
+    task_id: str,
+    instance_id: str,
+    *,
+    off_resolved: bool,
+    on_resolved: bool,
+    off_tokens: tuple[int, int],
+    on_tokens: tuple[int, int],
+) -> None:
+    run_dir = config.run_root / "runs" / task_id
+    run_dir.mkdir(parents=True)
+
+    def arm(name: str, resolved: bool, tokens: tuple[int, int]) -> ArmReport:
+        failed = () if resolved else (f"test_fix_{instance_id[-1]}",)
+        return ArmReport(
+            arm=name,
+            state=ArmState.TREATMENT_VALIDATED,
+            resolved=resolved,
+            passed=resolved,
+            treatment_valid=True,
+            patch_applied=True,
+            fail_to_pass=TestGroupReport(
+                passed=1 if resolved else 0,
+                total=1,
+                failed=failed,
+            ),
+            pass_to_pass=TestGroupReport(passed=1, total=1),
+            log_excerpt=None if resolved else "required test failed",
+            metrics=MetricSet(input_tokens=tokens[0], output_tokens=tokens[1]),
+        )
+
+    bundle = ReportBundle(
+        title="SWE-bench Pro evaluation",
+        revisions={
+            "dataset": "7ab5114912baf22bb098818e604c02fe7ad2c11f",
+            "harness": "ca10a60a5fcae51e6948ffe1485d4153d421e6c5",
+            "powercontext": "a" * 40,
+        },
+        configuration={
+            "codex": "0.145.0",
+            "instance": instance_id,
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "medium",
+        },
+        off=arm("off", off_resolved, off_tokens),
+        on=arm("on", on_resolved, on_tokens),
+    )
+    (run_dir / "report.json").write_text(bundle.model_dump_json())
+    for arm_name in ("off", "on"):
+        context = run_dir / "arms" / arm_name / "context"
+        context.mkdir(parents=True)
+        events = [
+            {
+                "sequence": 1,
+                "observed_at": "2026-07-29T08:10:11.100000Z",
+                "elapsed_ms": 0,
+                "arm": arm_name,
+                "actor": "benchmark",
+                "event_type": "benchmark_prompt",
+                "input": {"prompt": f"full prompt for {instance_id}"},
+                "output": None,
+                "source_artifact": "instance.jsonl",
+                "source_sequence": 0,
+            },
+            {
+                "sequence": 2,
+                "observed_at": "2026-07-29T08:10:11.200000Z",
+                "elapsed_ms": 100,
+                "arm": arm_name,
+                "actor": "powercontext" if arm_name == "on" else "codex",
+                "event_type": "powercontext_injection" if arm_name == "on" else "agent_message",
+                "input": {"query": "fix context"} if arm_name == "on" else None,
+                "output": (
+                    {"injected_text": "PowerContext recalled exact context.", "hits": [{"text": "exact context"}]}
+                    if arm_name == "on"
+                    else {"event": {"type": "agent_message", "message": "done"}}
+                ),
+                "source_artifact": (
+                    "context/powercontext-injections.jsonl"
+                    if arm_name == "on"
+                    else "context/codex-observed.jsonl"
+                ),
+                "source_sequence": 1,
+            },
+        ]
+        (context / "timeline.jsonl").write_text(
+            "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events)
+        )
+
+
+def _finish_batch(
+    config: WebConfig,
+    store: TaskStore,
+    batch_id: str,
+) -> list[object]:
+    outcomes = [
+        (False, True, (100, 10), (80, 8)),
+        (True, False, (120, 12), (160, 16)),
+        (True, True, (90, 9), (85, 8)),
+        (False, False, (130, 13), (110, 11)),
+    ]
+    children = store.list_batch_tasks(batch_id)
+    started = datetime.now(UTC) + timedelta(seconds=1)
+    for index, (off_resolved, on_resolved, off_tokens, on_tokens) in enumerate(outcomes):
+        claimed = store.claim_next("batch-worker", now=started + timedelta(seconds=index * 2))
+        assert claimed is not None and claimed.task_id == children[index].task_id
+        _write_batch_artifacts(
+            config,
+            claimed.task_id,
+            claimed.request.instance_id,
+            off_resolved=off_resolved,
+            on_resolved=on_resolved,
+            off_tokens=off_tokens,
+            on_tokens=on_tokens,
+        )
+        run_dir = config.run_root / "runs" / claimed.task_id
+        store.succeed(
+            claimed.task_id,
+            "batch-worker",
+            TaskResult(
+                artifact_dir=str(run_dir.relative_to(config.run_root)),
+                report_path=str((run_dir / "report.json").relative_to(config.run_root)),
+                off_resolved=off_resolved,
+                on_resolved=on_resolved,
+            ),
+            now=started + timedelta(seconds=index * 2 + 1),
+        )
+    failed = store.claim_next("batch-worker", now=started + timedelta(seconds=10))
+    assert failed is not None and failed.task_id == children[4].task_id
+    store.fail(
+        failed.task_id,
+        "batch-worker",
+        SafeFailure(
+            category=FailureCategory.CODEX_EXECUTION,
+            phase=TaskPhase.RUNNING_ON,
+            summary="Codex execution did not complete",
+        ),
+        now=started + timedelta(seconds=11),
+    )
+    store.pin_batch_revision(batch_id, "a" * 40)
+    return children
+
+
+def test_batch_api_creates_replays_lists_gets_and_cancels_the_complete_catalog(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    catalog = _BatchCatalog()
+    client = TestClient(create_app(config, store, catalog=catalog))
+    store.create(TaskCreate.model_validate(payload("legacy-before-batch")), now=NOW)
+
+    created = client.post("/api/batches", json=_batch_payload("batch-create-key"))
+    replay = client.post("/api/batches", json=_batch_payload("batch-create-key"))
+    listed = client.get("/api/batches")
+    detail = client.get(f"/api/batches/{created.json()['batch_id']}")
+
+    assert created.status_code == 201
+    assert replay.status_code == 200
+    assert replay.json()["batch_id"] == created.json()["batch_id"]
+    assert created.json()["total_tasks"] == 5
+    assert [batch["batch_id"] for batch in listed.json()] == [created.json()["batch_id"]]
+    assert detail.json()["status"] == "queued"
+    assert [task.instance_id for task in store.list_batch_tasks(created.json()["batch_id"])] == list(
+        catalog.instance_ids
+    )
+
+    cancelled = client.post(f"/api/batches/{created.json()['batch_id']}/cancel")
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    assert all(task.status.value == "cancelled" for task in store.list_batch_tasks(created.json()["batch_id"]))
+    events = client.get(f"/api/batches/{created.json()['batch_id']}/events")
+    assert events.status_code == 200
+    assert events.text.startswith("event: batch\ndata: ")
+    assert '"status":"cancelled"' in events.text
+    assert client.get("/api/batches/missing").status_code == 404
+
+
+def test_batch_report_reconciles_resolution_pairs_failures_and_total_tokens(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    catalog = _BatchCatalog()
+    client = TestClient(create_app(config, store, catalog=catalog))
+    batch = client.post("/api/batches", json=_batch_payload("batch-report-key")).json()
+    _finish_batch(config, store, batch["batch_id"])
+
+    response = client.get(f"/api/batches/{batch['batch_id']}/report")
+
+    assert response.status_code == 200
+    report = response.json()
+    assert report["total_tasks"] == report["terminal_tasks"] == 5
+    assert report["comparable_pairs"] == 4
+    assert report["execution_failures"] == 1
+    assert report["off"] == {"resolved": 2, "total": 5, "rate_percent": 40.0}
+    assert report["on"] == {"resolved": 2, "total": 5, "rate_percent": 40.0}
+    assert report["resolution_rate_delta_points"] == 0.0
+    assert report["pair_categories"] == {
+        "off_fail_on_pass": 1,
+        "off_pass_on_fail": 1,
+        "both_pass": 1,
+        "both_fail": 1,
+        "execution_failure": 1,
+    }
+    assert report["tokens"]["input"] == {
+        "off": 440,
+        "on": 435,
+        "delta": -5,
+        "off_measured_tasks": 4,
+        "on_measured_tasks": 4,
+    }
+    assert report["tokens"]["output"]["off"] == 44
+    assert report["tokens"]["total"]["on"] == 478
+    assert "acceptance_valid" not in report
+    assert "conclusion" not in report
+    assert "patch_bytes" not in response.text
+    assert "treatment_valid" not in response.text
+    assert "elapsed" not in response.text
+
+
+def test_batch_task_report_filters_searches_sorts_and_drills_into_full_context(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    catalog = _BatchCatalog()
+    client = TestClient(create_app(config, store, catalog=catalog))
+    batch = client.post("/api/batches", json=_batch_payload("batch-detail-key")).json()
+    children = _finish_batch(config, store, batch["batch_id"])
+
+    negative = client.get(
+        f"/api/batches/{batch['batch_id']}/tasks",
+        params={"category": "off_pass_on_fail"},
+    )
+    searched = client.get(
+        f"/api/batches/{batch['batch_id']}/tasks",
+        params={"q": "repo-c"},
+    )
+    sorted_page = client.get(
+        f"/api/batches/{batch['batch_id']}/tasks",
+        params={"sort": "token_delta_desc", "limit": 2},
+    )
+
+    assert negative.status_code == 200
+    assert negative.json()["total"] == 1
+    assert negative.json()["items"][0]["instance_id"] == catalog.instance_ids[1]
+    assert negative.json()["items"][0]["off"]["resolved"] is True
+    assert negative.json()["items"][0]["on"]["resolved"] is False
+    assert negative.json()["items"][0]["tokens"]["delta"] == 44
+    assert searched.json()["items"][0]["repository"] == "org/repo-c"
+    assert [item["instance_id"] for item in sorted_page.json()["items"]] == [
+        catalog.instance_ids[1],
+        catalog.instance_ids[2],
+    ]
+
+    task_id = children[1].task_id
+    detail = client.get(f"/api/batches/{batch['batch_id']}/tasks/{task_id}")
+    timeline = client.get(
+        f"/api/batches/{batch['batch_id']}/tasks/{task_id}/context/on",
+        params={"limit": 1, "offset": 1},
+    )
+    event = client.get(f"/api/batches/{batch['batch_id']}/tasks/{task_id}/context/on/2")
+
+    assert detail.status_code == 200
+    assert detail.json()["problem_statement"] == "Fix the complete problem for repository b."
+    assert detail.json()["required_tests"] == {
+        "fail_to_pass": ["test_fix_b"],
+        "pass_to_pass": ["test_regression_b"],
+        "selected_test_files_to_run": '["test_b.py"]',
+        "test_patch": "diff --git a/test_b.py b/test_b.py\n",
+    }
+    assert detail.json()["off"]["resolved"] is True
+    assert detail.json()["on"]["resolved"] is False
+    assert detail.json()["on"]["fail_to_pass"]["failed"] == ["test_fix_b"]
+    assert timeline.json()["total"] == 2
+    assert timeline.json()["items"][0]["sequence"] == 2
+    assert timeline.json()["items"][0]["output"]["injected_text"] == "PowerContext recalled exact context."
+    assert event.json() == timeline.json()["items"][0]
+    assert client.get(f"/api/batches/{batch['batch_id']}/tasks/missing").status_code == 404
+
+
+@pytest.mark.parametrize("corruption", ["malformed", "secret-shaped", "symlink", "oversized"])
+def test_batch_context_api_rejects_unsafe_or_unbounded_timeline_artifacts(
+    config: WebConfig,
+    store: TaskStore,
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    catalog = _BatchCatalog()
+    client = TestClient(create_app(config, store, catalog=catalog))
+    batch = client.post("/api/batches", json=_batch_payload(f"batch-context-{corruption}")).json()
+    children = _finish_batch(config, store, batch["batch_id"])
+    task = children[0]
+    timeline = config.run_root / "runs" / task.task_id / "arms" / "on" / "context" / "timeline.jsonl"
+    if corruption == "malformed":
+        timeline.write_text("{\n")
+    elif corruption == "secret-shaped":
+        event = json.loads(timeline.read_text().splitlines()[0])
+        event["output"] = {"authorization": SECRET}
+        timeline.write_text(json.dumps(event) + "\n")
+    elif corruption == "symlink":
+        outside = tmp_path / "outside-timeline.jsonl"
+        outside.write_text(timeline.read_text())
+        timeline.unlink()
+        timeline.symlink_to(outside)
+    else:
+        with timeline.open("wb") as stream:
+            stream.truncate(64 * 1024 * 1024 + 1)
+
+    response = client.get(f"/api/batches/{batch['batch_id']}/tasks/{task.task_id}/context/on")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "context_unavailable"
+    assert SECRET not in response.text
+
+
+@pytest.mark.parametrize("corruption", ["symlink", "oversized"])
+def test_batch_report_rejects_unsafe_report_artifacts(
+    config: WebConfig,
+    store: TaskStore,
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    catalog = _BatchCatalog()
+    client = TestClient(create_app(config, store, catalog=catalog))
+    batch = client.post("/api/batches", json=_batch_payload(f"batch-report-{corruption}")).json()
+    children = _finish_batch(config, store, batch["batch_id"])
+    report = config.run_root / "runs" / children[0].task_id / "report.json"
+    if corruption == "symlink":
+        outside = tmp_path / "outside-report.json"
+        outside.write_text(report.read_text())
+        report.unlink()
+        report.symlink_to(outside)
+    else:
+        with report.open("wb") as stream:
+            stream.truncate(1024 * 1024 + 1)
+
+    response = client.get(f"/api/batches/{batch['batch_id']}/report")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "report_unavailable"
