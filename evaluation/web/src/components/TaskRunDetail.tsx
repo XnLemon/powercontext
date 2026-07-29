@@ -1,0 +1,185 @@
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
+
+import type { EvaluationApi } from "../api";
+import type { BatchRecord, BatchTaskDetail, TaskDetailArm } from "../types";
+import { ContextTimeline } from "./ContextTimeline";
+
+interface TaskRunDetailProps {
+  api: EvaluationApi;
+  batchId: string;
+  taskId: string;
+  search: string;
+  navigate(path: string): void;
+}
+
+function number(value: number): string {
+  return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRunDetailProps) {
+  const [batch, setBatch] = useState<BatchRecord | null>(null);
+  const [detail, setDetail] = useState<BatchTaskDetail | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [error, setError] = useState(false);
+  const generation = useRef(0);
+  const controller = useRef<AbortController | null>(null);
+
+  const load = useCallback(() => {
+    controller.current?.abort();
+    const nextController = new AbortController();
+    controller.current = nextController;
+    const currentGeneration = ++generation.current;
+    setError(false);
+    Promise.all([
+      api.getBatch(batchId, nextController.signal),
+      api.getBatchTask(batchId, taskId, nextController.signal),
+    ])
+      .then(([nextBatch, nextDetail]) => {
+        if (nextController.signal.aborted || currentGeneration !== generation.current) return;
+        setBatch(nextBatch);
+        setDetail(nextDetail);
+      })
+      .catch(() => {
+        if (!nextController.signal.aborted && currentGeneration === generation.current) setError(true);
+      });
+  }, [api, batchId, taskId]);
+
+  useEffect(() => {
+    setExpanded(false);
+    load();
+    return () => {
+      controller.current?.abort();
+      generation.current += 1;
+    };
+  }, [load]);
+
+  const listPath = `/report/${encodeURIComponent(batchId)}/tasks${search}`;
+  const onBack = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    navigate(listPath);
+  };
+
+  if (error) {
+    return (
+      <section className="panel empty-state">
+        <p>单任务数据暂时无法加载。</p>
+        <button type="button" className="secondary-button" onClick={load}>重试</button>
+      </section>
+    );
+  }
+  if (batch === null || detail === null) {
+    return <section className="panel state-message">正在读取单任务数据…</section>;
+  }
+
+  const task = detail.task;
+  const offTokens = task.tokens.off;
+  const onTokens = task.tokens.on;
+  const delta = task.tokens.delta;
+  const problemPreview = detail.problem_statement.length > 360
+    ? `${detail.problem_statement.slice(0, 360)}…`
+    : detail.problem_statement;
+
+  return (
+    <div className="task-run-detail">
+      <div className="breadcrumb">
+        <a href={listPath} onClick={onBack} aria-label="返回任务详细报告">任务详细报告</a> / 单任务详情
+      </div>
+      <header className="report-page-head">
+        <div>
+          <h1>单任务详情</h1>
+          <p className="task-instance">{task.instance_id}</p>
+          <p>{task.repository}</p>
+        </div>
+        <div className="task-result-summary" aria-label="任务对比汇总">
+          <span className={task.off?.resolved ? "resolution--pass" : "resolution--fail"}>
+            OFF {task.off?.resolved ? "通过" : "未通过"}
+          </span>
+          <span className={task.on?.resolved ? "resolution--pass" : "resolution--fail"}>
+            ON {task.on?.resolved ? "通过" : "未通过"}
+          </span>
+          {offTokens !== null && <span>OFF {number(offTokens)}</span>}
+          {onTokens !== null && <span>ON {number(onTokens)}</span>}
+          {delta !== null && <span>差值 {delta > 0 ? "+" : ""}{number(delta)}</span>}
+        </div>
+      </header>
+
+      <section className="task-config" aria-label="固定评测配置">
+        <span>批次 {batch.batch_id}</span>
+        <span>PowerContext {(batch.resolved_powercontext_sha ?? batch.request.powercontext_ref).slice(0, 12)}</span>
+        <span>{batch.request.model}</span>
+        <span>{batch.request.reasoning_effort}</span>
+        <span>{batch.request.task_set}</span>
+      </section>
+
+      <section className="report-section task-problem">
+        <div className="section-heading">
+          <div>
+            <h2>原始任务</h2>
+            <p>来自固定 SWE-bench Pro 数据集。</p>
+          </div>
+          {detail.problem_statement.length > 360 && (
+            <button type="button" className="secondary-button" onClick={() => setExpanded((value) => !value)}>
+              {expanded ? "收起完整任务描述" : "展开完整任务描述"}
+            </button>
+          )}
+        </div>
+        <pre>{expanded ? detail.problem_statement : problemPreview}</pre>
+      </section>
+
+      <section className="report-section">
+        <div className="section-heading">
+          <div>
+            <h2>官方评测结果</h2>
+            <p>由固定 SWE-bench Pro evaluator 应用补丁并运行目标测试。</p>
+          </div>
+        </div>
+        {detail.off === null || detail.on === null ? (
+          <div className="failure-box">
+            <strong>评测执行失败</strong>
+            {task.failure_summary && <p>{task.failure_summary}</p>}
+          </div>
+        ) : (
+          <div className="official-grid">
+            <OfficialArm label="OFF" arm={detail.off} />
+            <OfficialArm label="ON" arm={detail.on} />
+          </div>
+        )}
+        <details className="required-tests">
+          <summary>查看官方测试输入</summary>
+          <h3>FAIL_TO_PASS</h3>
+          <pre>{detail.required_tests.fail_to_pass.join("\n")}</pre>
+          <h3>PASS_TO_PASS</h3>
+          <pre>{detail.required_tests.pass_to_pass.join("\n")}</pre>
+          <h3>选定测试文件</h3>
+          <pre>{detail.required_tests.selected_test_files_to_run}</pre>
+          <h3>测试补丁</h3>
+          <pre>{detail.required_tests.test_patch}</pre>
+        </details>
+      </section>
+
+      <ContextTimeline api={api} batchId={batchId} taskId={taskId} />
+    </div>
+  );
+}
+
+function OfficialArm({ label, arm }: { label: "OFF" | "ON"; arm: TaskDetailArm }) {
+  return (
+    <article className="official-arm" aria-label={`${label} 官方评测`}>
+      <header>
+        <h3>{label}</h3>
+        <strong className={arm.resolved ? "resolution--pass" : "resolution--fail"}>
+          {arm.resolved ? "已解决" : "未解决"}
+        </strong>
+      </header>
+      <div className="official-facts">
+        {arm.patch_applied !== null && <p>{arm.patch_applied ? "补丁应用成功" : "补丁应用失败"}</p>}
+        <p>FAIL_TO_PASS {arm.fail_to_pass.passed} / {arm.fail_to_pass.total}</p>
+        <p>PASS_TO_PASS {arm.pass_to_pass.passed} / {arm.pass_to_pass.total}</p>
+      </div>
+      {arm.fail_to_pass.failed.length > 0 && <p>失败测试：{arm.fail_to_pass.failed.join("、")}</p>}
+      {arm.pass_to_pass.failed.length > 0 && <p>回归失败：{arm.pass_to_pass.failed.join("、")}</p>}
+      {arm.log_excerpt !== null && <pre className="evaluator-log">{arm.log_excerpt}</pre>}
+    </article>
+  );
+}

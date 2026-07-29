@@ -6,6 +6,7 @@ import { BatchOverview } from "./components/BatchOverview";
 import { BatchTaskReport } from "./components/BatchTaskReport";
 import { ReportIndex } from "./components/ReportIndex";
 import { TaskForm } from "./components/TaskForm";
+import { TaskRunDetail } from "./components/TaskRunDetail";
 
 interface AppProps {
   api?: EvaluationApi;
@@ -65,8 +66,13 @@ export function App({ api: injectedApi }: AppProps) {
   if (route.page === "task" && route.batchId !== null && route.taskId !== null) {
     content = (
       <div className="page">
-        <PageHeader eyebrow="任务详细报告" title="单任务详情" />
-        <section className="panel state-message">正在读取任务 {route.taskId}…</section>
+        <TaskRunDetail
+          api={api}
+          batchId={route.batchId}
+          taskId={route.taskId}
+          search={search}
+          navigate={navigate}
+        />
       </div>
     );
   } else if (route.page === "tasks" && route.batchId !== null) {
