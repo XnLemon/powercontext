@@ -437,19 +437,22 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
     evidence_command = next(command for command in transcript if "evidence" in command)
     assert "eval:run-1:on" in evidence_command
     assert any("pc_sources" in part for part in evidence_command)
-    chown_index = next(index for index, command in enumerate(transcript) if "/bin/chown" in command)
     prewarm_index = next(
         index
         for index, command in enumerate(transcript)
         if command[-8:] == ("sync", "--frozen", "--project", "/source", "--extra", "server", "--extra", "cli")
     )
-    chown = transcript[chown_index]
-    assert chown_index < prewarm_index
-    assert "--network" in chown and chown[chown.index("--network") + 1] == "none"
-    assert ("--cap-drop", "ALL", "--cap-add", "CHOWN") == chown[
-        chown.index("--cap-drop") : chown.index("--cap-drop") + 4
-    ]
-    assert chown[-4:] == ("--recursive", "2950:100", "/workspace", "/runtime")
+    chown_entries = [(index, command) for index, command in enumerate(transcript) if "/bin/chown" in command]
+    if chown_entries:
+        chown_index, chown = chown_entries[0]
+        assert chown_index < prewarm_index
+        assert "--network" in chown and chown[chown.index("--network") + 1] == "none"
+        assert ("--cap-drop", "ALL", "--cap-add", "CHOWN") == chown[
+            chown.index("--cap-drop") : chown.index("--cap-drop") + 4
+        ]
+        assert chown[-4:] == ("--recursive", "2950:100", "/workspace", "/runtime")
+    else:
+        assert all((path.stat().st_uid, path.stat().st_gid) == (2950, 100) for path in (paths.workspace, paths.runtime))
 
 
 def test_sut_uses_timestamp_recorder_and_retains_private_context_traces(tmp_path: Path) -> None:

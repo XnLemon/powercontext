@@ -248,12 +248,13 @@ The output must be exactly the count `731` followed by the pinned SHA-256 above.
 
 To validate preview and the task-boundary control contract without accidentally launching Codex:
 
-1. keep `powercontext-eval-worker.service` stopped;
-2. verify `POST /api/batches/preview` reports exactly 731 tasks and creates no queue rows;
-3. run pause, resume, cancel, and retry checks only against the deterministic fixture or an already-cancelled
+1. verify the database and `/api/health` both report zero queued and zero running real tasks;
+2. start Web and Worker so Worker can persist a fresh account-usage snapshot; with an empty queue this starts no
+   benchmark work;
+3. verify `POST /api/batches/preview` reports exactly 731 tasks and creates no batch or queue rows;
+4. run pause, resume, cancel, and retry checks only against the deterministic fixture or an already-cancelled
    validation batch;
-4. verify the control-event order, attempt retention, and zero running real children;
-5. restart the worker only when no real batch is queued.
+5. verify the control-event order, attempt retention, and zero running real children.
 
 This preview and deterministic control check is a deployment check, not authorization to run the real benchmark.
 
