@@ -8,6 +8,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from re import fullmatch
 from typing import Any, Literal, TypedDict
 
 from powercontext_eval.paths import EvaluationPaths
@@ -225,6 +226,23 @@ class TaskStore:
         """Return one batch with lifecycle state derived from its children."""
 
         with self._connection() as connection:
+            return self._batch_record(connection, self._select_batch(connection, batch_id))
+
+    def pin_batch_revision(self, batch_id: str, sha: str) -> BatchRecord:
+        """Persist the one immutable PowerContext revision shared by all children."""
+
+        if fullmatch(r"[0-9a-f]{40}", sha) is None:
+            raise ValueError("Pinned PowerContext SHA must be 40 lowercase hexadecimal characters")
+        with self._write() as connection:
+            row = self._select_batch(connection, batch_id)
+            existing = row["resolved_powercontext_sha"]
+            if existing is not None and existing != sha:
+                raise TaskConflict("Batch is already pinned to a different PowerContext revision")
+            if existing is None:
+                connection.execute(
+                    "UPDATE batches SET resolved_powercontext_sha = ? WHERE batch_id = ?",
+                    (sha, batch_id),
+                )
             return self._batch_record(connection, self._select_batch(connection, batch_id))
 
     def list_batches(self) -> list[BatchRecord]:

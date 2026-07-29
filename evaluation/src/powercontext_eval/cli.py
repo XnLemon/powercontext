@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from powercontext_eval.benchmarks.swebench_pro.catalog import SweBenchProCatalog
 from powercontext_eval.powercontext_sut import run_codex_contract_smoke
-from powercontext_eval.runner import RunConfig, run_minimal_swebench_pro, run_swebench_pro_instance
+from powercontext_eval.runner import RunConfig, run_swebench_pro_instance
 
 if TYPE_CHECKING:
     from powercontext_eval.web.config import WebConfig
@@ -87,7 +87,7 @@ def worker(root_path: Annotated[Path | None, typer.Option("--root")] = None) -> 
     config = _web_config(root_path)
     store = TaskStore(config.database_path, lease_duration=timedelta(seconds=config.lease_seconds))
     store.initialize()
-    service = EvaluationWorker(config, store, runner=run_minimal_swebench_pro)
+    service = EvaluationWorker(config, store)
     with _worker_signal_handlers(service):
         service.run_forever()
 

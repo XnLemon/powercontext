@@ -53,8 +53,8 @@ def test_worker_initializes_store_and_runs_with_configured_poll(monkeypatch, tmp
             calls.append(("initialize",))
 
     class FakeWorker:
-        def __init__(self, config: object, store: object, *, runner: object) -> None:
-            calls.append(("worker", config, store, runner))
+        def __init__(self, config: object, store: object) -> None:
+            calls.append(("worker", config, store))
 
         def run_forever(self) -> None:
             calls.append(("run_forever",))
@@ -76,7 +76,6 @@ def test_worker_initializes_store_and_runs_with_configured_poll(monkeypatch, tmp
     assert calls[1] == ("initialize",)
     assert calls[2][0] == "worker"
     assert isinstance(calls[2][1], WebConfig)
-    assert getattr(calls[2][3], "__name__", None) == "run_minimal_swebench_pro"
     assert ("run_forever",) in calls
     assert calls[2][1].poll_seconds == 2.5
     assert ("stop",) not in calls

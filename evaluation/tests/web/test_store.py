@@ -167,6 +167,22 @@ def test_create_batch_rejects_duplicate_instance_ids(store: TaskStore) -> None:
         )
 
 
+def test_batch_revision_pin_is_idempotent_and_rejects_conflict(store: TaskStore) -> None:
+    batch = store.create_batch(
+        batch_request("batch-pin"),
+        ("instance_owner__repo-a",),
+        now=NOW,
+    )[0]
+
+    pinned = store.pin_batch_revision(batch.batch_id, "a" * 40)
+    replay = store.pin_batch_revision(batch.batch_id, "a" * 40)
+
+    assert pinned.resolved_powercontext_sha == "a" * 40
+    assert replay == pinned
+    with pytest.raises(TaskConflict, match="different"):
+        store.pin_batch_revision(batch.batch_id, "b" * 40)
+
+
 def test_create_replays_idempotency_key_without_reordering(store: TaskStore) -> None:
     original, original_created = store.create(request("same-key"), now=NOW)
     later, _ = store.create(request("later-key"), now=NOW + timedelta(seconds=1))

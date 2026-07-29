@@ -4,6 +4,7 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from powercontext_eval.codex import CodexInfrastructureError
 from powercontext_eval.errors import GitSourceError
 from powercontext_eval.powercontext_sut import InvalidTreatment, UnsafeSutConfiguration
 from powercontext_eval.runner import MinimalRunResult, RunPhase
+from powercontext_eval.web.batches import BatchCreate, BatchStatus
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.models import FailureCategory, TaskCreate, TaskPhase, TaskStatus
 from powercontext_eval.web.store import TaskStore
@@ -59,6 +61,220 @@ def _create(store: TaskStore, *, key: str = "worker-test", now: datetime = NOW) 
         ),
         now=now,
     )[0]
+
+
+def _create_batch(
+    store: TaskStore,
+    *,
+    key: str = "batch-worker-test",
+    instance_ids: tuple[str, ...] = ("instance_owner__repo-a", "instance_owner__repo-b"),
+) -> Any:
+    return store.create_batch(
+        BatchCreate(
+            powercontext_ref="latest",
+            benchmark="swebench-pro",
+            task_set="swebench-pro-public-v2",
+            model="gpt-5.6-sol",
+            reasoning_effort="medium",
+            treatment_mode="off_on",
+            idempotency_key=key,
+        ),
+        instance_ids,
+        now=NOW,
+    )[0]
+
+
+class FakeCatalog:
+    def __init__(self, instance_ids: tuple[str, ...]) -> None:
+        self.instances = {instance_id: object() for instance_id in instance_ids}
+
+    def require(self, instance_id: str) -> object:
+        return self.instances[instance_id]
+
+
+class FakeSource:
+    def __init__(self, sha: str = "c" * 40) -> None:
+        self.sha = sha
+        self.resolve_calls: list[tuple[object, object]] = []
+
+    def resolve(self, source: object, requested: object) -> object:
+        self.resolve_calls.append((source, requested))
+        return SimpleNamespace(sha=self.sha)
+
+
+def _successful_batch_runner(
+    config: WebConfig,
+    calls: list[tuple[object, object]],
+) -> Any:
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        calls.append((run_config, instance))
+        run_dir = config.run_root / "runs" / run_config.run_id
+        run_dir.mkdir(parents=True)
+        report_path = run_dir / "report.md"
+        report_path.write_text("safe")
+        return MinimalRunResult(run_config.run_id, report_path, True, False)
+
+    return runner
+
+
+def test_latest_is_pinned_once_and_every_child_uses_catalog_instance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    instance_ids = ("instance_owner__repo-a", "instance_owner__repo-b")
+    batch = _create_batch(store, instance_ids=instance_ids)
+    source = FakeSource()
+    catalog = FakeCatalog(instance_ids)
+    calls: list[tuple[object, object]] = []
+    monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
+    worker = EvaluationWorker(
+        config,
+        store,
+        runner=_successful_batch_runner(config, calls),
+        source=source,
+        catalog=catalog,
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is True
+    assert worker.run_once() is True
+
+    assert len(source.resolve_calls) == 1
+    assert [call[0].powercontext_ref for call in calls] == ["commit:" + source.sha, "commit:" + source.sha]
+    assert [call[1] for call in calls] == [catalog.instances[instance_id] for instance_id in instance_ids]
+    persisted = store.get_batch(batch.batch_id)
+    assert persisted.resolved_powercontext_sha == source.sha
+    assert persisted.status is BatchStatus.COMPLETED
+
+
+def test_only_one_child_runs_physically_across_multiple_batches(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    first_batch = _create_batch(
+        store,
+        key="batch-global-first",
+        instance_ids=("instance_owner__repo-a",),
+    )
+    _create_batch(
+        store,
+        key="batch-global-second",
+        instance_ids=("instance_owner__repo-b",),
+    )
+    catalog = FakeCatalog(("instance_owner__repo-a", "instance_owner__repo-b"))
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        calls.append(run_config.run_id)
+        entered.set()
+        release.wait(timeout=2)
+        raise RuntimeError("stop")
+
+    first = EvaluationWorker(
+        config,
+        store,
+        runner=runner,
+        source=FakeSource(),
+        catalog=catalog,
+        worker_id="first",
+    )
+    second = EvaluationWorker(
+        config,
+        store,
+        runner=runner,
+        source=FakeSource(),
+        catalog=catalog,
+        worker_id="second",
+    )
+    thread = threading.Thread(target=first.run_once)
+    thread.start()
+    assert entered.wait(timeout=2)
+
+    assert second.run_once() is False
+
+    release.set()
+    thread.join(timeout=2)
+    assert calls == [store.list_batch_tasks(first_batch.batch_id)[0].task_id]
+
+
+def test_failed_batch_child_does_not_prevent_later_child(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    instance_ids = ("instance_owner__repo-a", "instance_owner__repo-b")
+    batch = _create_batch(store, instance_ids=instance_ids)
+    catalog = FakeCatalog(instance_ids)
+    calls: list[str] = []
+
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        calls.append(run_config.run_id)
+        if len(calls) == 1:
+            raise CodexInfrastructureError("first child failed")
+        run_dir = config.run_root / "runs" / run_config.run_id
+        run_dir.mkdir(parents=True)
+        report = run_dir / "report.md"
+        report.write_text("safe")
+        return MinimalRunResult(run_config.run_id, report, True, True)
+
+    monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
+    worker = EvaluationWorker(
+        config,
+        store,
+        runner=runner,
+        source=FakeSource(),
+        catalog=catalog,
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is True
+    assert worker.run_once() is True
+
+    children = store.list_batch_tasks(batch.batch_id)
+    assert [child.status for child in children] == [TaskStatus.FAILED, TaskStatus.SUCCEEDED]
+    assert store.get_batch(batch.batch_id).status is BatchStatus.COMPLETED
+
+
+def test_restart_reuses_persisted_batch_sha_and_completed_children(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    instance_ids = ("instance_owner__repo-a", "instance_owner__repo-b")
+    batch = _create_batch(store, instance_ids=instance_ids)
+    catalog = FakeCatalog(instance_ids)
+    calls: list[tuple[object, object]] = []
+    monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
+    first_source = FakeSource()
+    first = EvaluationWorker(
+        config,
+        store,
+        runner=_successful_batch_runner(config, calls),
+        source=first_source,
+        catalog=catalog,
+        clock=lambda: NOW,
+    )
+    assert first.run_once() is True
+
+    class UnexpectedSource(FakeSource):
+        def resolve(self, source: object, requested: object) -> object:
+            pytest.fail("persisted batch SHA should avoid resolving latest after restart")
+
+    restarted = EvaluationWorker(
+        config,
+        store,
+        runner=_successful_batch_runner(config, calls),
+        source=UnexpectedSource(),
+        catalog=catalog,
+        clock=lambda: NOW,
+    )
+    assert restarted.run_once() is True
+
+    children = store.list_batch_tasks(batch.batch_id)
+    assert [child.status for child in children] == [TaskStatus.SUCCEEDED, TaskStatus.SUCCEEDED]
+    assert len(first_source.resolve_calls) == 1
 
 
 def test_run_once_without_work_returns_false(tmp_path: Path) -> None:

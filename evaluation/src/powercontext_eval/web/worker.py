@@ -15,19 +15,25 @@ from uuid import uuid4
 
 from powercontext_eval.artifacts import ArtifactError
 from powercontext_eval.benchmarks.base import GoldCheckFailed
-from powercontext_eval.benchmarks.swebench_pro.adapter import DatasetSchemaError
+from powercontext_eval.benchmarks.swebench_pro.adapter import DatasetSchemaError, SweBenchProInstance
+from powercontext_eval.benchmarks.swebench_pro.catalog import CatalogError, SweBenchProCatalog
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialResultError
 from powercontext_eval.benchmarks.swebench_pro.prediction import BinaryPatchError
 from powercontext_eval.codex import CodexInfrastructureError, UnsafeCodexInvocation
 from powercontext_eval.errors import CommandError, GitSourceError, PowerContextEvalError
+from powercontext_eval.git_source import GitSource
+from powercontext_eval.models import PowerContextRef
 from powercontext_eval.paths import EvaluationPaths
 from powercontext_eval.powercontext_sut import InvalidTreatment, UnsafeSutConfiguration
+from powercontext_eval.process import ProcessRunner
 from powercontext_eval.report import InvalidReportBundle
 from powercontext_eval.runner import (
     MinimalRunConfig,
     MinimalRunResult,
+    RunConfig,
     RunPhase,
     run_minimal_swebench_pro,
+    run_swebench_pro_instance,
 )
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskPhase, TaskRecord, TaskResult
@@ -48,6 +54,14 @@ ThreadFactory = Callable[..., ThreadLike]
 Runner = Callable[..., MinimalRunResult]
 
 
+class SourceResolver(Protocol):
+    def resolve(self, source: str | Path, requested: PowerContextRef) -> object: ...
+
+
+class Catalog(Protocol):
+    def require(self, instance_id: str) -> SweBenchProInstance: ...
+
+
 class EvaluationWorker:
     """Claim and execute at most one queued evaluation at a time."""
 
@@ -56,7 +70,9 @@ class EvaluationWorker:
         config: WebConfig,
         store: TaskStore,
         *,
-        runner: Runner = run_minimal_swebench_pro,
+        runner: Runner | None = None,
+        source: SourceResolver | None = None,
+        catalog: Catalog | None = None,
         worker_id: str | None = None,
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] | None = None,
@@ -64,7 +80,13 @@ class EvaluationWorker:
     ) -> None:
         self._config = config
         self._store = store
-        self._runner = runner
+        self._batch_runner: Runner = runner or run_swebench_pro_instance
+        self._legacy_runner: Runner = runner or run_minimal_swebench_pro
+        self._source = source or GitSource(
+            cache_root=config.run_root / "cache" / "powercontext-git",
+            runner=ProcessRunner(),
+        )
+        self._catalog = catalog
         self._worker_id = worker_id or f"worker-{uuid4().hex}"
         self._clock = clock or (lambda: datetime.now(UTC))
         self._stop = threading.Event()
@@ -125,7 +147,7 @@ class EvaluationWorker:
                     return
                 phase = mapped
 
-            result = self._runner(self._run_config(task), on_phase=on_phase)
+            result = self._invoke_runner(task, on_phase)
             if ownership_lost.is_set():
                 return True
             task_result = self._validated_result(task, result)
@@ -147,7 +169,39 @@ class EvaluationWorker:
             if not self.run_once():
                 self._sleep(self._config.poll_seconds)
 
-    def _run_config(self, task: TaskRecord) -> MinimalRunConfig:
+    def _invoke_runner(self, task: TaskRecord, on_phase: Callable[[RunPhase], None]) -> MinimalRunResult:
+        if task.batch_id is None:
+            return self._legacy_runner(self._legacy_run_config(task), on_phase=on_phase)
+        if task.instance_id is None:
+            raise DatasetSchemaError("Batch child is missing an instance ID")
+        catalog = self._catalog
+        if catalog is None:
+            catalog = SweBenchProCatalog.load(self._config.dataset_path)
+            self._catalog = catalog
+        return self._batch_runner(
+            self._batch_run_config(task),
+            instance=catalog.require(task.instance_id),
+            on_phase=on_phase,
+        )
+
+    def _batch_run_config(self, task: TaskRecord) -> RunConfig:
+        if task.batch_id is None:
+            raise ValueError("Batch run configuration requires a batch child")
+        powercontext_ref = self._pinned_batch_ref(task.batch_id)
+        return RunConfig(
+            root=self._config.run_root,
+            powercontext_source=self._config.powercontext_source,
+            powercontext_ref=powercontext_ref,
+            harness_root=self._config.harness_root,
+            harness_python=self._config.harness_python,
+            codex_binary=self._config.codex_binary,
+            uv_binary=self._config.uv_binary,
+            auth_json=self._config.auth_json,
+            proxy_url=self._config.proxy_url,
+            run_id=task.task_id,
+        )
+
+    def _legacy_run_config(self, task: TaskRecord) -> MinimalRunConfig:
         return MinimalRunConfig(
             root=self._config.run_root,
             powercontext_source=self._config.powercontext_source,
@@ -161,6 +215,26 @@ class EvaluationWorker:
             proxy_url=self._config.proxy_url,
             run_id=task.task_id,
         )
+
+    def _pinned_batch_ref(self, batch_id: str) -> str:
+        batch = self._store.get_batch(batch_id)
+        if batch.resolved_powercontext_sha is not None:
+            return f"commit:{batch.resolved_powercontext_sha}"
+        requested = PowerContextRef.parse(batch.request.powercontext_ref)
+        if requested.kind == "commit":
+            assert requested.value is not None
+            sha = requested.value.lower()
+        else:
+            resolved = self._source.resolve(self._config.powercontext_source, requested)
+            sha = getattr(resolved, "sha", None)
+            if not isinstance(sha, str):
+                raise GitSourceError("PowerContext source resolver returned no immutable SHA")
+        try:
+            pinned = self._store.pin_batch_revision(batch_id, sha)
+        except TaskConflict as error:
+            raise GitSourceError("PowerContext batch revision conflicted with its persisted pin") from error
+        assert pinned.resolved_powercontext_sha is not None
+        return f"commit:{pinned.resolved_powercontext_sha}"
 
     def _heartbeat(
         self,
@@ -249,7 +323,7 @@ def _safe_failure(error: Exception, phase: TaskPhase | None) -> SafeFailure:
     fixed: tuple[FailureCategory, str]
     if isinstance(error, GitSourceError):
         fixed = FailureCategory.SOURCE_RESOLUTION, "PowerContext source resolution failed."
-    elif isinstance(error, (DatasetSchemaError, UnsafeSutConfiguration)):
+    elif isinstance(error, (CatalogError, DatasetSchemaError, UnsafeSutConfiguration)):
         fixed = FailureCategory.ENVIRONMENT_PREPARATION, "Evaluation environment preparation failed."
     elif isinstance(error, GoldCheckFailed):
         fixed = FailureCategory.GOLD_VALIDATION, "Gold patch validation failed."
