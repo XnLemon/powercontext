@@ -27,4 +27,12 @@ default_id = json.loads(Path(args.raw_sample_path).read_text().splitlines()[0]).
 )
 payload = json.loads(os.environ.get("FAKE_EVAL_RESULT", json.dumps({default_id: True})))
 (output_dir / "eval_results.json").write_text(json.dumps(payload))
+if "FAKE_EVAL_OUTPUT" in os.environ:
+    prediction = json.loads(Path(args.patch_path).read_text())[0]
+    instance_dir = output_dir / prediction["instance_id"]
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    prefix = prediction["prefix"]
+    (instance_dir / f"{prefix}_output.json").write_text(os.environ["FAKE_EVAL_OUTPUT"])
+    (instance_dir / f"{prefix}_stdout.log").write_text(os.environ.get("FAKE_EVAL_STDOUT", ""))
+    (instance_dir / f"{prefix}_stderr.log").write_text(os.environ.get("FAKE_EVAL_STDERR", ""))
 print("FAKE OFFICIAL EVALUATOR")

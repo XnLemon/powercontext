@@ -6,9 +6,9 @@ import math
 import re
 import unicodedata
 from collections.abc import Mapping
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import PydanticSerializationError
 
 from powercontext_eval.artifacts import ArmState
@@ -25,6 +25,32 @@ class MetricSet(BaseModel):
     elapsed_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
 
+class TestGroupReport(BaseModel):
+    """Serializable official result for one required test group."""
+
+    __test__ = False
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    passed: int = Field(ge=0)
+    total: int = Field(ge=0)
+    failed: tuple[str, ...] = ()
+
+    @field_validator("failed", mode="before")
+    @classmethod
+    def parse_serialized_failed_names(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> Self:
+        if self.passed > self.total or len(self.failed) != self.total - self.passed:
+            raise ValueError("Official test group counts do not match failed names")
+        if any(not name for name in self.failed) or len(set(self.failed)) != len(self.failed):
+            raise ValueError("Official failed test names must be non-blank and unique")
+        return self
+
+
 class ArmReport(BaseModel):
     """Audited report input for one fixed treatment arm."""
 
@@ -35,6 +61,10 @@ class ArmReport(BaseModel):
     resolved: bool
     passed: bool | None
     treatment_valid: bool
+    patch_applied: bool | None = None
+    fail_to_pass: TestGroupReport = Field(default_factory=lambda: TestGroupReport(passed=0, total=0))
+    pass_to_pass: TestGroupReport = Field(default_factory=lambda: TestGroupReport(passed=0, total=0))
+    log_excerpt: str | None = Field(default=None, max_length=4_000)
     metrics: MetricSet = Field(default_factory=MetricSet)
     failure_status: str | None = None
     invalid_reason: str | None = None
@@ -153,6 +183,11 @@ def _arm_section(label: str, arm: ArmReport) -> list[str]:
         "| Field | Value |",
         "| --- | --- |",
         f"| Resolution status | {_status(arm.resolved, 'RESOLVED', 'UNRESOLVED')} |",
+        f"| Patch applied | {_status(arm.patch_applied, 'YES', 'NO')} |",
+        f"| FAIL_TO_PASS | {arm.fail_to_pass.passed} / {arm.fail_to_pass.total} |",
+        f"| PASS_TO_PASS | {arm.pass_to_pass.passed} / {arm.pass_to_pass.total} |",
+        f"| Failed official tests | {_cell(', '.join((*arm.fail_to_pass.failed, *arm.pass_to_pass.failed)) or None)} |",
+        f"| Official log excerpt | {_cell(arm.log_excerpt)} |",
         f"| Lifecycle state | {_cell(arm.state.value)} |",
         f"| Pass status | {_status(arm.passed, 'PASS', 'FAIL')} |",
         f"| Treatment validity | {_status(arm.treatment_valid, 'VALID', 'INVALID')} |",
@@ -217,6 +252,9 @@ def _validated_bundle(bundle: ReportBundle) -> ReportBundle:
                 raise ValueError
             if type(model.metrics) is not MetricSet or set(model.metrics.__dict__) != set(MetricSet.model_fields):
                 raise ValueError
+            for group in (model.fail_to_pass, model.pass_to_pass):
+                if type(group) is not TestGroupReport or set(group.__dict__) != set(TestGroupReport.model_fields):
+                    raise ValueError
         serialized = bundle.model_dump(mode="python", round_trip=True, warnings="none")
         return ReportBundle.model_validate(serialized, strict=True)
     except (AttributeError, PydanticSerializationError, TypeError, ValueError):

@@ -110,6 +110,8 @@ def _run_with_fakes(
                 return SimpleNamespace(stdout="pulled")
             if argv[:3] == ("docker", "image", "inspect"):
                 return SimpleNamespace(stdout=IMAGE_ID + "\n")
+            if argv[:2] == ("docker", "run"):
+                return SimpleNamespace(stdout="", returncode=0)
             assert argv == ("git", "diff", "--binary", "--full-index", instance.base_commit, "--")
             return SimpleNamespace(stdout="candidate patch")
 
@@ -180,11 +182,17 @@ def test_runner_uses_arbitrary_instance_prompt_image_and_base_commit(
     assert isinstance(calls, list)
     assert calls[0][0] == ("docker", "pull", instance.task_image)
     assert calls[1][0] == ("docker", "image", "inspect", "--format={{.Id}}", instance.task_image)
+    patch_checks = [call for call in calls if call[0][:2] == ("docker", "run")]
+    assert len(patch_checks) == 3
+    assert patch_checks[0][1]["input_bytes"] == instance.patch.encode()
+    evaluator_calls = observed["evaluator_calls"]
+    assert isinstance(evaluator_calls, list)
+    assert [call["patch_applied"] for call in evaluator_calls] == [True, True, True]
+    assert {call["required_fail_to_pass"] for call in evaluator_calls} == {instance.fail_to_pass}
+    assert {call["required_pass_to_pass"] for call in evaluator_calls} == {instance.pass_to_pass}
     assert [call[0] for call in calls].count(
         ("git", "diff", "--binary", "--full-index", instance.base_commit, "--")
     ) == 2
-    evaluator_calls = observed["evaluator_calls"]
-    assert isinstance(evaluator_calls, list)
     assert len(evaluator_calls) == 3
     assert {call["instance_id"] for call in evaluator_calls} == {instance.instance_id}
 

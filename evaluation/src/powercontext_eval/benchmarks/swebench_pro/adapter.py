@@ -114,7 +114,7 @@ class SweBenchProInstance:
         return cls(
             repo=_nonblank(raw["repo"], "repo"),
             instance_id=instance_id,
-            base_commit=_nonblank(raw["base_commit"], "base_commit"),
+            base_commit=_commit(raw["base_commit"]),
             patch=str(raw["patch"]),
             test_patch=str(raw["test_patch"]),
             problem_statement=_nonblank(raw["problem_statement"], "problem_statement"),
@@ -145,7 +145,7 @@ class SweBenchProInstance:
         return cls(
             repo=_nonblank(values["repo"], "repo"),
             instance_id=_nonblank(values["instance_id"], "instance_id"),
-            base_commit=_nonblank(values["base_commit"], "base_commit"),
+            base_commit=_commit(values["base_commit"]),
             patch=values["patch"],
             test_patch=values["test_patch"],
             problem_statement=_nonblank(values["problem_statement"], "problem_statement"),
@@ -192,6 +192,13 @@ def _nonblank(value: object, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise DatasetSchemaError(f"Dataset row field {field} must be a non-blank string")
     return value
+
+
+def _commit(value: object) -> str:
+    commit = _nonblank(value, "base_commit")
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise DatasetSchemaError("Dataset row field base_commit must be a lowercase 40-character Git SHA")
+    return commit
 
 
 def _test_names(value: object, field: str) -> tuple[str, ...]:

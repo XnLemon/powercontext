@@ -32,7 +32,7 @@ from powercontext_eval.powercontext_sut import (
     auth_secret_variants,
 )
 from powercontext_eval.process import ProcessRunner
-from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, render_report
+from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, TestGroupReport, render_report
 
 # Compatibility identifier for the legacy single-task web contract. The generic runner never consults it.
 INSTANCE_ID = "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"
@@ -127,6 +127,13 @@ def run_swebench_pro_instance(
         "gold/predictions.json",
         encode_predictions(instance.instance_id, instance.patch, "gold"),
     )
+    gold_patch_applied = _patch_applies(
+        process,
+        task_image_id=task_image_id,
+        base_commit=instance.base_commit,
+        patch=instance.patch,
+        cwd=layout.run_artifacts,
+    )
     emit_phase(RunPhase.VALIDATING_GOLD)
     gold = evaluator.evaluate(
         harness_root=config.harness_root,
@@ -134,6 +141,9 @@ def run_swebench_pro_instance(
         prediction_path=gold_prediction,
         output_dir=layout.run_artifacts / "gold" / "official",
         instance_id=instance.instance_id,
+        required_fail_to_pass=instance.fail_to_pass,
+        required_pass_to_pass=instance.pass_to_pass,
+        patch_applied=gold_patch_applied,
     )
 
     def arms() -> tuple[OfficialEvaluation, OfficialEvaluation, Mapping[Arm, SutOutcome], dict[Arm, int]]:
@@ -183,12 +193,22 @@ def run_swebench_pro_instance(
                 "prediction.json",
                 encode_predictions(instance.instance_id, patch, "codex-0.145.0"),
             )
+            patch_applied = _patch_applies(
+                process,
+                task_image_id=task_image_id,
+                base_commit=instance.base_commit,
+                patch=patch,
+                cwd=layout.run_artifacts,
+            )
             official[arm] = evaluator.evaluate(
                 harness_root=config.harness_root,
                 raw_sample_path=raw_copy,
                 prediction_path=prediction,
                 output_dir=layout.arm_artifacts(arm) / "official",
                 instance_id=instance.instance_id,
+                required_fail_to_pass=instance.fail_to_pass,
+                required_pass_to_pass=instance.pass_to_pass,
+                patch_applied=patch_applied,
             )
         return official[Arm.OFF], official[Arm.ON], outcomes, patch_sizes
 
@@ -284,6 +304,42 @@ def _resolve_task_image(process: ProcessRunner, task_image: str, *, cwd: Path) -
     return image_id
 
 
+def _patch_applies(
+    process: ProcessRunner,
+    *,
+    task_image_id: str,
+    base_commit: str,
+    patch: str,
+    cwd: Path,
+) -> bool:
+    command = (
+        f"set -e; cd /app; git reset --hard {base_commit} >/dev/null; "
+        f"git checkout --detach {base_commit} >/dev/null; git apply --check -"
+    )
+    result = process.run(
+        (
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--platform",
+            "linux/amd64",
+            "-i",
+            "--entrypoint",
+            "/bin/bash",
+            task_image_id,
+            "-c",
+            command,
+        ),
+        cwd=cwd,
+        timeout=300,
+        check=False,
+        input_bytes=patch.encode(),
+    )
+    return result.returncode == 0
+
+
 def _read_one_jsonl(path: Path) -> dict[str, object]:
     lines = path.read_text().splitlines()
     if len(lines) != 1:
@@ -302,6 +358,18 @@ def _arm_report(arm: Arm, evaluation: OfficialEvaluation, outcome: SutOutcome, p
         resolved=evaluation.resolved,
         passed=evaluation.resolved,
         treatment_valid=True,
+        patch_applied=evaluation.patch_applied,
+        fail_to_pass=TestGroupReport(
+            passed=evaluation.fail_to_pass.passed,
+            total=evaluation.fail_to_pass.total,
+            failed=evaluation.fail_to_pass.failed,
+        ),
+        pass_to_pass=TestGroupReport(
+            passed=evaluation.pass_to_pass.passed,
+            total=evaluation.pass_to_pass.total,
+            failed=evaluation.pass_to_pass.failed,
+        ),
+        log_excerpt=evaluation.log_excerpt,
         metrics=MetricSet(
             patch_bytes=patch_bytes,
             input_tokens=None if usage is None else usage.get("input_tokens"),

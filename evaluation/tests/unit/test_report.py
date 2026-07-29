@@ -6,7 +6,14 @@ import pytest
 from pydantic import ValidationError
 
 from powercontext_eval.artifacts import ArmState
-from powercontext_eval.report import ArmReport, InvalidReportBundle, MetricSet, ReportBundle, render_report
+from powercontext_eval.report import (
+    ArmReport,
+    InvalidReportBundle,
+    MetricSet,
+    ReportBundle,
+    TestGroupReport,
+    render_report,
+)
 
 
 def _valid_bundle() -> ReportBundle:
@@ -43,6 +50,29 @@ def test_report_is_deterministic_and_orders_off_before_on() -> None:
     assert "Pass status | PASS" in first
     assert "## Comparison" in first
     assert "Pass delta | +1" in first
+
+
+def test_report_retains_official_patch_and_test_group_details() -> None:
+    base = _valid_bundle()
+    off = base.off.model_copy(
+        update={
+            "patch_applied": True,
+            "fail_to_pass": TestGroupReport(passed=0, total=1, failed=("TestLoad",)),
+            "pass_to_pass": TestGroupReport(passed=12, total=12, failed=()),
+            "log_excerpt": "TestLoad failed",
+        }
+    )
+    bundle = base.model_copy(update={"off": off})
+
+    parsed = ReportBundle.model_validate_json(bundle.model_dump_json(), strict=True)
+    report = render_report(parsed)
+
+    assert parsed.off.patch_applied is True
+    assert parsed.off.fail_to_pass.failed == ("TestLoad",)
+    assert "Patch applied | YES" in report
+    assert "FAIL_TO_PASS | 0 / 1" in report
+    assert "PASS_TO_PASS | 12 / 12" in report
+    assert "TestLoad failed" in report
 
 
 def test_mapping_insertion_order_does_not_change_report() -> None:

@@ -16,6 +16,7 @@ from powercontext_eval.benchmarks.swebench_pro.adapter import (
 from powercontext_eval.benchmarks.swebench_pro.evaluator import (
     OfficialEvaluator,
     OfficialResultError,
+    TestGroupResult,
 )
 from powercontext_eval.benchmarks.swebench_pro.prediction import BinaryPatchError, encode_predictions
 from powercontext_eval.process import ProcessRunner
@@ -158,6 +159,91 @@ def test_official_evaluator_uses_exact_cli_and_retains_raw_output(tmp_path: Path
         "redo": True,
         "block_network": True,
     }
+
+
+def test_official_evaluator_retains_required_test_details_and_bounded_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    fake = Path(__file__).parent / "fixtures" / "fake_evaluator.py"
+    (harness / "swe_bench_pro_eval.py").write_bytes(fake.read_bytes())
+    (harness / "run_scripts").mkdir()
+    raw_path = tmp_path / "instance.jsonl"
+    raw_path.write_text(json.dumps(raw_instance(), separators=(",", ":")) + "\n")
+    prediction_path = tmp_path / "predictions.json"
+    prediction_path.write_text(encode_predictions(INSTANCE_ID, "diff --git a/a b/a\n", "codex-0.145.0"))
+    output_dir = tmp_path / "output"
+    monkeypatch.setenv("FAKE_EVAL_RESULT", json.dumps({INSTANCE_ID: False}))
+    monkeypatch.setenv(
+        "FAKE_EVAL_OUTPUT",
+        json.dumps(
+            {
+                "tests": [
+                    {"name": "TestLoad", "status": "FAILED"},
+                    {"name": "TestRegression", "status": "PASSED"},
+                    {"name": "UnscoredExtra", "status": "FAILED"},
+                ]
+            }
+        ),
+    )
+    monkeypatch.setenv("FAKE_EVAL_STDERR", "failure detail\n" + "x" * 10_000)
+
+    result = OfficialEvaluator(ProcessRunner(), python_executable=sys.executable).evaluate(
+        harness_root=harness,
+        raw_sample_path=raw_path,
+        prediction_path=prediction_path,
+        output_dir=output_dir,
+        instance_id=INSTANCE_ID,
+        required_fail_to_pass=("TestLoad",),
+        required_pass_to_pass=("TestRegression",),
+        patch_applied=True,
+    )
+
+    assert result.resolved is False
+    assert result.patch_applied is True
+    assert result.fail_to_pass == TestGroupResult(passed=0, total=1, failed=("TestLoad",))
+    assert result.pass_to_pass == TestGroupResult(passed=1, total=1, failed=())
+    assert result.log_excerpt is not None
+    assert "failure detail" in result.log_excerpt
+    assert len(result.log_excerpt) <= 4_000
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        {"tests": [{"name": "TestLoad", "status": "PASSED"}, {"name": "TestLoad", "status": "FAILED"}]},
+        {"tests": [{"name": "TestLoad", "status": "UNKNOWN"}]},
+        {"not_tests": []},
+    ],
+)
+def test_official_evaluator_rejects_ambiguous_test_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output: dict[str, object],
+) -> None:
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    fake = Path(__file__).parent / "fixtures" / "fake_evaluator.py"
+    (harness / "swe_bench_pro_eval.py").write_bytes(fake.read_bytes())
+    (harness / "run_scripts").mkdir()
+    raw_path = tmp_path / "instance.jsonl"
+    raw_path.write_text(json.dumps(raw_instance()) + "\n")
+    prediction_path = tmp_path / "predictions.json"
+    prediction_path.write_text(encode_predictions(INSTANCE_ID, "diff --git a/a b/a\n", "codex-0.145.0"))
+    monkeypatch.setenv("FAKE_EVAL_OUTPUT", json.dumps(output))
+
+    with pytest.raises(OfficialResultError):
+        OfficialEvaluator(ProcessRunner(), python_executable=sys.executable).evaluate(
+            harness_root=harness,
+            raw_sample_path=raw_path,
+            prediction_path=prediction_path,
+            output_dir=tmp_path / "output",
+            instance_id=INSTANCE_ID,
+            required_fail_to_pass=("TestLoad",),
+            required_pass_to_pass=(),
+            patch_applied=True,
+        )
 
 
 @pytest.mark.parametrize(
