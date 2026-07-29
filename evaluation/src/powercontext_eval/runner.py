@@ -20,6 +20,7 @@ from powercontext_eval.benchmarks.swebench_pro.adapter import (
 )
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluation, OfficialEvaluator
 from powercontext_eval.benchmarks.swebench_pro.prediction import encode_predictions
+from powercontext_eval.context_trace import write_context_trace
 from powercontext_eval.git_source import GitSource
 from powercontext_eval.models import Arm, PowerContextRef
 from powercontext_eval.paths import EvaluationPaths
@@ -210,6 +211,17 @@ def run_swebench_pro_instance(
                 required_pass_to_pass=instance.pass_to_pass,
                 patch_applied=patch_applied,
             )
+            write_context_trace(
+                stores[arm],
+                arm=arm,
+                prompt=prompt,
+                codex_sidecar=stores[arm].root / "context/codex-observed.jsonl",
+                injection_sidecar=_optional_artifact(
+                    stores[arm].root / "context/powercontext-injections.jsonl"
+                ),
+                official=official[arm],
+                official_observed_at=datetime.now(UTC),
+            )
         return official[Arm.OFF], official[Arm.ON], outcomes, patch_sizes
 
     off_eval, on_eval, outcomes, patch_sizes = run_after_gold(
@@ -348,6 +360,14 @@ def _read_one_jsonl(path: Path) -> dict[str, object]:
     if not isinstance(value, dict):
         raise TypeError("Pinned raw sample must be a JSON object")
     return value
+
+
+def _optional_artifact(path: Path) -> Path | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    return path
 
 
 def _arm_report(arm: Arm, evaluation: OfficialEvaluation, outcome: SutOutcome, patch_bytes: int) -> ArmReport:

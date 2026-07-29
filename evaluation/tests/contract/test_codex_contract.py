@@ -68,6 +68,26 @@ def test_codex_argv_differs_only_by_plugin_switch() -> None:
     assert differences == [("--disable", "--enable")]
 
 
+def test_timestamp_recorder_wraps_but_does_not_change_the_codex_command() -> None:
+    base = CodexInvocation(arm=Arm.ON, inside_disposable_container=True).argv()
+    wrapped = CodexInvocation(
+        arm=Arm.ON,
+        inside_disposable_container=True,
+        recorder_python="/runtime/pc-env/bin/python",
+        recorder_script="/source/evaluation/scripts/record_codex_jsonl.py",
+        recorder_sidecar="/runtime/pc-home/codex-observed.jsonl",
+    ).argv()
+
+    assert wrapped[:5] == (
+        "/runtime/pc-env/bin/python",
+        "/source/evaluation/scripts/record_codex_jsonl.py",
+        "--sidecar",
+        "/runtime/pc-home/codex-observed.jsonl",
+        "--",
+    )
+    assert wrapped[5:] == base
+
+
 def test_dangerous_codex_invocation_is_rejected_outside_container() -> None:
     with pytest.raises(UnsafeCodexInvocation):
         CodexInvocation(arm=Arm.OFF, inside_disposable_container=False).argv()
@@ -256,7 +276,7 @@ class TranscriptDocker:
         self.fail_at = fail_at
 
     def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-        del kwargs
+        cwd = Path(cast(str | Path, kwargs.get("cwd", "/workspace")))
         self.commands.append(argv)
         if self.fail_at and self.fail_at in argv:
             raise CommandFailed("injected", command_result("", returncode=70))
@@ -288,10 +308,29 @@ class TranscriptDocker:
             scope = argv[argv.index("evidence") - 1]
             return command_result(json.dumps({"prompt_sources": 0 if scope.endswith(":off") else 1}))
         if any(part.endswith("/codex") or part == "codex" for part in argv) and "exec" in argv:
-            return command_result(
+            result = command_result(
                 '{"type":"agent_message","message":"done"}\n'
                 '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
             )
+            if "/evaluation/record_codex_jsonl.py" in argv:
+                pc_home = cwd.parent / "runtime" / "pc-home"
+                pc_home.mkdir(parents=True, exist_ok=True)
+                events = [json.loads(line) for line in result.stdout.splitlines()]
+                pc_home.joinpath("codex-observed.jsonl").write_text(
+                    "".join(
+                        json.dumps(
+                            {
+                                "sequence": sequence,
+                                "observed_at": f"2026-07-29T08:10:11.{sequence:06d}Z",
+                                "event": event,
+                            },
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                        for sequence, event in enumerate(events, start=1)
+                    )
+                )
+            return result
         return command_result("")
 
 
@@ -360,7 +399,15 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
     assert all(
         any(
             allowed in mount
-            for allowed in ("/workspace", "/runtime", "/source", "/tools/codex-dir", "/tools/uv-dir", "/auth")
+            for allowed in (
+                "/workspace",
+                "/runtime",
+                "/source",
+                "/evaluation",
+                "/tools/codex-dir",
+                "/tools/uv-dir",
+                "/auth",
+            )
         )
         for mount in mounts
     )
@@ -403,6 +450,52 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
         chown.index("--cap-drop") : chown.index("--cap-drop") + 4
     ]
     assert chown[-4:] == ("--recursive", "2950:100", "/workspace", "/runtime")
+
+
+def test_sut_uses_timestamp_recorder_and_retains_private_context_traces(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class TraceDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            result = super().run(argv, **kwargs)
+            if "/evaluation/record_codex_jsonl.py" in argv:
+                paths.pc_home.joinpath("codex-observed.jsonl").write_text(
+                    '{"sequence":1,"observed_at":"2026-07-29T08:10:11.100000Z",'
+                    '"event":{"type":"agent_message","message":"done"}}\n'
+                    '{"sequence":2,"observed_at":"2026-07-29T08:10:11.200000Z",'
+                    '"event":{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}}\n'
+                )
+                paths.pc_home.joinpath("evaluation-injections.jsonl").write_text(
+                    '{"event_type":"powercontext_injection",'
+                    '"observed_at":"2026-07-29T08:10:11.150000Z",'
+                    '"query":"prompt","injected_text":"PowerContext recalled one fact.",'
+                    '"hits":[{"text":"one fact"}],"scope_id":"eval:run-1:on"}\n'
+                )
+            return result
+
+    docker = TraceDocker()
+
+    DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config,
+        Arm.ON,
+        paths,
+        b"prompt",
+        ArtifactStore(paths.result_root),
+    )
+
+    codex_command = next(
+        command for command in docker.commands if "/evaluation/record_codex_jsonl.py" in command
+    )
+    assert "/runtime/pc-env/bin/python" in codex_command
+    assert "/runtime/pc-home/codex-observed.jsonl" in codex_command
+    assert "POWERCONTEXT_EVAL_TRACE_PATH=/runtime/pc-home/evaluation-injections.jsonl" in codex_command
+    assert (paths.result_root / "context/codex-observed.jsonl").read_text().startswith('{"sequence":1')
+    assert (paths.result_root / "context/powercontext-injections.jsonl").read_text().startswith(
+        '{"event_type":"powercontext_injection"'
+    )
 
 
 def test_pair_reuses_one_relay_and_network_and_runs_off_then_on(tmp_path: Path) -> None:

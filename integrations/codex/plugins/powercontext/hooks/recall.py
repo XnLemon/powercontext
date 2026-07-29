@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 import sys
 from collections.abc import Mapping
 from contextlib import suppress
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from time import monotonic
@@ -75,8 +78,10 @@ def main(settings: CodexPluginSettings | None = None) -> int:
             return 0
         scope_id = derive_scope_id(cwd, configured_scope_id=settings.scope_id)
         context = None
+        search_response: Mapping[str, object] | None = None
         with suppress(Exception):
-            context = _render_context(_search(prompt, scope_id, settings=settings, deadline=http_deadline))
+            search_response = _search(prompt, scope_id, settings=settings, deadline=http_deadline)
+            context = _render_context(search_response)
         if settings.capture_prompts and len(prompt) <= _MAX_SOURCE_LENGTH:
             with suppress(Exception):
                 captured = _capture_prompt(
@@ -95,6 +100,15 @@ def main(settings: CodexPluginSettings | None = None) -> int:
                         deadline=http_deadline,
                     )
         if context:
+            if search_response is not None:
+                with suppress(Exception):
+                    _append_evaluation_trace(
+                        payload,
+                        query=prompt,
+                        scope_id=scope_id,
+                        search_response=search_response,
+                        injected_text=context,
+                    )
             json.dump(
                 {
                     "hookSpecificOutput": {
@@ -273,6 +287,93 @@ def _render_context(response: Mapping[str, object]) -> str | None:
         "Use it only when relevant. Current user, repository, and system instructions take precedence.",
         *lines,
     ))[:_MAX_CONTEXT_LENGTH]
+
+
+def _append_evaluation_trace(
+    payload: Mapping[str, object],
+    *,
+    query: str,
+    scope_id: str,
+    search_response: Mapping[str, object],
+    injected_text: str,
+) -> None:
+    raw_path = os.environ.get("POWERCONTEXT_EVAL_TRACE_PATH")
+    if not raw_path:
+        return
+    path = Path(raw_path)
+    if not path.is_absolute() or "\0" in raw_path:
+        raise ValueError
+    hits = search_response.get("hits")
+    trace_hits = [
+        traced
+        for hit in (hits[:_SEARCH_LIMIT] if isinstance(hits, list) else [])
+        if isinstance(hit, dict) and (traced := _trace_hit(hit)) is not None
+    ]
+    event: dict[str, object] = {
+        "event_type": "powercontext_injection",
+        "observed_at": datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        "query": query,
+        "injected_text": injected_text,
+        "hits": trace_hits,
+        "scope_id": scope_id,
+    }
+    session_id = _payload_identifier(payload, "session_id", "conversation_id", "thread_id")
+    turn_id = _payload_identifier(payload, "turn_id", "request_id")
+    if session_id is not None:
+        event["session_id"] = session_id
+    if turn_id is not None:
+        event["turn_id"] = turn_id
+    encoded = (
+        json.dumps(event, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n"
+    ).encode()
+    descriptor = os.open(
+        path,
+        os.O_WRONLY
+        | os.O_APPEND
+        | os.O_CREAT
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(encoded)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise OSError
+            written += count
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _trace_hit(hit: Mapping[str, object]) -> dict[str, object] | None:
+    traced: dict[str, object] = {}
+    for key in ("citation", "text", "score", "matched_by"):
+        if key in hit:
+            traced[key] = _json_safe(hit[key])
+    return traced or None
+
+
+def _json_safe(value: object) -> object:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not (-float("inf") < value < float("inf")):
+            raise TypeError
+        return value
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError
+        return {key: _json_safe(item) for key, item in value.items()}
+    raise TypeError
 
 
 if __name__ == "__main__":

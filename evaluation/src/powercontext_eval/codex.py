@@ -36,6 +36,9 @@ class CodexInvocation:
     model: str = "gpt-5.6-sol"
     reasoning_effort: str = "medium"
     expected_version: str = EXPECTED_CODEX_VERSION
+    recorder_python: str | None = None
+    recorder_script: str | None = None
+    recorder_sidecar: str | None = None
 
     def argv(self) -> tuple[str, ...]:
         """Build the exact invocation, failing closed on host use."""
@@ -49,7 +52,7 @@ class CodexInvocation:
         if not self.reasoning_effort or "\0" in self.reasoning_effort:
             raise UnsafeCodexInvocation("Codex reasoning effort is unsafe")
         switch = "--enable" if self.arm is Arm.ON else "--disable"
-        return (
+        codex_argv = (
             self.executable,
             "exec",
             "--ephemeral",
@@ -68,6 +71,24 @@ class CodexInvocation:
             "-C",
             "/workspace",
             "-",
+        )
+        recorder_python = self.recorder_python
+        recorder_script = self.recorder_script
+        recorder_sidecar = self.recorder_sidecar
+        if (recorder_python, recorder_script, recorder_sidecar) == (None, None, None):
+            return codex_argv
+        if recorder_python is None or recorder_script is None or recorder_sidecar is None:
+            raise UnsafeCodexInvocation("Codex recorder configuration must be complete")
+        recorder = (recorder_python, recorder_script, recorder_sidecar)
+        if any(not value.startswith("/") or value.startswith("-") or "\0" in value for value in recorder):
+            raise UnsafeCodexInvocation("Codex recorder paths are unsafe")
+        return (
+            recorder_python,
+            recorder_script,
+            "--sidecar",
+            recorder_sidecar,
+            "--",
+            *codex_argv,
         )
 
 

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
+from powercontext_eval.artifacts import ArtifactStore
 from powercontext_eval.benchmarks.swebench_pro.adapter import SweBenchProInstance
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluation
 from powercontext_eval.codex import CodexOutcome
@@ -146,10 +149,17 @@ def _run_with_fakes(
         ) -> dict[Arm, object]:
             observed["sut_config"] = sut_config
             observed["prompts"] = prompts
+            stores = cast(dict[Arm, ArtifactStore], kwargs["stores"])
             assert before_arm is not None
             for arm in (Arm.OFF, Arm.ON):
                 before_arm(arm)
                 events.append(arm)
+                observed_at = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+                stores[arm].write_text(
+                    "context/codex-observed.jsonl",
+                    f'{{"sequence":1,"observed_at":"{observed_at}",'
+                    '"event":{"type":"agent_message","message":"done"}}\n',
+                )
             outcome = SimpleNamespace(codex=CodexOutcome("", None))
             return {Arm.OFF: outcome, Arm.ON: outcome}
 
@@ -195,6 +205,13 @@ def test_runner_uses_arbitrary_instance_prompt_image_and_base_commit(
     ) == 2
     assert len(evaluator_calls) == 3
     assert {call["instance_id"] for call in evaluator_calls} == {instance.instance_id}
+    for arm in (Arm.OFF, Arm.ON):
+        timeline = config.root / "runs" / result.run_id / "arms" / arm.value / "context" / "timeline.jsonl"
+        assert [json.loads(line)["actor"] for line in timeline.read_text().splitlines()] == [
+            "benchmark",
+            "codex",
+            "official_evaluator",
+        ]
 
 
 def test_runner_emits_phases_immediately_before_named_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

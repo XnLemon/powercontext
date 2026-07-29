@@ -38,6 +38,8 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 _CONTAINER_UID_GID = "2950:100"
 _CONTAINER_CODEX = "/tools/codex-dir/codex"
 _CONTAINER_UV = "/tools/uv-dir/uv"
+_CONTAINER_RECORDER = "/evaluation/record_codex_jsonl.py"
+_DEFAULT_RECORDER_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "record_codex_jsonl.py"
 LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
 _PLUGIN_RELATIVE = Path("integrations/codex/plugins/powercontext")
 
@@ -122,6 +124,32 @@ def auth_secret_variants(auth_json: Path) -> tuple[str, ...]:
             }
         )
     return tuple(sorted(variants, key=lambda item: (-len(item), item)))
+
+
+def _retain_private_trace(
+    source: Path,
+    store: ArtifactStore,
+    destination: str,
+    *,
+    required: bool,
+) -> Path | None:
+    descriptor = -1
+    try:
+        descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        if required:
+            raise CodexInfrastructureError("Codex timestamp trace is missing") from None
+        return None
+    except OSError as error:
+        raise CodexInfrastructureError("Context trace cannot be opened safely") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise CodexInfrastructureError("Context trace is not a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            return store.write_stream(destination, stream)
+    finally:
+        os.close(descriptor)
 
 
 @dataclass(frozen=True)
@@ -252,6 +280,7 @@ class SutConfig:
     source_checkout: Path
     plugin_checkout_sha: str
     proxy: ProxyRelayConfig
+    recorder_script: Path = _DEFAULT_RECORDER_SCRIPT
     limits: ContainerLimits = ContainerLimits()
     plugin_version: str = "0.1.0"
     codex_timeout: float = 3600
@@ -267,9 +296,15 @@ class SutConfig:
             raise UnsafeSutConfiguration("Task image is unsafe")
         if _SHA.fullmatch(self.plugin_checkout_sha) is None:
             raise UnsafeSutConfiguration("Plugin checkout SHA is unsafe")
-        for path in (self.codex_binary, self.uv_binary, self.source_checkout):
+        for path in (self.codex_binary, self.uv_binary, self.source_checkout, self.recorder_script):
             if not path.is_absolute() or "\0" in os.fspath(path):
                 raise UnsafeSutConfiguration("SUT paths must be absolute")
+        try:
+            recorder_metadata = self.recorder_script.stat(follow_symlinks=False)
+        except OSError as error:
+            raise UnsafeSutConfiguration("Codex recorder script is missing") from error
+        if not stat.S_ISREG(recorder_metadata.st_mode):
+            raise UnsafeSutConfiguration("Codex recorder script must be a regular file")
         if self.codex_timeout <= 0:
             raise UnsafeSutConfiguration("Codex timeout must be positive")
 
@@ -616,6 +651,7 @@ class DockerSut:
         try:
             paths.prepare()
             auth = paths.copy_auth()
+            self._stage_recorder(config, paths)
             self._initialize_workspace(config, arm, paths)
             self._assign_arm_ownership(config, paths)
             self._prewarm(config, arm, paths, network, relay_url, auth)
@@ -625,7 +661,14 @@ class DockerSut:
             self._readiness(container, paths)
             plugin = self._plugin_list(container, paths)
             codex = CodexRunner(_DockerExecRunner(self._docker, container)).run(
-                CodexInvocation(arm, inside_disposable_container=True, executable=_CONTAINER_CODEX),
+                CodexInvocation(
+                    arm,
+                    inside_disposable_container=True,
+                    executable=_CONTAINER_CODEX,
+                    recorder_python="/runtime/pc-env/bin/python",
+                    recorder_script=_CONTAINER_RECORDER,
+                    recorder_sidecar="/runtime/pc-home/codex-observed.jsonl",
+                ),
                 prompt=prompt,
                 cwd=paths.workspace,
                 store=store,
@@ -635,11 +678,24 @@ class DockerSut:
                     "CODEX_HOME": "/runtime/codex-home",
                     "POWERCONTEXT_HOME": "/runtime/pc-home",
                     "POWERCONTEXT_CODEX_SCOPE_ID": f"eval:{config.run_id}:{arm.value}",
+                    "POWERCONTEXT_EVAL_TRACE_PATH": "/runtime/pc-home/evaluation-injections.jsonl",
                     "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env",
                     "UV_CACHE_DIR": "/runtime/uv-cache",
                     "UV_OFFLINE": "1",
                 },
                 secrets=credential_variants,
+            )
+            _retain_private_trace(
+                paths.pc_home / "codex-observed.jsonl",
+                store,
+                "context/codex-observed.jsonl",
+                required=True,
+            )
+            _retain_private_trace(
+                paths.pc_home / "evaluation-injections.jsonl",
+                store,
+                "context/powercontext-injections.jsonl",
+                required=False,
             )
             evidence = self._evidence(config, arm, container, paths, plugin)
             if plugin != (PLUGIN_ID, source_provenance.plugin_version):
@@ -706,6 +762,48 @@ class DockerSut:
         finally:
             if created:
                 self._docker.run(("docker", "rm", "-f", name), cwd=paths.runtime, timeout=30, check=False)
+
+    @staticmethod
+    def _stage_recorder(config: SutConfig, paths: ArmPaths) -> None:
+        """Copy the evaluator-owned recorder into a fresh private control directory."""
+
+        control = paths.runtime / "evaluation-control"
+        control.mkdir(mode=0o700)
+        destination = control / "record_codex_jsonl.py"
+        source_fd = os.open(
+            config.recorder_script,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        destination_fd = -1
+        try:
+            source_metadata = os.fstat(source_fd)
+            if not stat.S_ISREG(source_metadata.st_mode):
+                raise UnsafeSutConfiguration("Codex recorder script must be a regular file")
+            destination_fd = os.open(
+                destination,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0),
+                0o400,
+            )
+            while chunk := os.read(source_fd, 64 * 1024):
+                view = memoryview(chunk)
+                written = 0
+                while written < len(view):
+                    count = os.write(destination_fd, view[written:])
+                    if count <= 0:
+                        raise OSError("Codex recorder copy made no progress")
+                    written += count
+            os.fchmod(destination_fd, 0o400)
+            os.fsync(destination_fd)
+        except OSError as error:
+            raise UnsafeSutConfiguration("Codex recorder script cannot be staged safely") from error
+        finally:
+            os.close(source_fd)
+            if destination_fd >= 0:
+                os.close(destination_fd)
 
     def _assign_arm_ownership(self, config: SutConfig, paths: ArmPaths) -> None:
         """Use a networkless, capability-minimal helper for exact owned mounts."""
@@ -934,6 +1032,12 @@ class DockerSut:
             f"type=bind,src={paths.runtime},dst=/runtime",
             "--mount",
             f"type=bind,src={config.source_checkout},dst=/source,readonly",
+            "--mount",
+            (
+                "type=bind,"
+                f"src={paths.runtime / 'evaluation-control' / 'record_codex_jsonl.py'},"
+                f"dst={_CONTAINER_RECORDER},readonly"
+            ),
             "--mount",
             _tool_directory_mount(config.codex_binary, "/tools/codex-dir"),
             "--mount",
