@@ -18,6 +18,23 @@ describe("App batch report navigation", () => {
     expect(screen.getAllByRole("link")).toHaveLength(3);
     expect(screen.queryByRole("link", { name: /工作台|测试任务|验收报告|单任务详情/ })).not.toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "运行完整评测" })).toBeVisible();
+    expect(await screen.findByText("Worker 工作中")).toBeVisible();
+  });
+
+  it("describes an inactive worker lease as idle instead of disconnected", async () => {
+    const api = apiStub({
+      getHealth: vi.fn().mockResolvedValue({
+        service: "ok",
+        worker_lease_active: false,
+        queued_tasks: 0,
+        running_tasks: 0,
+      }),
+    });
+
+    render(<App api={api} />);
+
+    expect(await screen.findByText("Worker 空闲")).toBeVisible();
+    expect(screen.queryByText("Worker 未连接")).not.toBeInTheDocument();
   });
 
   it("navigates a newly created batch to its aggregate report", async () => {

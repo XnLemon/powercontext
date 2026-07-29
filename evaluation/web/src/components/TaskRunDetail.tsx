@@ -73,12 +73,16 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
   }
 
   const task = detail.task;
+  const off = task.off;
+  const on = task.on;
   const offTokens = task.tokens.off;
   const onTokens = task.tokens.on;
   const delta = task.tokens.delta;
   const problemPreview = detail.problem_statement.length > 360
     ? `${detail.problem_statement.slice(0, 360)}…`
     : detail.problem_statement;
+  const hasComparison = off !== null && on !== null;
+  const didNotRun = task.status === "queued" || task.status === "cancelled";
 
   return (
     <div className="task-run-detail">
@@ -92,12 +96,18 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
           <p>{task.repository}</p>
         </div>
         <div className="task-result-summary" aria-label="任务对比汇总">
-          <span className={task.off?.resolved ? "resolution--pass" : "resolution--fail"}>
-            OFF {task.off?.resolved ? "通过" : "未通过"}
-          </span>
-          <span className={task.on?.resolved ? "resolution--pass" : "resolution--fail"}>
-            ON {task.on?.resolved ? "通过" : "未通过"}
-          </span>
+          {hasComparison ? (
+            <>
+              <span className={off.resolved ? "resolution--pass" : "resolution--fail"}>
+                OFF {off.resolved ? "通过" : "未通过"}
+              </span>
+              <span className={on.resolved ? "resolution--pass" : "resolution--fail"}>
+                ON {on.resolved ? "通过" : "未通过"}
+              </span>
+            </>
+          ) : (
+            <span>{task.status === "cancelled" ? "已取消" : task.status === "queued" ? "排队中" : "评测执行失败"}</span>
+          )}
           {offTokens !== null && <span>OFF {number(offTokens)}</span>}
           {onTokens !== null && <span>ON {number(onTokens)}</span>}
           {delta !== null && <span>差值 {delta > 0 ? "+" : ""}{number(delta)}</span>}
@@ -134,7 +144,11 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
             <p>由固定 SWE-bench Pro evaluator 应用补丁并运行目标测试。</p>
           </div>
         </div>
-        {detail.off === null || detail.on === null ? (
+        {didNotRun ? (
+          <div className="empty-state">
+            {task.status === "cancelled" ? "任务未执行，因此没有官方评测结果。" : "任务尚未执行。"}
+          </div>
+        ) : detail.off === null || detail.on === null ? (
           <div className="failure-box">
             <strong>评测执行失败</strong>
             {task.failure_summary && <p>{task.failure_summary}</p>}
@@ -158,7 +172,14 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
         </details>
       </section>
 
-      <ContextTimeline api={api} batchId={batchId} taskId={taskId} />
+      {didNotRun ? (
+        <section className="report-section empty-state">
+          <h2>完整上下文时间线</h2>
+          <p>任务未执行，因此没有上下文时间线。</p>
+        </section>
+      ) : (
+        <ContextTimeline api={api} batchId={batchId} taskId={taskId} />
+      )}
     </div>
   );
 }

@@ -5,6 +5,42 @@ import { TaskRunDetail } from "./TaskRunDetail";
 import { apiStub, batchRecord, batchTaskDetail } from "../test/fixtures";
 
 describe("TaskRunDetail", () => {
+  it("renders a cancelled task as not executed instead of failed", async () => {
+    const api = apiStub({
+      getBatch: vi.fn().mockResolvedValue(batchRecord({ status: "cancelled" })),
+      getBatchTask: vi.fn().mockResolvedValue({
+        ...batchTaskDetail,
+        task: {
+          ...batchTaskDetail.task,
+          status: "cancelled",
+          pair_category: null,
+          off: null,
+          on: null,
+          tokens: { off: null, on: null, delta: null },
+        },
+        off: null,
+        on: null,
+      }),
+    });
+
+    render(
+      <TaskRunDetail
+        api={api}
+        batchId="batch-001"
+        taskId="task-001"
+        search=""
+        navigate={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "单任务详情" })).toBeVisible();
+    expect(screen.getByLabelText("任务对比汇总")).toHaveTextContent("已取消");
+    expect(screen.getByText("任务未执行，因此没有官方评测结果。")).toBeVisible();
+    expect(screen.queryByText("OFF 未通过")).not.toBeInTheDocument();
+    expect(screen.queryByText("ON 未通过")).not.toBeInTheDocument();
+    expect(screen.queryByText("评测执行失败")).not.toBeInTheDocument();
+  });
+
   it("renders official result evidence once and expands the complete task in place", async () => {
     const longProblem = "完整问题：" + "需要保留的上下文。".repeat(80);
     const api = apiStub({

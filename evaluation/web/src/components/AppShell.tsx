@@ -91,7 +91,7 @@ export function AppShell({ api, path, batchId, navigate, children }: AppShellPro
             <>
               <span className="health health--ok">服务正常</span>
               <span className={`health ${health.worker_lease_active ? "health--ok" : "health--idle"}`}>
-                {health.worker_lease_active ? "Worker 在线" : "Worker 未连接"}
+                {health.worker_lease_active ? "Worker 工作中" : "Worker 空闲"}
               </span>
               <span className="queue-count">队列 {health.queued_tasks}</span>
             </>
