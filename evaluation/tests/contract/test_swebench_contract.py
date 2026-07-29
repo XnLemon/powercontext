@@ -94,7 +94,7 @@ def test_prompt_exposes_only_public_task_fields() -> None:
     assert instance.interface in prompt
     assert instance.patch not in prompt
     assert instance.test_patch not in prompt
-    assert instance.fail_to_pass not in prompt
+    assert all(test_name not in prompt for test_name in instance.fail_to_pass)
     assert instance.selected_test_files_to_run not in prompt
 
 

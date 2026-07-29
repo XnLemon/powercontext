@@ -61,7 +61,7 @@ def test_web_config_defaults_match_m0_layout() -> None:
     assert config.powercontext_source == root / "deploy" / "powercontext"
     assert config.harness_root == root / "cache" / "swebench-pro.git"
     assert config.harness_python == root / "venvs" / "swebench-pro-ca10a60" / "bin" / "python"
-    assert config.raw_sample_path == root / "cache" / "dataset" / "instance.jsonl"
+    assert config.dataset_path == root / "cache" / "swebench-pro.git" / "helper_code" / "sweap_eval_full_v2.jsonl"
     assert config.codex_binary == root / "bin" / "codex"
     assert config.uv_binary == root / "bin" / "uv"
     assert config.auth_json == root / "codex-home" / "auth.json"
@@ -122,7 +122,7 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
         ("POWERCONTEXT_EVAL_POWERCONTEXT_SOURCE", "source"),
         ("POWERCONTEXT_EVAL_HARNESS_ROOT", "harness"),
         ("POWERCONTEXT_EVAL_HARNESS_PYTHON", "python"),
-        ("POWERCONTEXT_EVAL_RAW_SAMPLE_PATH", "sample.jsonl"),
+        ("POWERCONTEXT_EVAL_DATASET_PATH", "sample.jsonl"),
         ("POWERCONTEXT_EVAL_CODEX_BINARY", "codex"),
         ("POWERCONTEXT_EVAL_UV_BINARY", "uv"),
         ("POWERCONTEXT_EVAL_AUTH_JSON", "auth.json"),

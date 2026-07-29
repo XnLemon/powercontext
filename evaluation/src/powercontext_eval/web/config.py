@@ -29,7 +29,7 @@ class WebConfig(BaseModel):
     powercontext_source: Path
     harness_root: Path
     harness_python: Path
-    raw_sample_path: Path
+    dataset_path: Path
     codex_binary: Path
     uv_binary: Path
     auth_json: Path = Field(exclude=True, repr=False)
@@ -47,7 +47,7 @@ class WebConfig(BaseModel):
         "powercontext_source",
         "harness_root",
         "harness_python",
-        "raw_sample_path",
+        "dataset_path",
         "codex_binary",
         "uv_binary",
         "auth_json",
@@ -69,6 +69,7 @@ class WebConfig(BaseModel):
         powercontext_source: Path | None = None,
         harness_root: Path | None = None,
         harness_python: Path | None = None,
+        dataset_path: Path | None = None,
         raw_sample_path: Path | None = None,
         codex_binary: Path | None = None,
         uv_binary: Path | None = None,
@@ -87,7 +88,9 @@ class WebConfig(BaseModel):
             powercontext_source=powercontext_source or root / "deploy" / "powercontext",
             harness_root=harness_root or root / "cache" / "swebench-pro.git",
             harness_python=harness_python or root / "venvs" / "swebench-pro-ca10a60" / "bin" / "python",
-            raw_sample_path=raw_sample_path or root / "cache" / "dataset" / "instance.jsonl",
+            dataset_path=dataset_path
+            or raw_sample_path
+            or root / "cache" / "swebench-pro.git" / "helper_code" / "sweap_eval_full_v2.jsonl",
             codex_binary=codex_binary or root / "bin" / "codex",
             uv_binary=uv_binary or root / "bin" / "uv",
             auth_json=auth_json or root / "codex-home" / "auth.json",
@@ -123,7 +126,7 @@ class WebConfig(BaseModel):
             powercontext_source=path("POWERCONTEXT_SOURCE"),
             harness_root=path("HARNESS_ROOT"),
             harness_python=path("HARNESS_PYTHON"),
-            raw_sample_path=path("RAW_SAMPLE_PATH"),
+            dataset_path=path("DATASET_PATH") or path("RAW_SAMPLE_PATH"),
             codex_binary=path("CODEX_BINARY"),
             uv_binary=path("UV_BINARY"),
             auth_json=path("AUTH_JSON"),
@@ -133,3 +136,9 @@ class WebConfig(BaseModel):
             lease_seconds=numbers.lease_seconds,
             poll_seconds=numbers.poll_seconds,
         )
+
+    @property
+    def raw_sample_path(self) -> Path:
+        """Compatibility alias while the runner migrates to catalog instances."""
+
+        return self.dataset_path
