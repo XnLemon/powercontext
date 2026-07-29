@@ -239,7 +239,14 @@ function TaskRow({
 }) {
   const path = `/report/${encodeURIComponent(batchId)}/tasks/${encodeURIComponent(task.task_id)}${search}`;
   const executionFailure = task.pair_category === "execution_failure";
-  const category = categories.find(({ value }) => value === task.pair_category)?.label ?? "";
+  const pendingLabel = task.status === "running"
+    ? "运行中"
+    : task.status === "queued"
+      ? "排队中"
+      : task.status === "cancelled"
+        ? "已取消"
+        : "";
+  const category = categories.find(({ value }) => value === task.pair_category)?.label ?? pendingLabel;
   return (
     <tr>
       <td><span className="task-cell-id">{task.task_id}</span><small>{task.instance_id}</small></td>
@@ -250,7 +257,7 @@ function TaskRow({
         <>
           <td><Resolution value={task.off?.resolved} /></td>
           <td><Resolution value={task.on?.resolved} /></td>
-          <td><span className="pair-label">{category}</span></td>
+          <td>{category !== "" && <span className="pair-label">{category}</span>}</td>
         </>
       )}
       <td>{task.tokens.off === null ? "" : number(task.tokens.off)}</td>
