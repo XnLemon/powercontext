@@ -21,14 +21,23 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from powercontext_eval.benchmarks.swebench_pro.catalog import CatalogError, SweBenchProCatalog
-from powercontext_eval.web.batches import BatchCreate, BatchRecord, PairCategory
+from powercontext_eval.web.batches import (
+    BatchCreate,
+    BatchPreviewResponse,
+    BatchRecord,
+    PairCategory,
+    TaskRetryRequest,
+)
 from powercontext_eval.web.config import WebConfig
+from powercontext_eval.web.controls import BatchControlPatch, BatchPauseReason, BatchPreviewRequest
+from powercontext_eval.web.estimation import BatchEstimate, EstimateBasis, estimate_batch
 from powercontext_eval.web.models import Capabilities, HealthResponse, TaskCreate, TaskRecord, TaskStatus, TaskSummary
 from powercontext_eval.web.reporting import (
     BenchmarkCatalog,
     InvalidReportArtifact,
     ReportingError,
     UnsafeReportPath,
+    load_batch_estimate_samples,
     load_batch_report,
     load_batch_task_detail,
     load_batch_task_page,
@@ -38,6 +47,7 @@ from powercontext_eval.web.reporting import (
     load_report,
 )
 from powercontext_eval.web.store import BatchNotFound, TaskConflict, TaskNotFound, TaskStore
+from powercontext_eval.web.usage import UsageSnapshot, is_fresh
 
 _TERMINAL = {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.INTERRUPTED, TaskStatus.CANCELLED}
 _NO_STORE = {"Cache-Control": "no-store"}
@@ -326,6 +336,47 @@ def create_app(
             benchmark_catalog = SweBenchProCatalog.load(config.dataset_path)
         return benchmark_catalog
 
+    def current_usage() -> UsageSnapshot | None:
+        snapshot = task_store.latest_usage_snapshot()
+        if snapshot is None or not is_fresh(
+            snapshot,
+            now=datetime.now(UTC),
+            max_age=timedelta(seconds=config.usage_snapshot_max_age_seconds),
+        ):
+            return None
+        return snapshot
+
+    def historical_estimate(request: BatchPreviewRequest, *, total_tasks: int) -> BatchEstimate:
+        samples = []
+        for batch in task_store.list_batches():
+            candidate = batch.request
+            if (
+                candidate.benchmark != "swebench-pro"
+                or candidate.task_set != "swebench-pro-public-v2"
+                or candidate.model != "gpt-5.6-sol"
+                or candidate.reasoning_effort != "medium"
+                or candidate.treatment_mode != "off_on"
+            ):
+                continue
+            try:
+                samples.extend(
+                    load_batch_estimate_samples(
+                        batch,
+                        task_store.list_batch_tasks(batch.batch_id),
+                        runs_root=config.run_root / "runs",
+                        catalog=get_catalog(),
+                    )
+                )
+            except (CatalogError, ReportingError, OSError, ValueError):
+                continue
+        if not samples:
+            return BatchEstimate.unavailable(remaining_tasks=total_tasks)
+        return estimate_batch(
+            samples=samples,
+            remaining_tasks=total_tasks,
+            basis=EstimateBasis.HISTORICAL_COMPATIBLE,
+        )
+
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
@@ -351,8 +402,46 @@ def create_app(
     def capabilities() -> Capabilities:
         return Capabilities()
 
+    @app.post("/api/batches/preview")
+    def preview_batch(request: BatchPreviewRequest) -> Response:
+        snapshot = current_usage()
+        if snapshot is None:
+            return _error(503, "usage_unavailable", "Current Codex subscription usage is unavailable.")
+        try:
+            total_tasks = len(get_catalog().instance_ids)
+        except CatalogError:
+            return _error(503, "benchmark_unavailable", "The pinned benchmark task set is unavailable.")
+        blocked = (
+            snapshot.rate_limit_reached_type is not None
+            or snapshot.used_percent >= request.usage_pause_percent
+        )
+        response = BatchPreviewResponse(
+            powercontext_ref=request.powercontext_ref,
+            benchmark="swebench-pro",
+            task_set="swebench-pro-public-v2",
+            model="gpt-5.6-sol",
+            reasoning_effort="medium",
+            treatment_mode="off_on",
+            total_tasks=total_tasks,
+            usage_pause_percent=request.usage_pause_percent,
+            usage=snapshot,
+            estimate=historical_estimate(request, total_tasks=total_tasks),
+            can_start=not blocked,
+            block_reason="usage_threshold_reached" if blocked else None,
+        )
+        return JSONResponse(content=response.model_dump(mode="json"), headers=_NO_STORE)
+
     @app.post("/api/batches")
     def create_batch(request: BatchCreate) -> Response:
+        snapshot = current_usage()
+        if snapshot is None:
+            return _error(503, "usage_unavailable", "Current Codex subscription usage is unavailable.")
+        if snapshot.rate_limit_reached_type is not None or snapshot.used_percent >= request.usage_pause_percent:
+            return _error(
+                409,
+                "usage_threshold_reached",
+                "Current Codex subscription usage is at or above the selected threshold.",
+            )
         try:
             selected_catalog = get_catalog()
             record, created = task_store.create_batch(
@@ -382,15 +471,136 @@ def create_app(
         except BatchNotFound:
             return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
 
-    @app.post("/api/batches/{batch_id}/cancel")
-    def cancel_batch(batch_id: str) -> Response:
+    @app.post("/api/batches/{batch_id}/pause")
+    def pause_batch(batch_id: str) -> Response:
         try:
-            record = task_store.cancel_batch_queued(batch_id, now=datetime.now(UTC))
+            record = task_store.request_pause(
+                batch_id,
+                reason=BatchPauseReason.USER,
+                now=datetime.now(UTC),
+            )
         except BatchNotFound:
             return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
         except TaskConflict:
-            return _error(409, "batch_conflict", "The evaluation batch has no queued tasks to cancel.")
+            return _error(409, "batch_control_conflict", "The requested batch control change is not available.")
         return JSONResponse(content=_batch_payload(record), headers=_NO_STORE)
+
+    @app.post("/api/batches/{batch_id}/resume")
+    def resume_batch(batch_id: str) -> Response:
+        snapshot = current_usage()
+        if snapshot is None:
+            return _error(503, "usage_unavailable", "Current Codex subscription usage is unavailable.")
+        try:
+            batch = task_store.get_batch(batch_id)
+            if (
+                snapshot.rate_limit_reached_type is not None
+                or snapshot.used_percent >= batch.control.usage_pause_percent
+            ):
+                return _error(
+                    409,
+                    "usage_threshold_reached",
+                    "Current Codex subscription usage is at or above the batch threshold.",
+                )
+            record = task_store.request_resume(batch_id, snapshot=snapshot, now=datetime.now(UTC))
+        except BatchNotFound:
+            return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
+        except TaskConflict:
+            return _error(409, "batch_control_conflict", "The requested batch control change is not available.")
+        return JSONResponse(content=_batch_payload(record), headers=_NO_STORE)
+
+    @app.post("/api/batches/{batch_id}/cancel")
+    def cancel_batch(batch_id: str) -> Response:
+        try:
+            record = task_store.request_cancel(batch_id, now=datetime.now(UTC))
+        except BatchNotFound:
+            return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
+        except TaskConflict:
+            return _error(409, "batch_control_conflict", "The requested batch control change is not available.")
+        return JSONResponse(content=_batch_payload(record), headers=_NO_STORE)
+
+    @app.patch("/api/batches/{batch_id}/controls")
+    def update_batch_controls(batch_id: str, request: BatchControlPatch) -> Response:
+        try:
+            record = task_store.update_usage_threshold(
+                batch_id,
+                percent=request.usage_pause_percent,
+                expected_version=request.expected_version,
+                now=datetime.now(UTC),
+            )
+        except BatchNotFound:
+            return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
+        except TaskConflict:
+            return _error(
+                409,
+                "batch_control_version_conflict",
+                "The batch controls changed before this update was applied.",
+            )
+        return JSONResponse(content=_batch_payload(record), headers=_NO_STORE)
+
+    @app.get("/api/batches/{batch_id}/control-events")
+    def batch_control_events(batch_id: str) -> Response:
+        try:
+            events = task_store.list_control_events(batch_id)
+        except BatchNotFound:
+            return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
+        return JSONResponse(
+            content=[event.model_dump(mode="json") for event in events],
+            headers=_NO_STORE,
+        )
+
+    @app.get("/api/account-usage")
+    def account_usage() -> Response:
+        snapshot = current_usage()
+        if snapshot is None:
+            return _error(503, "usage_unavailable", "Current Codex subscription usage is unavailable.")
+        return JSONResponse(content=snapshot.model_dump(mode="json"), headers=_NO_STORE)
+
+    @app.post("/api/batches/{batch_id}/tasks/{task_id}/retry")
+    def retry_batch_task(batch_id: str, task_id: str, request: TaskRetryRequest) -> Response:
+        snapshot = current_usage()
+        if snapshot is None:
+            return _error(503, "usage_unavailable", "Current Codex subscription usage is unavailable.")
+        try:
+            batch = task_store.get_batch(batch_id)
+            if (
+                snapshot.rate_limit_reached_type is not None
+                or snapshot.used_percent >= batch.control.usage_pause_percent
+            ):
+                return _error(
+                    409,
+                    "usage_threshold_reached",
+                    "Current Codex subscription usage is at or above the batch threshold.",
+                )
+            attempt, created = task_store.retry_failed_task(
+                batch_id,
+                task_id,
+                idempotency_key=request.idempotency_key,
+                now=datetime.now(UTC),
+            )
+        except BatchNotFound:
+            return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
+        except TaskNotFound:
+            return _error(404, "task_not_found", "The requested evaluation task does not exist.")
+        except TaskConflict:
+            return _error(409, "task_not_retryable", "The current task outcome cannot be retried.")
+        return JSONResponse(
+            status_code=201 if created else 200,
+            content=attempt.model_dump(mode="json"),
+            headers=_NO_STORE,
+        )
+
+    @app.get("/api/batches/{batch_id}/tasks/{task_id}/attempts")
+    def batch_task_attempts(batch_id: str, task_id: str) -> Response:
+        try:
+            attempts = task_store.list_task_attempts(batch_id, task_id)
+        except BatchNotFound:
+            return _error(404, "batch_not_found", "The requested evaluation batch does not exist.")
+        except TaskNotFound:
+            return _error(404, "task_not_found", "The requested evaluation task does not exist.")
+        return JSONResponse(
+            content=[attempt.model_dump(mode="json") for attempt in attempts],
+            headers=_NO_STORE,
+        )
 
     @app.get("/api/batches/{batch_id}/events")
     def batch_events(batch_id: str, request: Request) -> Response:

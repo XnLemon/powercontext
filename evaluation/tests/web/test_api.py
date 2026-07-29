@@ -19,10 +19,25 @@ from powercontext_eval.web.api import TaskEventStream, create_app
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskCreate, TaskPhase, TaskResult
 from powercontext_eval.web.store import TaskStore
+from powercontext_eval.web.usage import UsageSnapshot
 
 NOW = datetime(2026, 7, 29, 1, 2, 3, tzinfo=UTC)
 INSTANCE = "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"
 SECRET = "secret-proxy-token"
+
+
+def _usage(used_percent: int, *, observed_at: datetime | None = None) -> UsageSnapshot:
+    observed = datetime.now(UTC) if observed_at is None else observed_at
+    return UsageSnapshot(
+        limit_id="codex",
+        used_percent=used_percent,
+        remaining_percent=100 - used_percent,
+        window_duration_minutes=10_080,
+        resets_at=observed + timedelta(days=7),
+        observed_at=observed,
+        plan_type="pro",
+        account_tokens=1_234,
+    )
 
 
 def payload(key: str = "api-task-key") -> dict[str, str]:
@@ -52,6 +67,7 @@ def config(tmp_path: Path) -> WebConfig:
 def store(config: WebConfig) -> TaskStore:
     task_store = TaskStore(config.database_path, lease_duration=timedelta(seconds=config.lease_seconds))
     task_store.initialize()
+    task_store.save_usage_snapshot(_usage(9))
     return task_store
 
 
@@ -804,7 +820,7 @@ class _BatchCatalog:
         return self.instances[instance_id]
 
 
-def _batch_payload(key: str = "batch-api-key") -> dict[str, str]:
+def _batch_payload(key: str = "batch-api-key") -> dict[str, object]:
     return {
         "powercontext_ref": "commit:" + "a" * 40,
         "benchmark": "swebench-pro",
@@ -958,6 +974,149 @@ def _finish_batch(
     return children
 
 
+def test_batch_preview_is_read_only_and_exposes_fixed_facts_usage_and_estimate(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    catalog = _BatchCatalog()
+    client = TestClient(create_app(config, store, catalog=catalog))
+
+    response = client.post(
+        "/api/batches/preview",
+        json={"powercontext_ref": "latest", "usage_pause_percent": 75},
+    )
+
+    assert response.status_code == 200
+    assert store.list_batches() == []
+    assert response.json() == {
+        "powercontext_ref": "latest",
+        "benchmark": "swebench-pro",
+        "task_set": "swebench-pro-public-v2",
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "medium",
+        "treatment_mode": "off_on",
+        "total_tasks": 5,
+        "usage_pause_percent": 75,
+        "usage": response.json()["usage"],
+        "estimate": {
+            "quality": "unavailable",
+            "basis": "none",
+            "sample_size": 0,
+            "remaining_tasks": 5,
+            "remaining_tokens": None,
+            "remaining_duration_seconds": None,
+            "low_tokens": None,
+            "high_tokens": None,
+            "low_duration_seconds": None,
+            "high_duration_seconds": None,
+        },
+        "can_start": True,
+        "block_reason": None,
+    }
+    assert response.json()["usage"]["used_percent"] == 9
+
+
+def test_batch_preview_and_confirmation_fail_closed_without_fresh_usage(tmp_path: Path) -> None:
+    root = tmp_path / "no-current-usage"
+    config = WebConfig.for_root(root)
+    store = TaskStore(config.database_path, lease_duration=timedelta(seconds=config.lease_seconds))
+    store.initialize()
+    client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
+
+    preview = client.post(
+        "/api/batches/preview",
+        json={"powercontext_ref": "latest", "usage_pause_percent": 80},
+    )
+    created = client.post("/api/batches", json=_batch_payload("batch-no-usage-key"))
+
+    assert preview.status_code == created.status_code == 503
+    assert preview.json()["error"]["code"] == created.json()["error"]["code"] == "usage_unavailable"
+    assert store.list_batches() == []
+
+
+def test_batch_confirmation_rejects_usage_at_the_selected_threshold(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    store.save_usage_snapshot(_usage(80))
+    client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
+    request = _batch_payload("batch-threshold-key")
+    request["usage_pause_percent"] = 80
+
+    response = client.post("/api/batches", json=request)
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "usage_threshold_reached"
+    assert store.list_batches() == []
+
+
+def test_batch_control_usage_attempt_and_retry_routes_are_durable(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
+    batch = client.post("/api/batches", json=_batch_payload("batch-controls-key")).json()
+
+    paused = client.post(f"/api/batches/{batch['batch_id']}/pause")
+    resumed = client.post(f"/api/batches/{batch['batch_id']}/resume")
+    patched = client.patch(
+        f"/api/batches/{batch['batch_id']}/controls",
+        json={"usage_pause_percent": 75, "expected_version": resumed.json()["control"]["version"]},
+    )
+    stale_patch = client.patch(
+        f"/api/batches/{batch['batch_id']}/controls",
+        json={"usage_pause_percent": 70, "expected_version": 0},
+    )
+    usage = client.get("/api/account-usage")
+    events = client.get(f"/api/batches/{batch['batch_id']}/control-events")
+
+    assert paused.json()["status"] == "paused"
+    assert resumed.json()["status"] == "queued"
+    assert patched.json()["control"]["usage_pause_percent"] == 75
+    assert stale_patch.status_code == 409
+    assert stale_patch.json()["error"]["code"] == "batch_control_version_conflict"
+    assert usage.json()["used_percent"] == 9
+    assert [event["event_type"] for event in events.json()] == [
+        "batch_created",
+        "pause_requested",
+        "paused",
+        "resume_requested",
+        "resumed",
+        "threshold_changed",
+    ]
+
+    task = store.list_batch_tasks(batch["batch_id"])[0]
+    started = datetime.now(UTC) + timedelta(seconds=1)
+    claimed = store.claim_next("batch-worker", now=started)
+    assert claimed is not None
+    store.fail(
+        task.task_id,
+        "batch-worker",
+        SafeFailure(
+            category=FailureCategory.CODEX_EXECUTION,
+            phase=TaskPhase.RUNNING_OFF,
+            summary="Codex execution did not complete",
+        ),
+        now=started + timedelta(seconds=1),
+    )
+    retry_request = {"idempotency_key": "api-retry-0001"}
+    retried = client.post(
+        f"/api/batches/{batch['batch_id']}/tasks/{task.task_id}/retry",
+        json=retry_request,
+    )
+    replayed = client.post(
+        f"/api/batches/{batch['batch_id']}/tasks/{task.task_id}/retry",
+        json=retry_request,
+    )
+    attempts = client.get(f"/api/batches/{batch['batch_id']}/tasks/{task.task_id}/attempts")
+
+    assert retried.status_code == 201
+    assert replayed.status_code == 200
+    assert retried.json() == replayed.json()
+    assert [attempt["attempt_number"] for attempt in attempts.json()] == [1, 2]
+    assert attempts.json()[0]["failure_summary"] == "Codex execution did not complete"
+
+
 def test_batch_api_creates_replays_lists_gets_and_cancels_the_complete_catalog(
     config: WebConfig,
     store: TaskStore,
@@ -1029,7 +1188,7 @@ def test_batch_report_reconciles_resolution_pairs_failures_and_total_tokens(
     assert report["tokens"]["output"]["off"] == 44
     assert report["tokens"]["total"]["on"] == 478
     assert report["control"]["intent"] == "run"
-    assert report["latest_usage"] is None
+    assert report["latest_usage"]["used_percent"] == 9
     assert report["estimate"] == {
         "quality": "preliminary",
         "basis": "current_batch",
@@ -1048,6 +1207,30 @@ def test_batch_report_reconciles_resolution_pairs_failures_and_total_tokens(
     assert "patch_bytes" not in response.text
     assert "treatment_valid" not in response.text
     assert "elapsed" not in response.text
+
+
+def test_batch_preview_uses_only_complete_historical_pair_measurements(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    catalog = _BatchCatalog()
+    client = TestClient(create_app(config, store, catalog=catalog))
+    batch = client.post("/api/batches", json=_batch_payload("batch-estimate-history-key")).json()
+    _finish_batch(config, store, batch["batch_id"])
+
+    response = client.post(
+        "/api/batches/preview",
+        json={"powercontext_ref": "latest", "usage_pause_percent": 80},
+    )
+
+    assert response.status_code == 200
+    estimate = response.json()["estimate"]
+    assert estimate["quality"] == "preliminary"
+    assert estimate["basis"] == "historical_compatible"
+    assert estimate["sample_size"] == 4
+    assert estimate["remaining_tasks"] == 5
+    assert estimate["remaining_tokens"] == 1_203
+    assert estimate["remaining_duration_seconds"] == 5
 
 
 def test_batch_token_totals_use_only_pairs_with_both_arm_measurements(

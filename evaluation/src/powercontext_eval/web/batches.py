@@ -38,6 +38,25 @@ class BatchCreate(_FrozenModel):
         return value
 
 
+class BatchPreviewResponse(_FrozenModel):
+    powercontext_ref: str
+    benchmark: Literal["swebench-pro"]
+    task_set: Literal["swebench-pro-public-v2"]
+    model: Literal["gpt-5.6-sol"]
+    reasoning_effort: Literal["medium"]
+    treatment_mode: Literal["off_on"]
+    total_tasks: Annotated[int, Field(ge=1)]
+    usage_pause_percent: Annotated[int, Field(ge=1, le=100)]
+    usage: UsageSnapshot
+    estimate: BatchEstimate
+    can_start: bool
+    block_reason: Literal["usage_threshold_reached"] | None = None
+
+
+class TaskRetryRequest(_FrozenModel):
+    idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
+
+
 class BatchStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"

@@ -442,6 +442,44 @@ def _metric_aggregate(values: dict[str, list[int]]) -> TokenMetricAggregate:
     )
 
 
+def load_batch_estimate_samples(
+    batch: BatchRecord,
+    tasks: Sequence[TaskRecord],
+    *,
+    runs_root: Path,
+    catalog: BenchmarkCatalog,
+) -> tuple[EstimateSample, ...]:
+    """Return only complete paired metrics compatible with the current runner schema."""
+
+    _validate_batch_tasks(batch, tasks)
+    samples: list[EstimateSample] = []
+    for task in tasks:
+        catalog.require(task.request.instance_id)
+        if task.status is not TaskStatus.SUCCEEDED:
+            continue
+        bundle = _bundle_for_task(task, runs_root)
+        if (
+            bundle.revisions.get("dataset") != DATASET_REVISION
+            or bundle.revisions.get("harness") != HARNESS_COMMIT
+            or bundle.configuration.get("model") != batch.request.model
+            or bundle.configuration.get("reasoning_effort") != batch.request.reasoning_effort
+            or task.started_at is None
+            or task.finished_at is None
+        ):
+            continue
+        off_total = _arm_total(bundle.off)
+        on_total = _arm_total(bundle.on)
+        if off_total is None or on_total is None:
+            continue
+        samples.append(
+            EstimateSample(
+                tokens=off_total + on_total,
+                duration_seconds=max(0, round((task.finished_at - task.started_at).total_seconds())),
+            )
+        )
+    return tuple(samples)
+
+
 def load_batch_report(
     batch: BatchRecord,
     tasks: Sequence[TaskRecord],
