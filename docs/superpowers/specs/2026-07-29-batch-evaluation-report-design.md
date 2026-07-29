@@ -1,7 +1,7 @@
 # PowerContext Batch Evaluation Report Design
 
 **Date:** 2026-07-29  
-**Status:** Approved visual direction; awaiting written-spec review  
+**Status:** Implemented locally; awaiting m0 deployment verification
 **Supersedes:** The single-task report presentation in
 `2026-07-29-evaluation-console-design.md`
 

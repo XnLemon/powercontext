@@ -1,7 +1,12 @@
 # PowerContext Evaluation Console Design
 
 **Date:** 2026-07-29  
-**Status:** Approved for implementation
+**Status:** Superseded by `2026-07-29-batch-evaluation-report-design.md`
+
+This document records the original single-instance smoke-test console. Its fixed-instance form, task-level
+acceptance report, three-item navigation, patch-size metric, and treatment-validity presentation are no longer the
+product contract. The batch design is authoritative for the implemented 731-task report flow; legacy task APIs
+remain only for migration compatibility.
 
 ## 1. Purpose
 

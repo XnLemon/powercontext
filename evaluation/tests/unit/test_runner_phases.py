@@ -37,10 +37,7 @@ def _instance() -> SweBenchProInstance:
             "before_repo_set_cmd": "git reset --hard",
             "created_at": "2026-01-01T00:00:00Z",
             "hints_text": "",
-            "image_name": (
-                "084828598639.dkr.ecr.us-west-2.amazonaws.com/"
-                "sweap-images/owner.repo:owner__repo-b"
-            ),
+            "image_name": ("084828598639.dkr.ecr.us-west-2.amazonaws.com/sweap-images/owner.repo:owner__repo-b"),
             "instance_dockerfile": "RUN true",
             "instance_id": INSTANCE_ID,
             "is_remote_image": True,

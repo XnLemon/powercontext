@@ -895,9 +895,7 @@ def _write_batch_artifacts(
                     else {"event": {"type": "agent_message", "message": "done"}}
                 ),
                 "source_artifact": (
-                    "context/powercontext-injections.jsonl"
-                    if arm_name == "on"
-                    else "context/codex-observed.jsonl"
+                    "context/powercontext-injections.jsonl" if arm_name == "on" else "context/codex-observed.jsonl"
                 ),
                 "source_sequence": 1,
             },

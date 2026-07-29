@@ -199,9 +199,7 @@ def test_only_one_child_runs_physically_across_multiple_batches(tmp_path: Path) 
     assert calls == [store.list_batch_tasks(first_batch.batch_id)[0].task_id]
 
 
-def test_failed_batch_child_does_not_prevent_later_child(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_failed_batch_child_does_not_prevent_later_child(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
     store = _store(config)
     instance_ids = ("instance_owner__repo-a", "instance_owner__repo-b")

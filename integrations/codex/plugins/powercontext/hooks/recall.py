@@ -323,16 +323,10 @@ def _append_evaluation_trace(
         event["session_id"] = session_id
     if turn_id is not None:
         event["turn_id"] = turn_id
-    encoded = (
-        json.dumps(event, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n"
-    ).encode()
+    encoded = (json.dumps(event, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n").encode()
     descriptor = os.open(
         path,
-        os.O_WRONLY
-        | os.O_APPEND
-        | os.O_CREAT
-        | os.O_NOFOLLOW
-        | getattr(os, "O_CLOEXEC", 0),
+        os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
         0o600,
     )
     try:

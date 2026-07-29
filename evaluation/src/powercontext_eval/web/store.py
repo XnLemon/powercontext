@@ -644,16 +644,8 @@ class TaskStore:
         ).fetchall()
         statuses = tuple(TaskStatus(child["status"]) for child in child_rows)
         status = derive_batch_status(statuses)
-        starts = [
-            _parse_timestamp(child["started_at"])
-            for child in child_rows
-            if child["started_at"] is not None
-        ]
-        finishes = [
-            _parse_timestamp(child["finished_at"])
-            for child in child_rows
-            if child["finished_at"] is not None
-        ]
+        starts = [_parse_timestamp(child["started_at"]) for child in child_rows if child["started_at"] is not None]
+        finishes = [_parse_timestamp(child["finished_at"]) for child in child_rows if child["finished_at"] is not None]
         terminal = status in {BatchStatus.COMPLETED, BatchStatus.CANCELLED}
         return BatchRecord.model_validate(
             {
@@ -770,9 +762,6 @@ def _batch_id(now: datetime, sequence: int) -> str:
 
 def _batch_task_id(now: datetime, batch_sequence: int, source_index: int) -> str:
     _timestamp(now)
-    task_id = (
-        f"run-{now.astimezone(UTC):%Y%m%d-%H%M%S-%f}-"
-        f"b{batch_sequence:010d}-t{source_index:04d}"
-    )
+    task_id = f"run-{now.astimezone(UTC):%Y%m%d-%H%M%S-%f}-b{batch_sequence:010d}-t{source_index:04d}"
     EvaluationPaths(Path("."), task_id)
     return task_id

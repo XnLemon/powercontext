@@ -106,10 +106,7 @@ class SweBenchProInstance:
         fail_to_pass = _test_names(raw["FAIL_TO_PASS"], "FAIL_TO_PASS")
         pass_to_pass = _test_names(raw["PASS_TO_PASS"], "PASS_TO_PASS")
         preserved = MappingProxyType(
-            {
-                key: tuple(value) if isinstance(value, list) else value
-                for key, value in sorted(raw.items())
-            }
+            {key: tuple(value) if isinstance(value, list) else value for key, value in sorted(raw.items())}
         )
         return cls(
             repo=_nonblank(raw["repo"], "repo"),
@@ -173,10 +170,7 @@ class SweBenchProInstance:
     def official_row(self) -> dict[str, Any]:
         """Return an independent JSON-compatible copy of the pinned source row."""
 
-        return {
-            key: list(value) if isinstance(value, tuple) else value
-            for key, value in self.raw_row.items()
-        }
+        return {key: list(value) if isinstance(value, tuple) else value for key, value in self.raw_row.items()}
 
 
 def _require_exact_fields(raw: Mapping[str, object], expected: frozenset[str]) -> None:

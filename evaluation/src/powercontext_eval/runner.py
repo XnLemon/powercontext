@@ -216,9 +216,7 @@ def run_swebench_pro_instance(
                 arm=arm,
                 prompt=prompt,
                 codex_sidecar=stores[arm].root / "context/codex-observed.jsonl",
-                injection_sidecar=_optional_artifact(
-                    stores[arm].root / "context/powercontext-injections.jsonl"
-                ),
+                injection_sidecar=_optional_artifact(stores[arm].root / "context/powercontext-injections.jsonl"),
                 official=official[arm],
                 official_observed_at=datetime.now(UTC),
             )

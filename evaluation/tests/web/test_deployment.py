@@ -13,6 +13,7 @@ EXPECTED_ENVIRONMENT_KEYS = {
     "POWERCONTEXT_EVAL_AUTH_JSON",
     "POWERCONTEXT_EVAL_CODEX_BINARY",
     "POWERCONTEXT_EVAL_DATABASE_PATH",
+    "POWERCONTEXT_EVAL_DATASET_PATH",
     "POWERCONTEXT_EVAL_FRONTEND_DIST",
     "POWERCONTEXT_EVAL_HARNESS_PYTHON",
     "POWERCONTEXT_EVAL_HARNESS_ROOT",
@@ -22,7 +23,6 @@ EXPECTED_ENVIRONMENT_KEYS = {
     "POWERCONTEXT_EVAL_PORT",
     "POWERCONTEXT_EVAL_POWERCONTEXT_SOURCE",
     "POWERCONTEXT_EVAL_PROXY_URL",
-    "POWERCONTEXT_EVAL_RAW_SAMPLE_PATH",
     "POWERCONTEXT_EVAL_ROOT",
     "POWERCONTEXT_EVAL_RUN_ROOT",
     "POWERCONTEXT_EVAL_UV_BINARY",
@@ -101,6 +101,9 @@ def test_example_environment_uses_only_supported_named_configuration() -> None:
     assert config.host == "100.88.99.11"
     assert config.port == 8787
     assert config.proxy_url == "http://127.0.0.1:7890"
+    assert config.dataset_path == Path(
+        "/data/powercontext-eval/cache/swebench-pro.git/helper_code/sweap_eval_full_v2.jsonl"
+    )
     assert not re.search(r"(?i)(api[_-]?key|password|token|secret)=", example)
 
 
@@ -126,6 +129,12 @@ def test_operator_guide_documents_safety_acceptance_and_rollback_contracts() -> 
         "sudo -u rongfeng.frf test -r /data/powercontext-eval/codex-home/auth.json",
         "operator-supplied",
         "read-only except `/data/powercontext-eval` and the service's private temporary directory",
+        "731",
+        "b5b2462bfbf5aeb2cb7ba7d215778a1768b85f9d7ad7f748546c7f80a0ad1510",
+        "explicit final approval",
+        "do not start",
+        "sqlite3",
+        "paired",
     }
     assert all(term.lower() in guide.lower() for term in required)
 

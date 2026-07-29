@@ -781,11 +781,7 @@ class DockerSut:
                 raise UnsafeSutConfiguration("Codex recorder script must be a regular file")
             destination_fd = os.open(
                 destination,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | os.O_NOFOLLOW
-                | getattr(os, "O_CLOEXEC", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
                 0o400,
             )
             while chunk := os.read(source_fd, 64 * 1024):

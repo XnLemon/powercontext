@@ -486,15 +486,15 @@ def test_sut_uses_timestamp_recorder_and_retains_private_context_traces(tmp_path
         ArtifactStore(paths.result_root),
     )
 
-    codex_command = next(
-        command for command in docker.commands if "/evaluation/record_codex_jsonl.py" in command
-    )
+    codex_command = next(command for command in docker.commands if "/evaluation/record_codex_jsonl.py" in command)
     assert "/runtime/pc-env/bin/python" in codex_command
     assert "/runtime/pc-home/codex-observed.jsonl" in codex_command
     assert "POWERCONTEXT_EVAL_TRACE_PATH=/runtime/pc-home/evaluation-injections.jsonl" in codex_command
     assert (paths.result_root / "context/codex-observed.jsonl").read_text().startswith('{"sequence":1')
-    assert (paths.result_root / "context/powercontext-injections.jsonl").read_text().startswith(
-        '{"event_type":"powercontext_injection"'
+    assert (
+        (paths.result_root / "context/powercontext-injections.jsonl")
+        .read_text()
+        .startswith('{"event_type":"powercontext_injection"')
     )
 
 

@@ -32,7 +32,7 @@ def _read_jsonl(path: Path) -> list[dict[str, object]]:
 
 def _parse_utc(value: object) -> datetime:
     assert isinstance(value, str)
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value)
     assert parsed.tzinfo == UTC
     return parsed
 
@@ -46,7 +46,7 @@ def test_recorder_preserves_stdout_bytes_and_appends_timestamped_events(tmp_path
     emitter.write_bytes(b"import sys\nsys.stdout.buffer.write(" + repr(raw).encode() + b")\nsys.stdout.flush()\n")
     sidecar = tmp_path / "observed.jsonl"
 
-    completed = subprocess.run(  # noqa: S603 - exact test fixture argv.
+    completed = subprocess.run(
         [
             sys.executable,
             str(RECORDER),

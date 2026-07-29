@@ -464,9 +464,7 @@ def load_batch_report(
                     token_values[metric_name]["off"].append(off_value)
                     token_values[metric_name]["on"].append(on_value)
             candidate_revisions = dict(bundle.revisions)
-            candidate_configuration = {
-                key: value for key, value in bundle.configuration.items() if key != "instance"
-            }
+            candidate_configuration = {key: value for key, value in bundle.configuration.items() if key != "instance"}
             if revisions is None:
                 revisions = candidate_revisions
                 configuration = candidate_configuration

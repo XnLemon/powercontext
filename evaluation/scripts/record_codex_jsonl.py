@@ -34,11 +34,7 @@ def _open_sidecar(path: Path) -> BinaryIO:
         raise ValueError("sidecar path must be absolute")
     descriptor = os.open(
         path,
-        os.O_WRONLY
-        | os.O_APPEND
-        | os.O_CREAT
-        | os.O_NOFOLLOW
-        | getattr(os, "O_CLOEXEC", 0),
+        os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
         0o600,
     )
     try:
@@ -69,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
 
     malformed = False
     with _open_sidecar(args.sidecar) as sidecar:
-        process = subprocess.Popen(  # noqa: S603 - argv is passed through exactly without a shell.
+        process = subprocess.Popen(
             command,
             stdin=sys.stdin.buffer,
             stdout=subprocess.PIPE,

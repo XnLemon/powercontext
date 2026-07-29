@@ -217,7 +217,7 @@ def _parse_utc(value: object, field: str) -> datetime:
     if not isinstance(value, str):
         raise ContextTraceError(f"{field} timestamp is missing")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as error:
         raise ContextTraceError(f"{field} timestamp is malformed") from error
     try:
