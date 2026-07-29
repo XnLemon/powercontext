@@ -2,24 +2,28 @@ import { useCallback, useEffect, useState } from "react";
 
 import { EvaluationApi } from "./api";
 import { AppShell } from "./components/AppShell";
+import { BatchOverview } from "./components/BatchOverview";
+import { BatchTaskReport } from "./components/BatchTaskReport";
+import { ReportIndex } from "./components/ReportIndex";
 import { TaskForm } from "./components/TaskForm";
 
 interface AppProps {
   api?: EvaluationApi;
 }
 
-function usePath(): [string, (next: string) => void] {
-  const [path, setPath] = useState(window.location.pathname);
+function useLocation(): [string, (next: string) => void] {
+  const currentLocation = () => `${window.location.pathname}${window.location.search}`;
+  const [location, setLocation] = useState(currentLocation);
   useEffect(() => {
-    const onPop = () => setPath(window.location.pathname);
+    const onPop = () => setLocation(currentLocation());
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
   const navigate = useCallback((next: string) => {
-    if (next !== window.location.pathname) window.history.pushState({}, "", next);
-    setPath(next);
+    if (next !== currentLocation()) window.history.pushState({}, "", next);
+    setLocation(next);
   }, []);
-  return [path, navigate];
+  return [location, navigate];
 }
 
 interface Route {
@@ -51,7 +55,10 @@ function parseRoute(path: string): Route {
 export function App({ api: injectedApi }: AppProps) {
   const [defaultApi] = useState(() => new EvaluationApi());
   const api = injectedApi ?? defaultApi;
-  const [path, navigate] = usePath();
+  const [location, navigate] = useLocation();
+  const [pathValue, searchValue = ""] = location.split("?", 2);
+  const path = pathValue ?? "/";
+  const search = searchValue === "" ? "" : `?${searchValue}`;
   const route = parseRoute(path);
 
   let content;
@@ -65,15 +72,13 @@ export function App({ api: injectedApi }: AppProps) {
   } else if (route.page === "tasks" && route.batchId !== null) {
     content = (
       <div className="page">
-        <PageHeader eyebrow={route.batchId} title="任务详细报告" description="逐项比较 OFF / ON 的客观结果。" />
-        <section className="panel state-message">正在读取任务列表…</section>
+        <BatchTaskReport api={api} batchId={route.batchId} search={search} navigate={navigate} />
       </div>
     );
   } else if (route.batchId !== null) {
     content = (
       <div className="page">
-        <PageHeader eyebrow={route.batchId} title="总体报告" />
-        <section className="panel state-message">正在读取批次报告…</section>
+        <BatchOverview api={api} batchId={route.batchId} navigate={navigate} />
       </div>
     );
   } else {
@@ -84,10 +89,13 @@ export function App({ api: injectedApi }: AppProps) {
           title="总体报告"
           description="选择已有批次，或提交一次固定 731 任务的完整 OFF / ON 评测。"
         />
-        <TaskForm
-          api={api}
-          onCreated={(batch) => navigate(`/report/${encodeURIComponent(batch.batch_id)}`)}
-        />
+        <div className="batch-home-grid">
+          <TaskForm
+            api={api}
+            onCreated={(batch) => navigate(`/report/${encodeURIComponent(batch.batch_id)}`)}
+          />
+          <ReportIndex api={api} navigate={navigate} />
+        </div>
       </div>
     );
   }

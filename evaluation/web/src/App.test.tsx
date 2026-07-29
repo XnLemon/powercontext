@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -27,8 +27,8 @@ describe("App batch report navigation", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "运行完整评测" }));
 
+    await waitFor(() => expect(window.location.pathname).toBe("/report/batch%2Fnew"));
     expect(await screen.findByRole("heading", { name: "总体报告" })).toBeVisible();
-    expect(window.location.pathname).toBe("/report/batch%2Fnew");
     expect(screen.getByRole("link", { name: "任务详细报告" })).not.toHaveAttribute("aria-disabled");
   });
 
