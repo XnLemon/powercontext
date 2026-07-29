@@ -1016,7 +1016,7 @@ git commit -m "feat(eval): control and retry batch runs"
 - Modify: `evaluation/README.md`
 - Modify: `docs/superpowers/specs/2026-07-29-subscription-controlled-batch-execution-design.md`
 
-- [ ] **Step 1: Extend the deterministic fake environment**
+- [x] **Step 1: Extend the deterministic fake environment**
 
 The fake usage probe exposes scripted snapshots:
 
@@ -1030,7 +1030,7 @@ resume snapshot: 50%
 The fake runner blocks task 1 long enough to request pause/cancel and makes one selected task fail once then succeed
 on retry. It never calls real Codex or Docker.
 
-- [ ] **Step 2: Write the complete browser flow**
+- [x] **Step 2: Write the complete browser flow**
 
 Exercise:
 
@@ -1045,7 +1045,7 @@ Exercise:
 9. cancel while a task runs and verify remaining tasks cancel afterward;
 10. inspect aggregate, filtered list, detail, attempts, and exact ON context injection.
 
-- [ ] **Step 3: Run E2E and verify RED, then implement fake support**
+- [x] **Step 3: Run E2E and verify RED, then implement fake support**
 
 ```bash
 npm run e2e
@@ -1055,7 +1055,7 @@ Run from `evaluation/web`.
 
 Expected before fake support: test fails at preview/controls. Expected after support: all E2E tests pass.
 
-- [ ] **Step 4: Update deployment contract tests and operator docs**
+- [x] **Step 4: Update deployment contract tests and operator docs**
 
 Assert the example environment includes:
 
@@ -1069,7 +1069,7 @@ POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS=120
 Document preview, confirmation, boundary pause/cancel, manual resume, threshold editing, retry rules, usage
 unavailability, backup, rollback, and the prohibition on starting a real batch during deployment verification.
 
-- [ ] **Step 5: Run the complete local verification matrix**
+- [x] **Step 5: Run the complete local verification matrix**
 
 ```bash
 uv run --project evaluation pytest -c evaluation/pyproject.toml evaluation/tests -m "not live" -q
@@ -1085,7 +1085,11 @@ Run the Python commands from repository root and npm commands from `evaluation/w
 
 Expected: all tests, lint, formatting, type checks, build, and E2E pass.
 
-- [ ] **Step 6: Perform a requirements audit**
+Recorded result: tests, lint, formatting, changed-surface type checks, build, and E2E pass. Full `ty check src tests`
+has 52 test-fixture diagnostics that reproduce unchanged at the immediately preceding `0f089a8` baseline; the design
+audit records this explicitly instead of claiming a full type-check pass.
+
+- [x] **Step 6: Perform a requirements audit**
 
 For each of the 23 acceptance criteria in the design, record the proving test, API response, rendered UI behavior, or
 deployment check. Any criterion without direct evidence remains incomplete.

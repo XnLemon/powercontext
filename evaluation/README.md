@@ -19,17 +19,46 @@ The pinned dataset SHA-256 is
 `b5b2462bfbf5aeb2cb7ba7d215778a1768b85f9d7ad7f748546c7f80a0ad1510`. The catalog refuses to start if the
 file hash, row count, row schema, task IDs, or source order differs.
 
-The production 731-task batch is expensive and long-running. Do not start it during deployment or smoke testing.
+The production 731-task batch is long-running and consumes the account's subscription allowance. Do not start it
+during deployment or smoke testing.
 Before a real run, record and show the user:
 
 ```text
-expected wall time = sum of the 731 observed OFF/ON pair durations
-expected model cost = estimated OFF input/output cost + estimated ON input/output cost
-cost ceiling = operator-approved maximum before submission
+current subscription usage = latest sanitized Codex used percent and reset time
+pause threshold = the selected used-percent boundary
+remaining estimate = observed paired Token and duration samples, or unavailable
 ```
 
-If representative production measurements do not yet exist, state that the estimate is unknown; do not invent one.
-A real batch requires explicit final approval after the expected wall time, model cost, and cost ceiling are visible.
+If representative measurements do not yet exist, state that the estimate is unavailable; do not invent one. Codex
+is subscription-controlled here, so the console does not display currency or pretend that it has an account balance.
+A real batch requires explicit final approval after the non-mutating preview shows these facts.
+
+## Subscription usage and batch controls
+
+The launcher first creates a preview. Preview reads the current sanitized account usage and fixed 731-task contract,
+but creates no batch, queue row, attempt, or model call. Only **Confirm and start** persists work.
+
+The deployment defaults are:
+
+| Setting | Default | Meaning |
+| --- | ---: | --- |
+| `POWERCONTEXT_EVAL_USAGE_PAUSE_PERCENT` | `80` | Stop claiming new tasks at or above this used percentage |
+| `POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS` | `60` | Normal interval between account-usage observations |
+| `POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS` | `15` | Maximum duration of one bounded usage probe |
+| `POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS` | `120` | Oldest observation accepted by preview, start, resume, and retry |
+
+Pause and cancel use a complete SWE-bench task as the boundary: the active OFF/ON pair finishes, then pause starts no
+new child, while cancel marks every remaining unstarted child cancelled. They do not kill an arm midway. Resume is
+always a manual resume and requires a fresh observation below the current threshold. Raising the threshold, reaching
+the reset time, or recovering from usage unavailable never resumes a batch implicitly.
+
+Changing a threshold updates only the protected batch and writes a control event. A transient usage-probe failure is
+reported as usage unavailable and fails closed: preview, start, resume, and retry cannot proceed, and runnable batches
+pause at the next safe boundary.
+
+Only infrastructure failures are retryable. A retry creates a new immutable attempt for that logical task; prior
+attempt evidence remains available, and no other completed task is rerun. Official `RESOLVED` and `UNRESOLVED`
+outcomes are benchmark results and cannot be retried.
 
 ## Build and test the checkout
 
@@ -126,10 +155,10 @@ Persistent state and artifacts live under `/data/powercontext-eval`:
 - Cached harness and dataset: `/data/powercontext-eval/cache/`
 - Checkout and frontend snapshot: `/data/powercontext-eval/deploy/powercontext/`
 
-Batch membership, source order, and the resolved PowerContext commit are stored durably. Completed children are
-never rerun automatically. After restart, queued children remain queued; an expired running lease becomes an
-interrupted child, and the worker continues with later queued children. Aggregate reports are rebuilt from the
-immutable retained child artifacts.
+Batch membership, source order, the resolved PowerContext commit, control intent, usage observations, control events,
+and each immutable attempt are stored durably. Completed children are never rerun automatically. After restart,
+queued children remain queued; an expired running lease becomes an interrupted child, and the worker continues with
+later queued children. Aggregate reports are rebuilt from the immutable retained child artifacts.
 
 ## Report semantics and retained context
 
@@ -197,16 +226,16 @@ Verify the production catalog without starting work:
 
 The output must be exactly the count `731` followed by the pinned SHA-256 above.
 
-To validate batch creation and cancellation without accidentally launching Codex:
+To validate preview and the task-boundary control contract without accidentally launching Codex:
 
 1. keep `powercontext-eval-worker.service` stopped;
-2. create one batch through `POST /api/batches`;
-3. verify it contains exactly 731 queued children and zero running children;
-4. cancel it through `POST /api/batches/{batch_id}/cancel`;
-5. verify all 731 children are cancelled;
-6. restart the worker only after this check and only when no real batch is queued.
+2. verify `POST /api/batches/preview` reports exactly 731 tasks and creates no queue rows;
+3. run pause, resume, cancel, and retry checks only against the deterministic fixture or an already-cancelled
+   validation batch;
+4. verify the control-event order, attempt retention, and zero running real children;
+5. restart the worker only when no real batch is queued.
 
-This create/cancel transaction is a deployment check, not authorization to run the paid benchmark.
+This preview and deterministic control check is a deployment check, not authorization to run the real benchmark.
 
 ## Rollback
 

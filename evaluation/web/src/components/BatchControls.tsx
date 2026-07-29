@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import type { EvaluationApi } from "../api";
 import type { BatchControlEvent, BatchRecord, BatchReport, UsageSnapshot } from "../types";
+import { formatUsageWindow } from "../usageFormat";
 
 interface BatchControlsProps {
   api: EvaluationApi;
@@ -103,7 +104,13 @@ export function BatchControls({ api, batch, report, onUpdated }: BatchControlsPr
         <article>
           <span>Codex 账户用量</span>
           <strong>{usage === null ? "暂不可用" : `${usage.used_percent}%`}</strong>
-          {usage !== null && <small>采样 {dateTime(usage.observed_at)} · 重置 {dateTime(usage.resets_at)}</small>}
+          {usage !== null && (
+            <small>
+              计量窗口 {formatUsageWindow(usage.window_duration_minutes)}
+              {" · "}采样 {dateTime(usage.observed_at)}
+              {" · "}重置 {dateTime(usage.resets_at)}
+            </small>
+          )}
         </article>
         <article>
           <span>剩余用量</span>

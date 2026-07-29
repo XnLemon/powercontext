@@ -197,9 +197,7 @@ def test_initialize_migrates_current_cancelled_batch_control_without_rewriting_c
             ("batch-legacy", batch.idempotency_key, batch.model_dump_json(), 2, NOW.isoformat()),
         )
         for index in range(2):
-            child = request(f"legacy-child-{index}").model_copy(
-                update={"instance_id": f"instance_owner__repo-{index}"}
-            )
+            child = request(f"legacy-child-{index}").model_copy(update={"instance_id": f"instance_owner__repo-{index}"})
             connection.execute(
                 """
                 INSERT INTO tasks(
@@ -251,9 +249,7 @@ def test_usage_snapshots_are_append_only_and_survive_restart(database: Path) -> 
     restarted.initialize()
     assert restarted.latest_usage_snapshot() == second
     with sqlite3.connect(database) as connection:
-        rows = connection.execute(
-            "SELECT snapshot_json FROM usage_snapshots ORDER BY snapshot_seq ASC"
-        ).fetchall()
+        rows = connection.execute("SELECT snapshot_json FROM usage_snapshots ORDER BY snapshot_seq ASC").fetchall()
     assert [UsageSnapshot.model_validate_json(row[0], strict=True) for row in rows] == [first, second]
 
 

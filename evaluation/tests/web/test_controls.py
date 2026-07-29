@@ -12,40 +12,61 @@ from powercontext_eval.web.models import TaskStatus
 
 
 def test_visible_batch_lifecycle_waits_for_running_task_before_pausing() -> None:
-    assert derive_controlled_batch_status(
-        intent=BatchControlIntent.PAUSE,
-        task_statuses=(TaskStatus.RUNNING, TaskStatus.QUEUED),
-    ) is BatchStatus.PAUSING
-    assert derive_controlled_batch_status(
-        intent=BatchControlIntent.PAUSE,
-        task_statuses=(TaskStatus.SUCCEEDED, TaskStatus.QUEUED),
-    ) is BatchStatus.PAUSED
+    assert (
+        derive_controlled_batch_status(
+            intent=BatchControlIntent.PAUSE,
+            task_statuses=(TaskStatus.RUNNING, TaskStatus.QUEUED),
+        )
+        is BatchStatus.PAUSING
+    )
+    assert (
+        derive_controlled_batch_status(
+            intent=BatchControlIntent.PAUSE,
+            task_statuses=(TaskStatus.SUCCEEDED, TaskStatus.QUEUED),
+        )
+        is BatchStatus.PAUSED
+    )
 
 
 def test_visible_batch_lifecycle_waits_for_running_task_before_cancelling() -> None:
-    assert derive_controlled_batch_status(
-        intent=BatchControlIntent.CANCEL,
-        task_statuses=(TaskStatus.RUNNING, TaskStatus.QUEUED),
-    ) is BatchStatus.CANCELLING
-    assert derive_controlled_batch_status(
-        intent=BatchControlIntent.CANCEL,
-        task_statuses=(TaskStatus.SUCCEEDED, TaskStatus.CANCELLED),
-    ) is BatchStatus.CANCELLED
+    assert (
+        derive_controlled_batch_status(
+            intent=BatchControlIntent.CANCEL,
+            task_statuses=(TaskStatus.RUNNING, TaskStatus.QUEUED),
+        )
+        is BatchStatus.CANCELLING
+    )
+    assert (
+        derive_controlled_batch_status(
+            intent=BatchControlIntent.CANCEL,
+            task_statuses=(TaskStatus.SUCCEEDED, TaskStatus.CANCELLED),
+        )
+        is BatchStatus.CANCELLED
+    )
 
 
 def test_run_intent_preserves_existing_queue_running_and_completion_meaning() -> None:
-    assert derive_controlled_batch_status(
-        intent=BatchControlIntent.RUN,
-        task_statuses=(TaskStatus.QUEUED, TaskStatus.QUEUED),
-    ) is BatchStatus.QUEUED
-    assert derive_controlled_batch_status(
-        intent=BatchControlIntent.RUN,
-        task_statuses=(TaskStatus.SUCCEEDED, TaskStatus.QUEUED),
-    ) is BatchStatus.RUNNING
-    assert derive_controlled_batch_status(
-        intent=BatchControlIntent.RUN,
-        task_statuses=(TaskStatus.SUCCEEDED, TaskStatus.FAILED),
-    ) is BatchStatus.COMPLETED
+    assert (
+        derive_controlled_batch_status(
+            intent=BatchControlIntent.RUN,
+            task_statuses=(TaskStatus.QUEUED, TaskStatus.QUEUED),
+        )
+        is BatchStatus.QUEUED
+    )
+    assert (
+        derive_controlled_batch_status(
+            intent=BatchControlIntent.RUN,
+            task_statuses=(TaskStatus.SUCCEEDED, TaskStatus.QUEUED),
+        )
+        is BatchStatus.RUNNING
+    )
+    assert (
+        derive_controlled_batch_status(
+            intent=BatchControlIntent.RUN,
+            task_statuses=(TaskStatus.SUCCEEDED, TaskStatus.FAILED),
+        )
+        is BatchStatus.COMPLETED
+    )
 
 
 def test_preview_request_defaults_to_eighty_percent() -> None:

@@ -39,7 +39,9 @@ def test_four_samples_are_preliminary_and_use_observed_pair_duration() -> None:
 
 def test_five_samples_are_measured_and_historical_basis_is_visible() -> None:
     estimate = estimate_batch(
-        samples=tuple(EstimateSample(tokens=value, duration_seconds=value // 10) for value in (100, 200, 300, 400, 500)),
+        samples=tuple(
+            EstimateSample(tokens=value, duration_seconds=value // 10) for value in (100, 200, 300, 400, 500)
+        ),
         remaining_tasks=2,
         basis=EstimateBasis.HISTORICAL_COMPATIBLE,
     )

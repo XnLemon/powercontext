@@ -41,6 +41,7 @@ describe("BatchLauncher", () => {
     expect(createBatch).not.toHaveBeenCalled();
     expect(await screen.findByText("731 个基准任务")).toBeVisible();
     expect(screen.getByText("当前用量 9%")).toBeVisible();
+    expect(screen.getByText("7 天")).toBeVisible();
     expect(screen.getByText("初步估算 · 4 个样本")).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "确认并开始评测" }));

@@ -27,6 +27,7 @@ describe("BatchControls", () => {
 
     expect(await screen.findByText("Codex 账户用量")).toBeVisible();
     expect(screen.getByText("32%")).toBeVisible();
+    expect(screen.getByText(/计量窗口 7 天/)).toBeVisible();
     expect(screen.getByText("18 / 731")).toBeVisible();
     expect(screen.getByText("已测量 · 100 个样本")).toBeVisible();
     expect(screen.getByRole("button", { name: "暂停" })).toBeEnabled();

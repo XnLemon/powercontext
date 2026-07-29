@@ -622,3 +622,39 @@ A deterministic fake App Server and fake runner cover:
 21. A failed benchmark task can be retried as a new immutable attempt.
 22. A valid `RESOLVED` or `UNRESOLVED` benchmark outcome cannot be retried.
 23. Retrying one task never reruns another completed task.
+
+## 17. Acceptance Evidence Audit
+
+This table records direct evidence, rather than treating the design checklist itself as proof.
+
+| # | Status | Direct evidence |
+| ---: | --- | --- |
+| 1 | Verified locally | `BatchLauncher.test.tsx` preview/confirm test and controlled-batch browser E2E |
+| 2 | Verified locally | `test_batch_preview_is_read_only_and_exposes_fixed_facts_usage_and_estimate` |
+| 3 | Verified locally | `test_probe_reads_normalized_subscription_usage_and_sends_exact_protocol`; launcher and controls tests display used, remaining, window, reset, and observation facts |
+| 4 | Verified locally | Launcher test rejects currency/amount wording; operator guide defines subscription-only semantics |
+| 5 | Verified locally | `test_preview_request_defaults_to_eighty_percent` and deployment environment contract |
+| 6 | Verified locally | `test_threshold_updates_use_optimistic_concurrency_and_do_not_auto_resume` and controls UI test |
+| 7 | Verified locally | `test_worker_pauses_before_claim_when_usage_reaches_configured_threshold` and 81-percent E2E pause |
+| 8 | Verified locally | stale/unavailable API tests and `test_worker_fails_closed_when_usage_is_unavailable` |
+| 9 | Verified locally | store/worker boundary-pause tests and controlled-batch E2E |
+| 10 | Verified locally | pause boundary tests prove no later child is claimed |
+| 11 | Verified locally | cancel boundary tests and E2E verify remaining children become cancelled |
+| 12 | Verified locally | fresh-snapshot resume store test and 50-percent E2E resume snapshot |
+| 13 | Verified locally | threshold update store test and controls UI test |
+| 14 | Verified locally | `test_restart_reuses_persisted_batch_sha_and_completed_children` |
+| 15 | Verified locally | `test_worker_skips_paused_oldest_batch_and_claims_next_runnable_batch` |
+| 16 | Verified locally | global store lease test and `test_only_one_child_runs_physically_across_multiple_batches` |
+| 17 | Verified locally | all estimation unit tests and unavailable/preliminary launcher rendering |
+| 18 | Verified locally | controls account-usage card and aggregate batch Token cards are separate components |
+| 19 | Verified locally | browser E2E covers aggregate, filtered list, task detail, attempt selection, and exact ON injection |
+| 20 | Pending m0 verification | deployment contract and operator tests pass; live m0 backup, service, visual, and zero-real-work checks remain |
+| 21 | Verified locally | immutable retry store/API/component tests and first-failure-then-success browser E2E |
+| 22 | Verified locally | `test_valid_official_outcomes_are_never_retryable` and attempt-history UI test |
+| 23 | Verified locally | `test_worker_executes_only_the_new_attempt_when_a_failed_task_is_retried` and E2E retained-attempt check |
+
+Local verification on 2026-07-30 produced 609 passing Python tests, 64 passing frontend tests, a successful production
+build, two passing browser E2E scenarios, passing Ruff/format checks, and passing type checks for the changed runtime
+and deterministic deployment-test surfaces. Full evaluation-project `ty check src tests` still reports 52 pre-existing
+test-fixture typing diagnostics; the immediately preceding `0f089a8` baseline reports the same diagnostics, so this is
+recorded as baseline debt rather than a regression or a successful full type check.

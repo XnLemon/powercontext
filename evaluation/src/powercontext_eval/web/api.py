@@ -411,10 +411,7 @@ def create_app(
             total_tasks = len(get_catalog().instance_ids)
         except CatalogError:
             return _error(503, "benchmark_unavailable", "The pinned benchmark task set is unavailable.")
-        blocked = (
-            snapshot.rate_limit_reached_type is not None
-            or snapshot.used_percent >= request.usage_pause_percent
-        )
+        blocked = snapshot.rate_limit_reached_type is not None or snapshot.used_percent >= request.usage_pause_percent
         response = BatchPreviewResponse(
             powercontext_ref=request.powercontext_ref,
             benchmark="swebench-pro",

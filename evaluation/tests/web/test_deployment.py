@@ -25,6 +25,10 @@ EXPECTED_ENVIRONMENT_KEYS = {
     "POWERCONTEXT_EVAL_PROXY_URL",
     "POWERCONTEXT_EVAL_ROOT",
     "POWERCONTEXT_EVAL_RUN_ROOT",
+    "POWERCONTEXT_EVAL_USAGE_PAUSE_PERCENT",
+    "POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS",
+    "POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS",
+    "POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS",
     "POWERCONTEXT_EVAL_UV_BINARY",
 }
 
@@ -104,6 +108,10 @@ def test_example_environment_uses_only_supported_named_configuration() -> None:
     assert config.dataset_path == Path(
         "/data/powercontext-eval/cache/swebench-pro.git/helper_code/sweap_eval_full_v2.jsonl"
     )
+    assert config.usage_pause_percent == 80
+    assert config.usage_probe_seconds == 60
+    assert config.usage_probe_timeout_seconds == 15
+    assert config.usage_snapshot_max_age_seconds == 120
     assert not re.search(r"(?i)(api[_-]?key|password|token|secret)=", example)
 
 
@@ -135,6 +143,11 @@ def test_operator_guide_documents_safety_acceptance_and_rollback_contracts() -> 
         "do not start",
         "sqlite3",
         "paired",
+        "preview",
+        "manual resume",
+        "usage unavailable",
+        "attempt",
+        "boundary",
     }
     assert all(term.lower() in guide.lower() for term in required)
 

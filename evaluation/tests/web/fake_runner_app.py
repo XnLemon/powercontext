@@ -8,7 +8,7 @@ import signal
 import tempfile
 import threading
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Literal
@@ -21,6 +21,7 @@ from powercontext_eval.benchmarks.swebench_pro.adapter import (
     HARNESS_COMMIT,
     SweBenchProInstance,
 )
+from powercontext_eval.codex import CodexInfrastructureError
 from powercontext_eval.models import Arm
 from powercontext_eval.paths import EvaluationPaths
 from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, TestGroupReport, render_report
@@ -28,10 +29,11 @@ from powercontext_eval.runner import MinimalRunResult, PhaseCallback, RunConfig,
 from powercontext_eval.web.api import create_app
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.store import TaskStore
+from powercontext_eval.web.usage import UsageSnapshot
 from powercontext_eval.web.worker import EvaluationWorker
 
 PORT = 4177
-PHASE_DELAY_SECONDS = 0.05
+PHASE_DELAY_SECONDS = 0.15
 PLUGIN_SHA = "a" * 40
 
 
@@ -69,8 +71,44 @@ class _Catalog:
 
 
 class _Source:
-    def resolve(self, _source: str | Path, _requested: object) -> object:
+    def resolve(self, source: str | Path, requested: object) -> object:
+        del source, requested
         return SimpleNamespace(sha=PLUGIN_SHA)
+
+
+class _ScriptedUsageProbe:
+    """Derive repeatable account usage from the fixture's durable task progress."""
+
+    def __init__(self, store: TaskStore) -> None:
+        self._store = store
+
+    def read(self, *, now: datetime) -> UsageSnapshot:
+        terminal_tasks = 0
+        threshold = 80
+        for batch in self._store.list_batches():
+            threshold = batch.control.usage_pause_percent
+            terminal_tasks += sum(
+                task.status.value in {"succeeded", "failed", "interrupted", "cancelled"}
+                for task in self._store.list_batch_tasks(batch.batch_id)
+            )
+        if terminal_tasks == 0:
+            used_percent = 20
+        elif terminal_tasks == 1:
+            used_percent = 40
+        elif terminal_tasks == 2 and threshold <= 80:
+            used_percent = 81
+        else:
+            used_percent = 50
+        return UsageSnapshot(
+            limit_id="codex",
+            used_percent=used_percent,
+            remaining_percent=100 - used_percent,
+            window_duration_minutes=300,
+            resets_at=now + timedelta(hours=3),
+            observed_at=now.astimezone(UTC),
+            plan_type="plus",
+            account_tokens=1_000_000 + terminal_tasks * 10_000,
+        )
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -246,6 +284,7 @@ OUTCOMES: dict[str, tuple[bool, bool, tuple[int, int], tuple[int, int]]] = {
     "b": (True, False, (80, 8), (120, 12)),
     "c": (True, True, (110, 11), (105, 10)),
     "d": (False, False, (70, 7), (72, 8)),
+    "e": (False, True, (75, 7), (68, 7)),
     "f": (True, True, (95, 9), (88, 8)),
 }
 
@@ -260,12 +299,14 @@ def fake_runner(
 
     if config.run_id is None:
         raise ValueError("The browser worker must provide a run ID")
+    letter = instance.instance_id[-1]
+    fail_first_attempt = letter == "a" and ".attempt-" not in config.run_id
     for phase in RunPhase:
         on_phase(phase)
         time.sleep(PHASE_DELAY_SECONDS)
-    letter = instance.instance_id[-1]
-    if letter == "e":
-        raise RuntimeError("deterministic execution failure")
+        if fail_first_attempt and phase is RunPhase.RUNNING_OFF:
+            time.sleep(0.6)
+            raise CodexInfrastructureError("deterministic first-attempt failure")
     off_resolved, on_resolved, off_usage, on_usage = OUTCOMES[letter]
     layout = EvaluationPaths(config.root, config.run_id)
     layout.run_artifacts.mkdir(parents=True)
@@ -324,10 +365,13 @@ def main() -> None:
     )
     store = TaskStore(config.database_path, lease_duration=timedelta(seconds=config.lease_seconds))
     store.initialize()
+    usage_probe = _ScriptedUsageProbe(store)
+    store.save_usage_snapshot(usage_probe.read(now=datetime.now(UTC)))
     catalog = _Catalog()
     worker = EvaluationWorker(
         config,
         store,
+        usage_probe=usage_probe,
         runner=fake_runner,
         source=_Source(),
         catalog=catalog,

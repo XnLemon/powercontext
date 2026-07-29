@@ -5,6 +5,45 @@ import { TaskRunDetail } from "./TaskRunDetail";
 import { apiStub, batchRecord, batchTaskDetail } from "../test/fixtures";
 
 describe("TaskRunDetail", () => {
+  it("does not request a complete timeline for an infrastructure-failed attempt", async () => {
+    const listContextEvents = vi.fn();
+    const api = apiStub({
+      getBatch: vi.fn().mockResolvedValue(batchRecord({ status: "completed" })),
+      getBatchTask: vi.fn().mockResolvedValue({
+        ...batchTaskDetail,
+        task: {
+          ...batchTaskDetail.task,
+          status: "failed",
+          retryable: true,
+          pair_category: "execution_failure",
+          off: null,
+          on: null,
+          tokens: { off: null, on: null, delta: null },
+          failure_category: "codex_execution_failure",
+          failure_summary: "Codex execution failed.",
+        },
+        off: null,
+        on: null,
+      }),
+      listContextEvents,
+    });
+
+    render(
+      <TaskRunDetail
+        api={api}
+        batchId="batch-001"
+        taskId="task-001"
+        search=""
+        navigate={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "单任务详情" })).toBeVisible();
+    expect(screen.getByText("Codex execution failed.")).toBeVisible();
+    expect(screen.getByText("本次尝试没有形成可用的完整上下文时间线。")).toBeVisible();
+    expect(listContextEvents).not.toHaveBeenCalled();
+  });
+
   it("renders a cancelled task as not executed instead of failed", async () => {
     const api = apiStub({
       getBatch: vi.fn().mockResolvedValue(batchRecord({ status: "cancelled" })),

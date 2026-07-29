@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import type { EvaluationApi } from "../api";
 import type { BatchCreate, BatchPreview, BatchRecord } from "../types";
+import { formatUsageWindow } from "../usageFormat";
 
 interface BatchLauncherProps {
   api: EvaluationApi;
@@ -195,6 +196,7 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
             <div><dt>任务集</dt><dd>SWE-bench Pro public v2</dd></div>
             <div><dt>运行方式</dt><dd>每个任务 OFF / ON 配对执行</dd></div>
             <div><dt>暂停阈值</dt><dd>{preview.usage_pause_percent}%</dd></div>
+            <div><dt>计量窗口</dt><dd>{formatUsageWindow(preview.usage.window_duration_minutes)}</dd></div>
             <div><dt>额度重置</dt><dd>{dateTime(preview.usage.resets_at)}</dd></div>
             <div><dt>用量采样</dt><dd>{dateTime(preview.usage.observed_at)}</dd></div>
             <div>

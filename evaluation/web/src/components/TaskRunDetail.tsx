@@ -195,6 +195,15 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
           <h2>完整上下文时间线</h2>
           <p>任务未执行，因此没有上下文时间线。</p>
         </section>
+      ) : !hasComparison ? (
+        <section className="report-section empty-state">
+          <h2>完整上下文时间线</h2>
+          <p>
+            {task.status === "failed" || task.status === "interrupted"
+              ? "本次尝试没有形成可用的完整上下文时间线。"
+              : "本次尝试尚未形成可用的完整上下文时间线。"}
+          </p>
+        </section>
       ) : (
         <ContextTimeline
           api={api}

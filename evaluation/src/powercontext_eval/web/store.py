@@ -189,20 +189,14 @@ class TaskStore:
             if "control_intent" not in batch_columns:
                 connection.execute("ALTER TABLE batches ADD COLUMN control_intent TEXT NOT NULL DEFAULT 'run'")
             if "usage_pause_percent" not in batch_columns:
-                connection.execute(
-                    "ALTER TABLE batches ADD COLUMN usage_pause_percent INTEGER NOT NULL DEFAULT 80"
-                )
+                connection.execute("ALTER TABLE batches ADD COLUMN usage_pause_percent INTEGER NOT NULL DEFAULT 80")
             if "pause_reason" not in batch_columns:
                 connection.execute("ALTER TABLE batches ADD COLUMN pause_reason TEXT")
             if "control_updated_at" not in batch_columns:
                 connection.execute("ALTER TABLE batches ADD COLUMN control_updated_at TEXT")
             if "control_version" not in batch_columns:
-                connection.execute(
-                    "ALTER TABLE batches ADD COLUMN control_version INTEGER NOT NULL DEFAULT 0"
-                )
-            connection.execute(
-                "UPDATE batches SET control_updated_at = created_at WHERE control_updated_at IS NULL"
-            )
+                connection.execute("ALTER TABLE batches ADD COLUMN control_version INTEGER NOT NULL DEFAULT 0")
+            connection.execute("UPDATE batches SET control_updated_at = created_at WHERE control_updated_at IS NULL")
             connection.execute(
                 """
                 UPDATE batches
@@ -692,10 +686,7 @@ class TaskStore:
     ) -> tuple[TaskAttemptRecord, bool]:
         """Create one new queued attempt without modifying retained failures."""
 
-        if (
-            not isinstance(idempotency_key, str)
-            or fullmatch(r"[A-Za-z0-9._-]{8,128}", idempotency_key) is None
-        ):
+        if not isinstance(idempotency_key, str) or fullmatch(r"[A-Za-z0-9._-]{8,128}", idempotency_key) is None:
             raise ValueError("Retry idempotency key is invalid")
         created_at = _timestamp(now)
         with self._write() as connection:
@@ -839,8 +830,7 @@ class TaskStore:
         parameters.extend((limit, offset))
         with self._connection() as connection:
             return [
-                self._summary(self._record(connection, row))
-                for row in connection.execute(sql, parameters).fetchall()
+                self._summary(self._record(connection, row)) for row in connection.execute(sql, parameters).fetchall()
             ]
 
     def queue_position(self, task_id: str) -> int | None:
@@ -934,10 +924,7 @@ class TaskStore:
         with self._write() as connection:
             self._save_usage_snapshot(connection, snapshot)
             self._apply_usage_snapshot(connection, snapshot, now=now)
-            allow_standalone = (
-                snapshot.rate_limit_reached_type is None
-                and snapshot.used_percent < default_threshold
-            )
+            allow_standalone = snapshot.rate_limit_reached_type is None and snapshot.used_percent < default_threshold
             return self._claim_next(
                 connection,
                 worker_id,
@@ -1651,9 +1638,7 @@ class TaskStore:
                         if attempt["failure_category"] is not None
                         else None
                     ),
-                    "phase": (
-                        TaskPhase(attempt["failure_phase"]) if attempt["failure_phase"] is not None else None
-                    ),
+                    "phase": (TaskPhase(attempt["failure_phase"]) if attempt["failure_phase"] is not None else None),
                     "summary": attempt["failure_summary"],
                 },
                 strict=True,
@@ -1667,8 +1652,7 @@ class TaskStore:
                 "attempt_number": attempt["attempt_number"],
                 "attempt_count": attempt_count,
                 "retryable": (
-                    status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED}
-                    and failure_category in RETRYABLE_FAILURES
+                    status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED} and failure_category in RETRYABLE_FAILURES
                 ),
                 "request": request,
                 "status": status,
@@ -1693,9 +1677,7 @@ class TaskStore:
         status = TaskStatus(row["status"])
         category = FailureCategory(row["failure_category"]) if row["failure_category"] is not None else None
         result = (
-            TaskResult.model_validate_json(row["result_json"], strict=True)
-            if row["result_json"] is not None
-            else None
+            TaskResult.model_validate_json(row["result_json"], strict=True) if row["result_json"] is not None else None
         )
         return TaskAttemptRecord.model_validate(
             {
@@ -1709,15 +1691,10 @@ class TaskStore:
                 "finished_at": _parse_optional_timestamp(row["finished_at"]),
                 "version": row["version"],
                 "failure_category": category,
-                "failure_phase": (
-                    TaskPhase(row["failure_phase"]) if row["failure_phase"] is not None else None
-                ),
+                "failure_phase": (TaskPhase(row["failure_phase"]) if row["failure_phase"] is not None else None),
                 "failure_summary": row["failure_summary"],
                 "result": result,
-                "retryable": (
-                    status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED}
-                    and category in RETRYABLE_FAILURES
-                ),
+                "retryable": (status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED} and category in RETRYABLE_FAILURES),
             },
             strict=True,
         )
