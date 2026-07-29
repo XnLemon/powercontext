@@ -53,8 +53,8 @@ def test_worker_initializes_store_and_runs_with_configured_poll(monkeypatch, tmp
             calls.append(("initialize",))
 
     class FakeWorker:
-        def __init__(self, config: object, store: object) -> None:
-            calls.append(("worker", config, store))
+        def __init__(self, config: object, store: object, *, usage_probe: object) -> None:
+            calls.append(("worker", config, store, usage_probe))
 
         def run_forever(self) -> None:
             calls.append(("run_forever",))

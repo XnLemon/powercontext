@@ -913,65 +913,234 @@ class TaskStore:
         """Atomically acquire the global lease and claim the oldest queued task."""
         if not worker_id:
             raise ValueError("worker_id must not be empty")
-        now_text = _timestamp(now)
+        _timestamp(now)
         with self._write() as connection:
-            running = connection.execute(
-                "SELECT 1 FROM tasks WHERE status = ? LIMIT 1",
-                (TaskStatus.RUNNING.value,),
-            ).fetchone()
-            if running is not None:
-                return None
-            lease = connection.execute("SELECT * FROM worker_lease WHERE singleton = ?", (1,)).fetchone()
-            if lease is not None and lease["expires_at"] > now_text and lease["worker_id"] != worker_id:
-                return None
+            return self._claim_next(connection, worker_id, now=now, allow_standalone=True)
 
-            row = connection.execute(
-                "SELECT * FROM tasks WHERE status = ? ORDER BY queue_seq ASC LIMIT 1",
-                (TaskStatus.QUEUED.value,),
-            ).fetchone()
-            if row is None:
-                if lease is not None and lease["expires_at"] <= now_text:
-                    connection.execute("DELETE FROM worker_lease WHERE singleton = ?", (1,))
-                return None
+    def claim_next_with_usage(
+        self,
+        worker_id: str,
+        *,
+        snapshot: UsageSnapshot,
+        default_threshold: int,
+        now: datetime,
+    ) -> TaskRecord | None:
+        """Persist one snapshot, pause protected batches, and claim atomically."""
 
-            task_id = str(row["task_id"])
-            attempt = self._select_latest_attempt(connection, task_id)
-            effective_claim_time = max(now, _parse_timestamp(attempt["created_at"]))
-            claim_time_text = _timestamp(effective_claim_time)
-            expires_at = _timestamp(effective_claim_time + self._lease_duration)
-            connection.execute(
-                """
-                INSERT INTO worker_lease(singleton, worker_id, attempt_id, expires_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(singleton) DO UPDATE SET
-                    worker_id = excluded.worker_id,
-                    attempt_id = excluded.attempt_id,
-                    expires_at = excluded.expires_at
-                """,
-                (1, worker_id, attempt["attempt_id"], expires_at),
+        if not worker_id:
+            raise ValueError("worker_id must not be empty")
+        _validate_percentage(default_threshold)
+        _timestamp(now)
+        with self._write() as connection:
+            self._save_usage_snapshot(connection, snapshot)
+            self._apply_usage_snapshot(connection, snapshot, now=now)
+            allow_standalone = (
+                snapshot.rate_limit_reached_type is None
+                and snapshot.used_percent < default_threshold
             )
-            connection.execute(
-                """
-                UPDATE tasks
-                SET status = ?, started_at = ?, version = version + 1
-                WHERE task_id = ? AND status = ?
-                """,
-                (TaskStatus.RUNNING.value, claim_time_text, task_id, TaskStatus.QUEUED.value),
+            return self._claim_next(
+                connection,
+                worker_id,
+                now=now,
+                allow_standalone=allow_standalone,
             )
+
+    def apply_usage_snapshot(self, snapshot: UsageSnapshot, *, now: datetime) -> None:
+        """Persist an observation and apply its pause consequences without claiming."""
+
+        _timestamp(now)
+        with self._write() as connection:
+            self._save_usage_snapshot(connection, snapshot)
+            self._apply_usage_snapshot(connection, snapshot, now=now)
+
+    def pause_runnable_batches(self, *, reason: BatchPauseReason, now: datetime) -> None:
+        """Fail closed by pausing every currently runnable batch."""
+
+        if not isinstance(reason, BatchPauseReason):
+            raise TypeError("reason must be a BatchPauseReason")
+        _timestamp(now)
+        with self._write() as connection:
+            self._pause_runnable_batches(connection, reason=reason, now=now)
+
+    def _claim_next(
+        self,
+        connection: sqlite3.Connection,
+        worker_id: str,
+        *,
+        now: datetime,
+        allow_standalone: bool,
+    ) -> TaskRecord | None:
+        now_text = _timestamp(now)
+        running = connection.execute(
+            "SELECT 1 FROM tasks WHERE status = ? LIMIT 1",
+            (TaskStatus.RUNNING.value,),
+        ).fetchone()
+        if running is not None:
+            return None
+        lease = connection.execute("SELECT * FROM worker_lease WHERE singleton = ?", (1,)).fetchone()
+        if lease is not None and lease["expires_at"] > now_text and lease["worker_id"] != worker_id:
+            return None
+
+        row = connection.execute(
+            """
+            SELECT tasks.*
+            FROM tasks
+            LEFT JOIN batches ON batches.batch_id = tasks.batch_id
+            WHERE tasks.status = ?
+              AND (
+                  (tasks.batch_id IS NULL AND ?)
+                  OR (tasks.batch_id IS NOT NULL AND batches.control_intent = ?)
+              )
+            ORDER BY tasks.queue_seq ASC
+            LIMIT 1
+            """,
+            (
+                TaskStatus.QUEUED.value,
+                int(allow_standalone),
+                BatchControlIntent.RUN.value,
+            ),
+        ).fetchone()
+        if row is None:
+            if lease is not None and lease["expires_at"] <= now_text:
+                connection.execute("DELETE FROM worker_lease WHERE singleton = ?", (1,))
+            return None
+
+        task_id = str(row["task_id"])
+        attempt = self._select_latest_attempt(connection, task_id)
+        effective_claim_time = max(now, _parse_timestamp(attempt["created_at"]))
+        claim_time_text = _timestamp(effective_claim_time)
+        expires_at = _timestamp(effective_claim_time + self._lease_duration)
+        connection.execute(
+            """
+            INSERT INTO worker_lease(singleton, worker_id, attempt_id, expires_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(singleton) DO UPDATE SET
+                worker_id = excluded.worker_id,
+                attempt_id = excluded.attempt_id,
+                expires_at = excluded.expires_at
+            """,
+            (1, worker_id, attempt["attempt_id"], expires_at),
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET status = ?, started_at = ?, version = version + 1
+            WHERE task_id = ? AND status = ?
+            """,
+            (TaskStatus.RUNNING.value, claim_time_text, task_id, TaskStatus.QUEUED.value),
+        )
+        connection.execute(
+            """
+            UPDATE task_attempts
+            SET status = ?, started_at = ?, version = version + 1
+            WHERE attempt_id = ? AND status = ?
+            """,
+            (
+                TaskStatus.RUNNING.value,
+                claim_time_text,
+                attempt["attempt_id"],
+                TaskStatus.QUEUED.value,
+            ),
+        )
+        return self._record(connection, self._select_task(connection, task_id))
+
+    @staticmethod
+    def _save_usage_snapshot(connection: sqlite3.Connection, snapshot: UsageSnapshot) -> None:
+        connection.execute(
+            """
+            INSERT INTO usage_snapshots(snapshot_json, observed_at)
+            VALUES (?, ?)
+            """,
+            (snapshot.model_dump_json(), _timestamp(snapshot.observed_at)),
+        )
+
+    def _apply_usage_snapshot(
+        self,
+        connection: sqlite3.Connection,
+        snapshot: UsageSnapshot,
+        *,
+        now: datetime,
+    ) -> None:
+        if snapshot.rate_limit_reached_type is not None:
+            self._pause_runnable_batches(
+                connection,
+                reason=BatchPauseReason.QUOTA_LIMIT,
+                now=now,
+            )
+            return
+        self._pause_runnable_batches(
+            connection,
+            reason=BatchPauseReason.USAGE_THRESHOLD,
+            now=now,
+            used_percent=snapshot.used_percent,
+        )
+
+    def _pause_runnable_batches(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        reason: BatchPauseReason,
+        now: datetime,
+        used_percent: int | None = None,
+    ) -> None:
+        sql = """
+            SELECT *
+            FROM batches
+            WHERE control_intent = ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM tasks
+                  WHERE tasks.batch_id = batches.batch_id
+                    AND tasks.status IN (?, ?)
+              )
+        """
+        parameters: list[object] = [
+            BatchControlIntent.RUN.value,
+            TaskStatus.QUEUED.value,
+            TaskStatus.RUNNING.value,
+        ]
+        if used_percent is not None:
+            sql += " AND usage_pause_percent <= ?"
+            parameters.append(used_percent)
+        sql += " ORDER BY batch_seq ASC"
+        rows = connection.execute(sql, parameters).fetchall()
+        for row in rows:
+            batch_id = str(row["batch_id"])
             connection.execute(
                 """
-                UPDATE task_attempts
-                SET status = ?, started_at = ?, version = version + 1
-                WHERE attempt_id = ? AND status = ?
+                UPDATE batches
+                SET control_intent = ?, pause_reason = ?, control_updated_at = ?,
+                    control_version = control_version + 1
+                WHERE batch_id = ?
                 """,
                 (
-                    TaskStatus.RUNNING.value,
-                    claim_time_text,
-                    attempt["attempt_id"],
-                    TaskStatus.QUEUED.value,
+                    BatchControlIntent.PAUSE.value,
+                    reason.value,
+                    _timestamp(now),
+                    batch_id,
                 ),
             )
-            return self._record(connection, self._select_task(connection, task_id))
+            event_type, actor = _pause_event(reason)
+            details = (
+                {
+                    "used_percent": used_percent,
+                    "threshold_percent": _stored_int(
+                        row["usage_pause_percent"],
+                        name="usage threshold",
+                    ),
+                }
+                if used_percent is not None
+                else {}
+            )
+            self._append_control_event(
+                connection,
+                batch_id,
+                event_type,
+                actor,
+                details,
+                now,
+            )
+            self._finalize_batch_intent(connection, batch_id, now=now)
 
     def heartbeat(self, task_id: str, worker_id: str, *, now: datetime) -> TaskRecord:
         """Renew the active lease owned by a worker."""

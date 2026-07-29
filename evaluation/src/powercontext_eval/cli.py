@@ -82,12 +82,22 @@ def web(root_path: Annotated[Path | None, typer.Option("--root")] = None) -> Non
 def worker(root_path: Annotated[Path | None, typer.Option("--root")] = None) -> None:
     """Run queued evaluations serially until shutdown is requested."""
     from powercontext_eval.web.store import TaskStore
+    from powercontext_eval.web.usage import CodexUsageProbe
     from powercontext_eval.web.worker import EvaluationWorker
 
     config = _web_config(root_path)
     store = TaskStore(config.database_path, lease_duration=timedelta(seconds=config.lease_seconds))
     store.initialize()
-    service = EvaluationWorker(config, store)
+    service = EvaluationWorker(
+        config,
+        store,
+        usage_probe=CodexUsageProbe(
+            codex_binary=config.codex_binary,
+            auth_json=config.auth_json,
+            proxy_url=config.proxy_url,
+            timeout_seconds=config.usage_probe_timeout_seconds,
+        ),
+    )
     with _worker_signal_handlers(service):
         service.run_forever()
 

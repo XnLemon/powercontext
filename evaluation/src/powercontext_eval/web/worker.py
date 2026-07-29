@@ -36,9 +36,11 @@ from powercontext_eval.runner import (
     run_swebench_pro_instance,
 )
 from powercontext_eval.web.config import WebConfig
+from powercontext_eval.web.controls import BatchPauseReason
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskPhase, TaskRecord, TaskResult
 from powercontext_eval.web.reporting import ReportingError, load_report
 from powercontext_eval.web.store import TaskConflict, TaskOwnershipError, TaskStore
+from powercontext_eval.web.usage import CodexUsageProbe, UsageSnapshot, UsageUnavailable
 
 _INTERNAL_SUMMARY = "The evaluation worker failed unexpectedly. Inspect the retained m0 logs."
 _REPORT_SUMMARY = "Evaluation report validation failed."
@@ -62,6 +64,10 @@ class Catalog(Protocol):
     def require(self, instance_id: str) -> SweBenchProInstance: ...
 
 
+class UsageProbe(Protocol):
+    def read(self, *, now: datetime) -> UsageSnapshot: ...
+
+
 class EvaluationWorker:
     """Claim and execute at most one queued evaluation at a time."""
 
@@ -70,6 +76,7 @@ class EvaluationWorker:
         config: WebConfig,
         store: TaskStore,
         *,
+        usage_probe: UsageProbe | None = None,
         runner: Runner | None = None,
         source: SourceResolver | None = None,
         catalog: Catalog | None = None,
@@ -80,6 +87,12 @@ class EvaluationWorker:
     ) -> None:
         self._config = config
         self._store = store
+        self._usage_probe = usage_probe or CodexUsageProbe(
+            codex_binary=config.codex_binary,
+            auth_json=config.auth_json,
+            proxy_url=config.proxy_url,
+            timeout_seconds=config.usage_probe_timeout_seconds,
+        )
         self._batch_runner: Runner = runner or run_swebench_pro_instance
         self._legacy_runner: Runner = runner or run_minimal_swebench_pro
         self._source = source or GitSource(
@@ -104,7 +117,20 @@ class EvaluationWorker:
                 return False
             now = self._clock()
             self._store.recover_expired(now=now)
-            task = self._store.claim_next(self._worker_id, now=now)
+            try:
+                snapshot = self._usage_probe.read(now=now)
+            except UsageUnavailable:
+                self._store.pause_runnable_batches(
+                    reason=BatchPauseReason.USAGE_UNAVAILABLE,
+                    now=now,
+                )
+                return False
+            task = self._store.claim_next_with_usage(
+                self._worker_id,
+                snapshot=snapshot,
+                default_threshold=self._config.usage_pause_percent,
+                now=now,
+            )
             if task is None:
                 return False
             return self._run_claimed(task)
@@ -115,6 +141,7 @@ class EvaluationWorker:
         heartbeat: ThreadLike | None = None
         heartbeat_started = False
         phase: TaskPhase | None = None
+        attempt_finished = False
         try:
             heartbeat = self._thread_factory(
                 target=self._heartbeat,
@@ -124,10 +151,11 @@ class EvaluationWorker:
             )
             heartbeat.start()
             heartbeat_started = True
-            layout = EvaluationPaths(self._config.run_root, task.task_id)
-            work_dir = self._config.run_root / "work" / task.task_id
+            run_id = _execution_run_id(task)
+            layout = EvaluationPaths(self._config.run_root, run_id)
+            work_dir = self._config.run_root / "work" / run_id
             if os.path.lexists(layout.run_artifacts) or os.path.lexists(work_dir):
-                self._fail(
+                attempt_finished = self._fail(
                     task,
                     SafeFailure(
                         category=FailureCategory.REPORT_GENERATION,
@@ -153,14 +181,17 @@ class EvaluationWorker:
             task_result = self._validated_result(task, result)
             load_report(layout.run_artifacts, self._config.run_root / "runs")
             self._store.succeed(task.task_id, self._worker_id, task_result, now=self._clock())
+            attempt_finished = True
         except (TaskOwnershipError, TaskConflict):
             ownership_lost.set()
         except Exception as error:  # noqa: BLE001 - the worker boundary must sanitize every runner failure
-            self._fail(task, _safe_failure(error, phase), ownership_lost)
+            attempt_finished = self._fail(task, _safe_failure(error, phase), ownership_lost)
         finally:
             heartbeat_stop.set()
             if heartbeat_started and heartbeat is not None:
                 heartbeat.join()
+            if attempt_finished and task.batch_id is not None and not ownership_lost.is_set():
+                self._finalize_batch(task.batch_id)
         return True
 
     def run_forever(self) -> None:
@@ -198,7 +229,7 @@ class EvaluationWorker:
             uv_binary=self._config.uv_binary,
             auth_json=self._config.auth_json,
             proxy_url=self._config.proxy_url,
-            run_id=task.task_id,
+            run_id=_execution_run_id(task),
         )
 
     def _legacy_run_config(self, task: TaskRecord) -> MinimalRunConfig:
@@ -213,7 +244,7 @@ class EvaluationWorker:
             uv_binary=self._config.uv_binary,
             auth_json=self._config.auth_json,
             proxy_url=self._config.proxy_url,
-            run_id=task.task_id,
+            run_id=_execution_run_id(task),
         )
 
     def _pinned_batch_ref(self, batch_id: str) -> str:
@@ -254,8 +285,9 @@ class EvaluationWorker:
                 return
 
     def _validated_result(self, task: TaskRecord, result: MinimalRunResult) -> TaskResult:
-        layout = EvaluationPaths(self._config.run_root, task.task_id)
-        if result.run_id != task.task_id:
+        run_id = _execution_run_id(task)
+        layout = EvaluationPaths(self._config.run_root, run_id)
+        if result.run_id != run_id:
             raise InvalidReportBundle("Runner returned a mismatched run ID")
         expected_report = layout.run_artifacts / "report.md"
         try:
@@ -281,13 +313,35 @@ class EvaluationWorker:
             on_resolved=result.on_resolved,
         )
 
-    def _fail(self, task: TaskRecord, failure: SafeFailure, ownership_lost: threading.Event) -> None:
+    def _fail(self, task: TaskRecord, failure: SafeFailure, ownership_lost: threading.Event) -> bool:
         if ownership_lost.is_set():
-            return
+            return False
         try:
             self._store.fail(task.task_id, self._worker_id, failure, now=self._clock())
         except (TaskOwnershipError, TaskConflict):
             ownership_lost.set()
+            return False
+        return True
+
+    def _finalize_batch(self, batch_id: str) -> None:
+        now = self._clock()
+        try:
+            snapshot = self._usage_probe.read(now=now)
+            self._store.apply_usage_snapshot(snapshot, now=now)
+        except UsageUnavailable:
+            self._store.pause_runnable_batches(
+                reason=BatchPauseReason.USAGE_UNAVAILABLE,
+                now=now,
+            )
+        self._store.finalize_batch_intent_after_attempt(batch_id, now=now)
+
+
+def _execution_run_id(task: TaskRecord) -> str:
+    if task.attempt_number == 1:
+        return task.task_id
+    if task.attempt_id is None:
+        raise ValueError("Retried task is missing an attempt ID")
+    return task.attempt_id
 
 
 @contextmanager

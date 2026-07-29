@@ -18,11 +18,48 @@ from powercontext_eval.powercontext_sut import InvalidTreatment, UnsafeSutConfig
 from powercontext_eval.runner import MinimalRunResult, RunPhase
 from powercontext_eval.web.batches import BatchCreate, BatchStatus
 from powercontext_eval.web.config import WebConfig
-from powercontext_eval.web.models import FailureCategory, TaskCreate, TaskPhase, TaskStatus
+from powercontext_eval.web.controls import BatchControlIntent, BatchPauseReason
+from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskCreate, TaskPhase, TaskStatus
 from powercontext_eval.web.store import TaskStore
+from powercontext_eval.web.usage import CodexUsageProbe, UsageSnapshot, UsageUnavailable
 from powercontext_eval.web.worker import EvaluationWorker
 
 NOW = datetime(2026, 7, 29, 1, 2, 3, tzinfo=UTC)
+
+
+def _usage(used_percent: int, *, observed_at: datetime = NOW) -> UsageSnapshot:
+    return UsageSnapshot(
+        limit_id="codex",
+        used_percent=used_percent,
+        remaining_percent=100 - used_percent,
+        window_duration_minutes=10_080,
+        resets_at=NOW + timedelta(days=7),
+        observed_at=observed_at,
+        plan_type="pro",
+        account_tokens=1_234,
+    )
+
+
+class FakeUsageProbe:
+    def __init__(self, observations: list[UsageSnapshot | Exception]) -> None:
+        self.observations = observations
+        self.calls: list[datetime] = []
+
+    def read(self, *, now: datetime) -> UsageSnapshot:
+        self.calls.append(now)
+        observation = self.observations.pop(0)
+        if isinstance(observation, Exception):
+            raise observation
+        return observation.model_copy(update={"observed_at": now})
+
+
+@pytest.fixture(autouse=True)
+def _default_safe_usage_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        CodexUsageProbe,
+        "read",
+        lambda _self, *, now: _usage(9, observed_at=now),
+    )
 
 
 def _config(root: Path, *, lease_seconds: int = 2, poll_seconds: float = 0.01) -> WebConfig:
@@ -115,6 +152,213 @@ def _successful_batch_runner(
         return MinimalRunResult(run_config.run_id, report_path, True, False)
 
     return runner
+
+
+def test_worker_pauses_before_claim_when_usage_reaches_configured_threshold(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    batch = _create_batch(store, instance_ids=("instance_owner__repo-a",))
+    calls: list[str] = []
+    worker = EvaluationWorker(
+        config,
+        store,
+        usage_probe=FakeUsageProbe([_usage(80)]),
+        runner=lambda run_config, **_kwargs: calls.append(run_config.run_id),
+        source=FakeSource(),
+        catalog=FakeCatalog(("instance_owner__repo-a",)),
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is False
+    assert calls == []
+    paused = store.get_batch(batch.batch_id)
+    assert paused.status is BatchStatus.PAUSED
+    assert paused.control.intent is BatchControlIntent.PAUSE
+    assert paused.control.pause_reason is BatchPauseReason.USAGE_THRESHOLD
+    assert store.latest_usage_snapshot() == _usage(80)
+
+
+def test_worker_finishes_current_task_before_honoring_user_pause(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    batch = _create_batch(store)
+    calls: list[str] = []
+
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        del instance, on_phase
+        calls.append(run_config.run_id)
+        store.request_pause(batch.batch_id, reason=BatchPauseReason.USER, now=NOW)
+        report = config.run_root / "runs" / run_config.run_id / "report.md"
+        report.parent.mkdir(parents=True)
+        report.write_text("safe")
+        return MinimalRunResult(run_config.run_id, report, True, True)
+
+    monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
+    worker = EvaluationWorker(
+        config,
+        store,
+        usage_probe=FakeUsageProbe([_usage(9), _usage(10)]),
+        runner=runner,
+        source=FakeSource(),
+        catalog=FakeCatalog(("instance_owner__repo-a", "instance_owner__repo-b")),
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is True
+
+    assert len(calls) == 1
+    assert [task.status for task in store.list_batch_tasks(batch.batch_id)] == [
+        TaskStatus.SUCCEEDED,
+        TaskStatus.QUEUED,
+    ]
+    assert store.get_batch(batch.batch_id).status is BatchStatus.PAUSED
+
+
+def test_worker_finishes_current_task_before_cancelling_remaining_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    batch = _create_batch(store)
+
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        del instance, on_phase
+        store.request_cancel(batch.batch_id, now=NOW)
+        report = config.run_root / "runs" / run_config.run_id / "report.md"
+        report.parent.mkdir(parents=True)
+        report.write_text("safe")
+        return MinimalRunResult(run_config.run_id, report, False, False)
+
+    monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
+    worker = EvaluationWorker(
+        config,
+        store,
+        usage_probe=FakeUsageProbe([_usage(9), _usage(10)]),
+        runner=runner,
+        source=FakeSource(),
+        catalog=FakeCatalog(("instance_owner__repo-a", "instance_owner__repo-b")),
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is True
+
+    assert [task.status for task in store.list_batch_tasks(batch.batch_id)] == [
+        TaskStatus.SUCCEEDED,
+        TaskStatus.CANCELLED,
+    ]
+    assert store.get_batch(batch.batch_id).status is BatchStatus.CANCELLED
+
+
+def test_worker_skips_paused_oldest_batch_and_claims_next_runnable_batch(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    oldest = _create_batch(
+        store,
+        key="batch-paused-oldest",
+        instance_ids=("instance_owner__repo-a",),
+    )
+    runnable = _create_batch(
+        store,
+        key="batch-runnable-next",
+        instance_ids=("instance_owner__repo-b",),
+    )
+    store.request_pause(oldest.batch_id, reason=BatchPauseReason.USER, now=NOW)
+    calls: list[str] = []
+
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        del instance, on_phase
+        calls.append(run_config.run_id)
+        raise RuntimeError("stop after claim")
+
+    worker = EvaluationWorker(
+        config,
+        store,
+        usage_probe=FakeUsageProbe([_usage(9), _usage(10)]),
+        runner=runner,
+        source=FakeSource(),
+        catalog=FakeCatalog(("instance_owner__repo-a", "instance_owner__repo-b")),
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is True
+    assert calls == [store.list_batch_tasks(runnable.batch_id)[0].task_id]
+    assert store.list_batch_tasks(oldest.batch_id)[0].status is TaskStatus.QUEUED
+
+
+def test_worker_fails_closed_when_usage_is_unavailable(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    batch = _create_batch(store, instance_ids=("instance_owner__repo-a",))
+    calls: list[str] = []
+    worker = EvaluationWorker(
+        config,
+        store,
+        usage_probe=FakeUsageProbe([UsageUnavailable("private failure")]),
+        runner=lambda run_config, **_kwargs: calls.append(run_config.run_id),
+        source=FakeSource(),
+        catalog=FakeCatalog(("instance_owner__repo-a",)),
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is False
+
+    assert calls == []
+    paused = store.get_batch(batch.batch_id)
+    assert paused.status is BatchStatus.PAUSED
+    assert paused.control.pause_reason is BatchPauseReason.USAGE_UNAVAILABLE
+
+
+def test_worker_executes_only_the_new_attempt_when_a_failed_task_is_retried(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    batch = _create_batch(store, instance_ids=("instance_owner__repo-a",))
+    task = store.list_batch_tasks(batch.batch_id)[0]
+    claimed = store.claim_next("setup-worker", now=NOW)
+    assert claimed is not None
+    store.fail(
+        task.task_id,
+        "setup-worker",
+        SafeFailure(
+            category=FailureCategory.CODEX_EXECUTION,
+            phase=TaskPhase.RUNNING_OFF,
+            summary="First attempt failed",
+        ),
+        now=NOW,
+    )
+    retry, created = store.retry_failed_task(
+        batch.batch_id,
+        task.task_id,
+        idempotency_key="retry-worker-0001",
+        now=NOW,
+    )
+    assert created is True
+    calls: list[str] = []
+
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        del instance, on_phase
+        calls.append(run_config.run_id)
+        raise CodexInfrastructureError("retry failed")
+
+    worker = EvaluationWorker(
+        config,
+        store,
+        usage_probe=FakeUsageProbe([_usage(9), _usage(10)]),
+        runner=runner,
+        source=FakeSource(),
+        catalog=FakeCatalog(("instance_owner__repo-a",)),
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is True
+
+    assert calls == [retry.attempt_id]
+    attempts = store.list_task_attempts(batch.batch_id, task.task_id)
+    assert [attempt.status for attempt in attempts] == [TaskStatus.FAILED, TaskStatus.FAILED]
+    assert attempts[0].failure_summary == "First attempt failed"
 
 
 def test_latest_is_pinned_once_and_every_child_uses_catalog_instance(
