@@ -53,6 +53,21 @@ class FailureCategory(StrEnum):
     INTERNAL = "internal"
 
 
+RETRYABLE_FAILURES = frozenset(
+    {
+        FailureCategory.SOURCE_RESOLUTION,
+        FailureCategory.ENVIRONMENT_PREPARATION,
+        FailureCategory.GOLD_VALIDATION,
+        FailureCategory.CODEX_EXECUTION,
+        FailureCategory.TREATMENT_VALIDATION,
+        FailureCategory.OFFICIAL_EVALUATOR,
+        FailureCategory.REPORT_GENERATION,
+        FailureCategory.WORKER_INTERRUPTION,
+        FailureCategory.INTERNAL,
+    }
+)
+
+
 class TaskCreate(FrozenModel):
     powercontext_ref: str
     benchmark: Literal["swebench-pro"]
@@ -92,6 +107,10 @@ class TaskResult(FrozenModel):
 
 class TaskRecord(FrozenModel):
     task_id: str
+    attempt_id: str | None = None
+    attempt_number: Annotated[int, Field(ge=1)] = 1
+    attempt_count: Annotated[int, Field(ge=1)] = 1
+    retryable: bool = False
     request: TaskCreate
     status: TaskStatus
     batch_id: str | None = None
@@ -111,6 +130,8 @@ class TaskRecord(FrozenModel):
 
     @model_validator(mode="after")
     def validate_lifecycle(self) -> Self:
+        if self.attempt_count < self.attempt_number:
+            raise ValueError("Attempt count cannot be smaller than the current attempt number")
         has_category = self.failure_category is not None
         has_summary = self.failure_summary is not None
         has_failure = has_category and has_summary
@@ -148,8 +169,62 @@ class TaskRecord(FrozenModel):
         return self
 
 
+class TaskAttemptRecord(FrozenModel):
+    attempt_id: str
+    task_id: str
+    attempt_number: Annotated[int, Field(ge=1)]
+    status: TaskStatus
+    phase: TaskPhase | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    version: Annotated[int, Field(ge=0)] = 0
+    failure_category: FailureCategory | None = None
+    failure_phase: TaskPhase | None = None
+    failure_summary: str | None = Field(default=None, max_length=500)
+    result: TaskResult | None = None
+    retryable: bool = False
+
+    _utc_timestamps = field_validator("created_at", "started_at", "finished_at")(_require_utc)
+
+    @model_validator(mode="after")
+    def validate_lifecycle(self) -> Self:
+        record = TaskRecord(
+            task_id=self.task_id,
+            attempt_id=self.attempt_id,
+            attempt_number=self.attempt_number,
+            attempt_count=self.attempt_number,
+            retryable=self.retryable,
+            request=TaskCreate(
+                powercontext_ref="latest",
+                benchmark="swebench-pro",
+                instance_id="attempt-validation",
+                model="gpt-5.6-sol",
+                reasoning_effort="medium",
+                treatment_mode="off_on",
+                idempotency_key="attempt-validation",
+            ),
+            status=self.status,
+            phase=self.phase,
+            created_at=self.created_at,
+            started_at=self.started_at,
+            finished_at=self.finished_at,
+            version=self.version,
+            failure_category=self.failure_category,
+            failure_phase=self.failure_phase,
+            failure_summary=self.failure_summary,
+            result=self.result,
+        )
+        del record
+        return self
+
+
 class TaskSummary(FrozenModel):
     task_id: str
+    attempt_id: str | None = None
+    attempt_number: Annotated[int, Field(ge=1)] = 1
+    attempt_count: Annotated[int, Field(ge=1)] = 1
+    retryable: bool = False
     powercontext_ref: str
     instance_id: str
     model: str

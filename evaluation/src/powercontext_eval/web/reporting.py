@@ -399,6 +399,10 @@ def _task_item(
         category = PairCategory.EXECUTION_FAILURE
     return BatchTaskItem(
         task_id=task.task_id,
+        attempt_id=task.attempt_id,
+        attempt_number=task.attempt_number,
+        attempt_count=task.attempt_count,
+        retryable=task.retryable,
         instance_id=task.instance_id,
         repository=instance.repo,
         source_index=task.source_index,

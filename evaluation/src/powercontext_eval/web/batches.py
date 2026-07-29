@@ -157,6 +157,10 @@ class TaskTokenDelta(_FrozenModel):
 
 class BatchTaskItem(_FrozenModel):
     task_id: str
+    attempt_id: str | None = None
+    attempt_number: Annotated[int, Field(ge=1)] = 1
+    attempt_count: Annotated[int, Field(ge=1)] = 1
+    retryable: bool = False
     instance_id: str
     repository: str
     source_index: Annotated[int, Field(ge=0)]

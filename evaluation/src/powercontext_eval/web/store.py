@@ -27,8 +27,10 @@ from powercontext_eval.web.controls import (
     derive_controlled_batch_status,
 )
 from powercontext_eval.web.models import (
+    RETRYABLE_FAILURES,
     FailureCategory,
     SafeFailure,
+    TaskAttemptRecord,
     TaskCreate,
     TaskPhase,
     TaskRecord,
@@ -137,10 +139,28 @@ class TaskStore:
                     failure_summary TEXT,
                     result_json TEXT
                 );
+                CREATE TABLE IF NOT EXISTS task_attempts (
+                    attempt_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    attempt_id TEXT NOT NULL UNIQUE,
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    phase TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+                    failure_category TEXT,
+                    failure_phase TEXT,
+                    failure_summary TEXT,
+                    result_json TEXT,
+                    UNIQUE(task_id, attempt_number)
+                );
                 CREATE TABLE IF NOT EXISTS worker_lease (
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                     worker_id TEXT NOT NULL,
-                    task_id TEXT NOT NULL UNIQUE REFERENCES tasks(task_id),
+                    attempt_id TEXT NOT NULL UNIQUE REFERENCES task_attempts(attempt_id),
                     expires_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS usage_snapshots (
@@ -199,6 +219,60 @@ class TaskStore:
                 """,
                 (BatchControlIntent.CANCEL.value, TaskStatus.CANCELLED.value),
             )
+            connection.execute(
+                """
+                INSERT INTO task_attempts(
+                    attempt_id, task_id, attempt_number, idempotency_key, status,
+                    phase, created_at, started_at, finished_at, version,
+                    failure_category, failure_phase, failure_summary, result_json
+                )
+                SELECT
+                    task_id || '.attempt-0001',
+                    task_id,
+                    1,
+                    task_id || '.attempt-0001',
+                    status,
+                    phase,
+                    created_at,
+                    started_at,
+                    finished_at,
+                    version,
+                    failure_category,
+                    failure_phase,
+                    failure_summary,
+                    result_json
+                FROM tasks
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM task_attempts WHERE task_attempts.task_id = tasks.task_id
+                )
+                """
+            )
+            lease_columns = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(worker_lease)").fetchall()
+            }
+            if "attempt_id" not in lease_columns:
+                connection.executescript(
+                    """
+                    ALTER TABLE worker_lease RENAME TO worker_lease_legacy;
+                    CREATE TABLE worker_lease (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        worker_id TEXT NOT NULL,
+                        attempt_id TEXT NOT NULL UNIQUE REFERENCES task_attempts(attempt_id),
+                        expires_at TEXT NOT NULL
+                    );
+                    INSERT INTO worker_lease(singleton, worker_id, attempt_id, expires_at)
+                    SELECT legacy.singleton, legacy.worker_id, attempts.attempt_id, legacy.expires_at
+                    FROM worker_lease_legacy AS legacy
+                    JOIN task_attempts AS attempts
+                      ON attempts.task_id = legacy.task_id
+                     AND attempts.attempt_number = (
+                         SELECT MAX(newest.attempt_number)
+                         FROM task_attempts AS newest
+                         WHERE newest.task_id = legacy.task_id
+                     );
+                    DROP TABLE worker_lease_legacy;
+                    """
+                )
             connection.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS tasks_status_queue
@@ -213,6 +287,10 @@ class TaskStore:
                     ON usage_snapshots(observed_at, snapshot_seq);
                 CREATE INDEX IF NOT EXISTS batch_control_events_batch_sequence
                     ON batch_control_events(batch_id, event_seq);
+                CREATE INDEX IF NOT EXISTS task_attempts_task_number
+                    ON task_attempts(task_id, attempt_number);
+                CREATE INDEX IF NOT EXISTS task_attempts_status_sequence
+                    ON task_attempts(status, attempt_seq);
                 """
             )
 
@@ -268,6 +346,7 @@ class TaskStore:
                 (batch_id, sequence),
             )
             for source_index, instance_id in enumerate(ordered_ids):
+                task_id = _batch_task_id(now, sequence, source_index)
                 child = TaskCreate(
                     powercontext_ref=request.powercontext_ref,
                     benchmark=request.benchmark,
@@ -285,7 +364,7 @@ class TaskStore:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        _batch_task_id(now, sequence, source_index),
+                        task_id,
                         child.idempotency_key,
                         child.model_dump_json(),
                         batch_id,
@@ -294,6 +373,12 @@ class TaskStore:
                         TaskStatus.QUEUED.value,
                         created_at,
                     ),
+                )
+                self._insert_initial_attempt(
+                    connection,
+                    task_id=task_id,
+                    idempotency_key=f"{task_id}.attempt-0001",
+                    created_at=created_at,
                 )
             self._append_control_event(
                 connection,
@@ -560,7 +645,7 @@ class TaskStore:
                 "SELECT * FROM tasks WHERE batch_id = ? ORDER BY source_index ASC",
                 (batch_id,),
             ).fetchall()
-            return [self._record(row) for row in rows]
+            return [self._record(connection, row) for row in rows]
 
     def get_batch_task(self, batch_id: str, task_id: str) -> TaskRecord:
         """Return one task only when it belongs to the requested batch."""
@@ -573,7 +658,113 @@ class TaskStore:
             ).fetchone()
             if row is None:
                 raise TaskNotFound(f"Task not found in batch: {task_id}")
-            return self._record(row)
+            return self._record(connection, row)
+
+    def list_task_attempts(self, batch_id: str, task_id: str) -> tuple[TaskAttemptRecord, ...]:
+        """List every immutable execution attempt for one logical batch task."""
+
+        with self._connection() as connection:
+            self._select_batch(connection, batch_id)
+            task = connection.execute(
+                "SELECT 1 FROM tasks WHERE batch_id = ? AND task_id = ?",
+                (batch_id, task_id),
+            ).fetchone()
+            if task is None:
+                raise TaskNotFound(f"Task not found in batch: {task_id}")
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM task_attempts
+                WHERE task_id = ?
+                ORDER BY attempt_number ASC
+                """,
+                (task_id,),
+            ).fetchall()
+        return tuple(self._attempt_record(row) for row in rows)
+
+    def retry_failed_task(
+        self,
+        batch_id: str,
+        task_id: str,
+        *,
+        idempotency_key: str,
+        now: datetime,
+    ) -> tuple[TaskAttemptRecord, bool]:
+        """Create one new queued attempt without modifying retained failures."""
+
+        if (
+            not isinstance(idempotency_key, str)
+            or fullmatch(r"[A-Za-z0-9._-]{8,128}", idempotency_key) is None
+        ):
+            raise ValueError("Retry idempotency key is invalid")
+        created_at = _timestamp(now)
+        with self._write() as connection:
+            self._select_batch(connection, batch_id)
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE batch_id = ? AND task_id = ?",
+                (batch_id, task_id),
+            ).fetchone()
+            if task is None:
+                raise TaskNotFound(f"Task not found in batch: {task_id}")
+            existing = connection.execute(
+                "SELECT * FROM task_attempts WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                if existing["task_id"] != task_id:
+                    raise TaskConflict("Retry idempotency key belongs to another task")
+                return self._attempt_record(existing), False
+
+            latest = self._select_latest_attempt(connection, task_id)
+            latest_record = self._attempt_record(latest)
+            if not latest_record.retryable:
+                raise TaskConflict("The current task outcome is not retryable")
+            attempt_number = latest_record.attempt_number + 1
+            attempt_id = f"{task_id}.attempt-{attempt_number:04d}"
+            connection.execute(
+                """
+                INSERT INTO task_attempts(
+                    attempt_id, task_id, attempt_number, idempotency_key,
+                    status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    task_id,
+                    attempt_number,
+                    idempotency_key,
+                    TaskStatus.QUEUED.value,
+                    created_at,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = ?, phase = NULL, started_at = NULL, finished_at = NULL,
+                    version = 0, failure_category = NULL, failure_phase = NULL,
+                    failure_summary = NULL, result_json = NULL
+                WHERE task_id = ?
+                """,
+                (TaskStatus.QUEUED.value, task_id),
+            )
+            connection.execute(
+                """
+                UPDATE batches
+                SET control_intent = ?, pause_reason = NULL, control_updated_at = ?,
+                    control_version = control_version + 1
+                WHERE batch_id = ?
+                """,
+                (BatchControlIntent.RUN.value, created_at, batch_id),
+            )
+            self._append_control_event(
+                connection,
+                batch_id,
+                BatchControlEventType.TASK_RETRY_REQUESTED,
+                "user",
+                {"task_id": task_id, "attempt_number": attempt_number},
+                now,
+            )
+            return self._attempt_record(self._select_latest_attempt(connection, task_id)), True
 
     def cancel_batch_queued(self, batch_id: str, *, now: datetime) -> BatchRecord:
         """Compatibility alias for the durable boundary-based cancellation action."""
@@ -590,7 +781,7 @@ class TaskStore:
                 (request.idempotency_key,),
             ).fetchone()
             if existing is not None:
-                return self._record(existing), False
+                return self._record(connection, existing), False
 
             placeholder = f"pending-{uuid.uuid4().hex}"
             cursor = connection.execute(
@@ -609,13 +800,19 @@ class TaskStore:
                 "UPDATE tasks SET task_id = ? WHERE queue_seq = ?",
                 (task_id, sequence),
             )
+            self._insert_initial_attempt(
+                connection,
+                task_id=task_id,
+                idempotency_key=f"{task_id}.attempt-0001",
+                created_at=created_at,
+            )
             row = self._select_task(connection, task_id)
-            return self._record(row), True
+            return self._record(connection, row), True
 
     def get(self, task_id: str) -> TaskRecord:
         """Return one task or raise :class:`TaskNotFound`."""
         with self._connection() as connection:
-            return self._record(self._select_task(connection, task_id))
+            return self._record(connection, self._select_task(connection, task_id))
 
     def list_tasks(
         self,
@@ -641,7 +838,10 @@ class TaskStore:
         sql += " LIMIT ? OFFSET ?"
         parameters.extend((limit, offset))
         with self._connection() as connection:
-            return [self._summary(self._record(row)) for row in connection.execute(sql, parameters).fetchall()]
+            return [
+                self._summary(self._record(connection, row))
+                for row in connection.execute(sql, parameters).fetchall()
+            ]
 
     def queue_position(self, task_id: str) -> int | None:
         """Return the one-based position among currently queued tasks."""
@@ -693,7 +893,21 @@ class TaskStore:
                 """,
                 (TaskStatus.CANCELLED.value, finished_at, task_id),
             )
-            return self._record(self._select_task(connection, task_id))
+            attempt = self._select_latest_attempt(connection, task_id)
+            connection.execute(
+                """
+                UPDATE task_attempts
+                SET status = ?, finished_at = ?, version = version + 1
+                WHERE attempt_id = ? AND status = ?
+                """,
+                (
+                    TaskStatus.CANCELLED.value,
+                    finished_at,
+                    attempt["attempt_id"],
+                    TaskStatus.QUEUED.value,
+                ),
+            )
+            return self._record(connection, self._select_task(connection, task_id))
 
     def claim_next(self, worker_id: str, *, now: datetime) -> TaskRecord | None:
         """Atomically acquire the global lease and claim the oldest queued task."""
@@ -721,19 +935,20 @@ class TaskStore:
                 return None
 
             task_id = str(row["task_id"])
-            effective_claim_time = max(now, _parse_timestamp(row["created_at"]))
+            attempt = self._select_latest_attempt(connection, task_id)
+            effective_claim_time = max(now, _parse_timestamp(attempt["created_at"]))
             claim_time_text = _timestamp(effective_claim_time)
             expires_at = _timestamp(effective_claim_time + self._lease_duration)
             connection.execute(
                 """
-                INSERT INTO worker_lease(singleton, worker_id, task_id, expires_at)
+                INSERT INTO worker_lease(singleton, worker_id, attempt_id, expires_at)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(singleton) DO UPDATE SET
                     worker_id = excluded.worker_id,
-                    task_id = excluded.task_id,
+                    attempt_id = excluded.attempt_id,
                     expires_at = excluded.expires_at
                 """,
-                (1, worker_id, task_id, expires_at),
+                (1, worker_id, attempt["attempt_id"], expires_at),
             )
             connection.execute(
                 """
@@ -743,14 +958,27 @@ class TaskStore:
                 """,
                 (TaskStatus.RUNNING.value, claim_time_text, task_id, TaskStatus.QUEUED.value),
             )
-            return self._record(self._select_task(connection, task_id))
+            connection.execute(
+                """
+                UPDATE task_attempts
+                SET status = ?, started_at = ?, version = version + 1
+                WHERE attempt_id = ? AND status = ?
+                """,
+                (
+                    TaskStatus.RUNNING.value,
+                    claim_time_text,
+                    attempt["attempt_id"],
+                    TaskStatus.QUEUED.value,
+                ),
+            )
+            return self._record(connection, self._select_task(connection, task_id))
 
     def heartbeat(self, task_id: str, worker_id: str, *, now: datetime) -> TaskRecord:
         """Renew the active lease owned by a worker."""
         with self._write() as connection:
             self._require_running_owner(connection, task_id, worker_id, now=now)
-            row = self._select_task(connection, task_id)
-            started_at = _parse_optional_timestamp(row["started_at"])
+            attempt = self._select_latest_attempt(connection, task_id)
+            started_at = _parse_optional_timestamp(attempt["started_at"])
             if started_at is None:
                 raise TaskConflict("Running task has no start time")
             lease = connection.execute("SELECT expires_at FROM worker_lease WHERE singleton = ?", (1,)).fetchone()
@@ -770,7 +998,11 @@ class TaskStore:
                 "UPDATE tasks SET version = version + 1 WHERE task_id = ?",
                 (task_id,),
             )
-            return self._record(self._select_task(connection, task_id))
+            connection.execute(
+                "UPDATE task_attempts SET version = version + 1 WHERE attempt_id = ?",
+                (attempt["attempt_id"],),
+            )
+            return self._record(connection, self._select_task(connection, task_id))
 
     def set_phase(
         self,
@@ -783,11 +1015,16 @@ class TaskStore:
         """Set the current phase of a running task."""
         with self._write() as connection:
             self._require_running_owner(connection, task_id, worker_id, now=now)
+            attempt = self._select_latest_attempt(connection, task_id)
             connection.execute(
                 "UPDATE tasks SET phase = ?, version = version + 1 WHERE task_id = ?",
                 (phase.value, task_id),
             )
-            return self._record(self._select_task(connection, task_id))
+            connection.execute(
+                "UPDATE task_attempts SET phase = ?, version = version + 1 WHERE attempt_id = ?",
+                (phase.value, attempt["attempt_id"]),
+            )
+            return self._record(connection, self._select_task(connection, task_id))
 
     def succeed(
         self,
@@ -801,6 +1038,7 @@ class TaskStore:
         finished_at = _timestamp(now)
         with self._write() as connection:
             self._require_running_owner(connection, task_id, worker_id, now=now)
+            attempt = self._select_latest_attempt(connection, task_id)
             connection.execute(
                 """
                 UPDATE tasks
@@ -809,8 +1047,21 @@ class TaskStore:
                 """,
                 (TaskStatus.SUCCEEDED.value, finished_at, result.model_dump_json(), task_id),
             )
+            connection.execute(
+                """
+                UPDATE task_attempts
+                SET status = ?, finished_at = ?, result_json = ?, version = version + 1
+                WHERE attempt_id = ?
+                """,
+                (
+                    TaskStatus.SUCCEEDED.value,
+                    finished_at,
+                    result.model_dump_json(),
+                    attempt["attempt_id"],
+                ),
+            )
             connection.execute("DELETE FROM worker_lease WHERE singleton = ?", (1,))
-            return self._record(self._select_task(connection, task_id))
+            return self._record(connection, self._select_task(connection, task_id))
 
     def fail(
         self,
@@ -825,6 +1076,7 @@ class TaskStore:
         phase = failure.phase.value if failure.phase is not None else None
         with self._write() as connection:
             self._require_running_owner(connection, task_id, worker_id, now=now)
+            attempt = self._select_latest_attempt(connection, task_id)
             connection.execute(
                 """
                 UPDATE tasks
@@ -842,8 +1094,25 @@ class TaskStore:
                     task_id,
                 ),
             )
+            connection.execute(
+                """
+                UPDATE task_attempts
+                SET status = ?, phase = ?, finished_at = ?, failure_category = ?,
+                    failure_phase = ?, failure_summary = ?, version = version + 1
+                WHERE attempt_id = ?
+                """,
+                (
+                    TaskStatus.FAILED.value,
+                    phase,
+                    finished_at,
+                    failure.category.value,
+                    phase,
+                    failure.summary,
+                    attempt["attempt_id"],
+                ),
+            )
             connection.execute("DELETE FROM worker_lease WHERE singleton = ?", (1,))
-            return self._record(self._select_task(connection, task_id))
+            return self._record(connection, self._select_task(connection, task_id))
 
     def recover_expired(self, *, now: datetime) -> list[str]:
         """Interrupt the running task whose singleton lease has expired."""
@@ -852,7 +1121,13 @@ class TaskStore:
             lease = connection.execute("SELECT * FROM worker_lease WHERE singleton = ?", (1,)).fetchone()
             if lease is None or lease["expires_at"] > now_text:
                 return []
-            task_id = str(lease["task_id"])
+            attempt = connection.execute(
+                "SELECT * FROM task_attempts WHERE attempt_id = ?",
+                (lease["attempt_id"],),
+            ).fetchone()
+            if attempt is None:
+                raise TaskStoreError("Worker lease references a missing attempt")
+            task_id = str(attempt["task_id"])
             row = self._select_task(connection, task_id)
             recovered: list[str] = []
             if TaskStatus(row["status"]) is TaskStatus.RUNNING:
@@ -869,6 +1144,21 @@ class TaskStore:
                         FailureCategory.WORKER_INTERRUPTION.value,
                         "Evaluation worker lease expired",
                         task_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE task_attempts
+                    SET status = ?, finished_at = ?, failure_category = ?,
+                        failure_phase = phase, failure_summary = ?, version = version + 1
+                    WHERE attempt_id = ?
+                    """,
+                    (
+                        TaskStatus.INTERRUPTED.value,
+                        now_text,
+                        FailureCategory.WORKER_INTERRUPTION.value,
+                        "Evaluation worker lease expired",
+                        attempt["attempt_id"],
                     ),
                 )
                 recovered.append(task_id)
@@ -903,6 +1193,27 @@ class TaskStore:
                     _timestamp(now),
                     batch_id,
                     TaskStatus.QUEUED.value,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE task_attempts
+                SET status = ?, finished_at = ?, version = version + 1
+                WHERE status = ?
+                  AND task_id IN (
+                      SELECT task_id FROM tasks WHERE batch_id = ?
+                  )
+                  AND attempt_number = (
+                      SELECT MAX(newest.attempt_number)
+                      FROM task_attempts AS newest
+                      WHERE newest.task_id = task_attempts.task_id
+                  )
+                """,
+                (
+                    TaskStatus.CANCELLED.value,
+                    _timestamp(now),
+                    TaskStatus.QUEUED.value,
+                    batch_id,
                 ),
             )
             self._append_control_event_once(
@@ -1007,13 +1318,13 @@ class TaskStore:
         *,
         now: datetime,
     ) -> None:
-        row = self._select_task(connection, task_id)
-        if TaskStatus(row["status"]) is not TaskStatus.RUNNING:
+        attempt = self._select_latest_attempt(connection, task_id)
+        if TaskStatus(attempt["status"]) is not TaskStatus.RUNNING:
             raise TaskConflict("Task is not running")
         lease = connection.execute("SELECT * FROM worker_lease WHERE singleton = ?", (1,)).fetchone()
         if (
             lease is None
-            or lease["task_id"] != task_id
+            or lease["attempt_id"] != attempt["attempt_id"]
             or lease["worker_id"] != worker_id
             or lease["expires_at"] <= _timestamp(now)
         ):
@@ -1025,6 +1336,47 @@ class TaskStore:
         if row is None:
             raise TaskNotFound(f"Task not found: {task_id}")
         return row
+
+    @staticmethod
+    def _select_latest_attempt(connection: sqlite3.Connection, task_id: str) -> sqlite3.Row:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM task_attempts
+            WHERE task_id = ?
+            ORDER BY attempt_number DESC
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise TaskStoreError(f"Task has no execution attempt: {task_id}")
+        return row
+
+    @staticmethod
+    def _insert_initial_attempt(
+        connection: sqlite3.Connection,
+        *,
+        task_id: str,
+        idempotency_key: str,
+        created_at: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO task_attempts(
+                attempt_id, task_id, attempt_number, idempotency_key,
+                status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{task_id}.attempt-0001",
+                task_id,
+                1,
+                idempotency_key,
+                TaskStatus.QUEUED.value,
+                created_at,
+            ),
+        )
 
     @staticmethod
     def _select_batch(connection: sqlite3.Connection, batch_id: str) -> sqlite3.Row:
@@ -1057,10 +1409,17 @@ class TaskStore:
             raise TypeError("Stored batch ID is not text")
         child_rows = connection.execute(
             """
-            SELECT status, started_at, finished_at
+            SELECT attempts.status, attempts.started_at, attempts.finished_at
             FROM tasks
-            WHERE batch_id = ?
-            ORDER BY source_index ASC
+            JOIN task_attempts AS attempts
+              ON attempts.task_id = tasks.task_id
+             AND attempts.attempt_number = (
+                 SELECT MAX(newest.attempt_number)
+                 FROM task_attempts AS newest
+                 WHERE newest.task_id = tasks.task_id
+             )
+            WHERE tasks.batch_id = ?
+            ORDER BY tasks.source_index ASC
             """,
             (batch_id,),
         ).fetchall()
@@ -1093,49 +1452,103 @@ class TaskStore:
             strict=True,
         )
 
-    @staticmethod
-    def _record(row: sqlite3.Row) -> TaskRecord:
+    @classmethod
+    def _record(cls, connection: sqlite3.Connection, row: sqlite3.Row) -> TaskRecord:
         task_id = row["task_id"]
         if not isinstance(task_id, str):
             raise TypeError("Stored task ID is not text")
         EvaluationPaths(Path("."), task_id)
         request = TaskCreate.model_validate_json(row["request_json"], strict=True)
+        attempt = cls._select_latest_attempt(connection, task_id)
+        attempt_count = connection.execute(
+            "SELECT COUNT(*) FROM task_attempts WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+        if not isinstance(attempt_count, int) or attempt_count < 1:
+            raise TypeError("Stored attempt count is invalid")
         result = None
-        if row["result_json"] is not None:
-            result = TaskResult.model_validate_json(row["result_json"], strict=True)
+        if attempt["result_json"] is not None:
+            result = TaskResult.model_validate_json(attempt["result_json"], strict=True)
         failure = None
         if (
-            row["failure_category"] is not None
-            or row["failure_phase"] is not None
-            or row["failure_summary"] is not None
+            attempt["failure_category"] is not None
+            or attempt["failure_phase"] is not None
+            or attempt["failure_summary"] is not None
         ):
             failure = SafeFailure.model_validate(
                 {
                     "category": (
-                        FailureCategory(row["failure_category"]) if row["failure_category"] is not None else None
+                        FailureCategory(attempt["failure_category"])
+                        if attempt["failure_category"] is not None
+                        else None
                     ),
-                    "phase": TaskPhase(row["failure_phase"]) if row["failure_phase"] is not None else None,
-                    "summary": row["failure_summary"],
+                    "phase": (
+                        TaskPhase(attempt["failure_phase"]) if attempt["failure_phase"] is not None else None
+                    ),
+                    "summary": attempt["failure_summary"],
                 },
                 strict=True,
             )
+        status = TaskStatus(attempt["status"])
+        failure_category = failure.category if failure is not None else None
         return TaskRecord.model_validate(
             {
                 "task_id": task_id,
+                "attempt_id": attempt["attempt_id"],
+                "attempt_number": attempt["attempt_number"],
+                "attempt_count": attempt_count,
+                "retryable": (
+                    status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED}
+                    and failure_category in RETRYABLE_FAILURES
+                ),
                 "request": request,
-                "status": TaskStatus(row["status"]),
+                "status": status,
                 "batch_id": row["batch_id"],
                 "instance_id": row["instance_id"] or request.instance_id,
                 "source_index": row["source_index"],
+                "phase": TaskPhase(attempt["phase"]) if attempt["phase"] is not None else None,
+                "created_at": _parse_timestamp(attempt["created_at"]),
+                "started_at": _parse_optional_timestamp(attempt["started_at"]),
+                "finished_at": _parse_optional_timestamp(attempt["finished_at"]),
+                "version": attempt["version"],
+                "failure_category": failure_category,
+                "failure_phase": failure.phase if failure is not None else None,
+                "failure_summary": failure.summary if failure is not None else None,
+                "result": result,
+            },
+            strict=True,
+        )
+
+    @staticmethod
+    def _attempt_record(row: sqlite3.Row) -> TaskAttemptRecord:
+        status = TaskStatus(row["status"])
+        category = FailureCategory(row["failure_category"]) if row["failure_category"] is not None else None
+        result = (
+            TaskResult.model_validate_json(row["result_json"], strict=True)
+            if row["result_json"] is not None
+            else None
+        )
+        return TaskAttemptRecord.model_validate(
+            {
+                "attempt_id": row["attempt_id"],
+                "task_id": row["task_id"],
+                "attempt_number": row["attempt_number"],
+                "status": status,
                 "phase": TaskPhase(row["phase"]) if row["phase"] is not None else None,
                 "created_at": _parse_timestamp(row["created_at"]),
                 "started_at": _parse_optional_timestamp(row["started_at"]),
                 "finished_at": _parse_optional_timestamp(row["finished_at"]),
                 "version": row["version"],
-                "failure_category": failure.category if failure is not None else None,
-                "failure_phase": failure.phase if failure is not None else None,
-                "failure_summary": failure.summary if failure is not None else None,
+                "failure_category": category,
+                "failure_phase": (
+                    TaskPhase(row["failure_phase"]) if row["failure_phase"] is not None else None
+                ),
+                "failure_summary": row["failure_summary"],
                 "result": result,
+                "retryable": (
+                    status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED}
+                    and category in RETRYABLE_FAILURES
+                ),
             },
             strict=True,
         )
@@ -1145,6 +1558,10 @@ class TaskStore:
         result = record.result
         return TaskSummary(
             task_id=record.task_id,
+            attempt_id=record.attempt_id,
+            attempt_number=record.attempt_number,
+            attempt_count=record.attempt_count,
+            retryable=record.retryable,
             powercontext_ref=record.request.powercontext_ref,
             instance_id=record.request.instance_id,
             model=record.request.model,

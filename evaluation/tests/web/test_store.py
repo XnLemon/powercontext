@@ -109,10 +109,25 @@ def test_initialize_migrates_legacy_task_without_deleting_it(database: Path) -> 
         )
         connection.execute(
             """
-            INSERT INTO tasks(task_id, idempotency_key, request_json, status, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO tasks(
+                task_id, idempotency_key, request_json, status, created_at, started_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
-            ("run-legacy", "legacy-key", request("legacy-key").model_dump_json(), "queued", NOW.isoformat()),
+            (
+                "run-legacy",
+                "legacy-key",
+                request("legacy-key").model_dump_json(),
+                "running",
+                NOW.isoformat(),
+                NOW.isoformat(),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO worker_lease(singleton, worker_id, task_id, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (1, "legacy-worker", "run-legacy", (NOW + timedelta(seconds=60)).isoformat()),
         )
     store = TaskStore(database, lease_duration=timedelta(seconds=60))
 
@@ -122,6 +137,13 @@ def test_initialize_migrates_legacy_task_without_deleting_it(database: Path) -> 
     assert legacy.batch_id is None
     assert legacy.source_index is None
     assert legacy.instance_id == request("legacy-key").instance_id
+    assert legacy.attempt_id == "run-legacy.attempt-0001"
+    renewed = store.heartbeat("run-legacy", "legacy-worker", now=NOW + timedelta(seconds=30))
+    assert renewed.version == legacy.version + 1
+    with sqlite3.connect(database) as connection:
+        lease_columns = [row[1] for row in connection.execute("PRAGMA table_info(worker_lease)").fetchall()]
+    assert "attempt_id" in lease_columns
+    assert "task_id" not in lease_columns
     assert store.list_batches() == []
 
 
@@ -467,6 +489,159 @@ def test_threshold_updates_use_optimistic_concurrency_and_do_not_auto_resume(sto
     ]
     assert len(threshold_events) == 1
     assert threshold_events[0].details == {"from_percent": 80, "to_percent": 90}
+
+
+def test_existing_tasks_are_backfilled_as_attempt_one(store: TaskStore) -> None:
+    batch = store.create_batch(
+        batch_request("attempt-backfill"),
+        ("instance_owner__repo-a",),
+        now=NOW,
+    )[0]
+    task = store.list_batch_tasks(batch.batch_id)[0]
+
+    attempts = store.list_task_attempts(batch.batch_id, task.task_id)
+
+    assert [attempt.attempt_number for attempt in attempts] == [1]
+    assert attempts[0].attempt_id == f"{task.task_id}.attempt-0001"
+    assert attempts[0].task_id == task.task_id
+    assert task.attempt_id == attempts[0].attempt_id
+    assert task.attempt_number == 1
+    assert task.attempt_count == 1
+    assert task.retryable is False
+
+
+def test_retry_preserves_failed_attempt_and_idempotently_creates_attempt_two(store: TaskStore) -> None:
+    batch = store.create_batch(
+        batch_request("attempt-retry"),
+        ("instance_owner__repo-a",),
+        now=NOW,
+    )[0]
+    task = store.list_batch_tasks(batch.batch_id)[0]
+    claimed = store.claim_next("worker-a", now=NOW + timedelta(seconds=1))
+    assert claimed is not None
+    failed = store.fail(
+        task.task_id,
+        "worker-a",
+        SafeFailure(
+            category=FailureCategory.CODEX_EXECUTION,
+            phase=TaskPhase.RUNNING_OFF,
+            summary="Codex process failed",
+        ),
+        now=NOW + timedelta(seconds=2),
+    )
+    store.finalize_batch_intent_after_attempt(batch.batch_id, now=NOW + timedelta(seconds=2))
+
+    retry, created = store.retry_failed_task(
+        batch.batch_id,
+        task.task_id,
+        idempotency_key="retry-0001",
+        now=NOW + timedelta(seconds=3),
+    )
+    replay, replay_created = store.retry_failed_task(
+        batch.batch_id,
+        task.task_id,
+        idempotency_key="retry-0001",
+        now=NOW + timedelta(seconds=4),
+    )
+
+    assert failed.retryable is True
+    assert created is True
+    assert replay_created is False
+    assert replay == retry
+    assert retry.attempt_number == 2
+    assert retry.status is TaskStatus.QUEUED
+    attempts = store.list_task_attempts(batch.batch_id, task.task_id)
+    assert [attempt.attempt_number for attempt in attempts] == [1, 2]
+    assert attempts[0].status is TaskStatus.FAILED
+    assert attempts[0].failure_summary == "Codex process failed"
+    assert attempts[1] == retry
+    current = store.get_batch_task(batch.batch_id, task.task_id)
+    assert current.status is TaskStatus.QUEUED
+    assert current.attempt_id == retry.attempt_id
+    assert current.attempt_count == 2
+    assert store.get_batch(batch.batch_id).status is BatchStatus.QUEUED
+    assert [event.event_type for event in store.list_control_events(batch.batch_id)][-1] is (
+        BatchControlEventType.TASK_RETRY_REQUESTED
+    )
+
+
+@pytest.mark.parametrize(
+    ("result", "label"),
+    [
+        (
+            TaskResult(
+                artifact_dir="/safe/resolved",
+                report_path="/safe/resolved/report.md",
+                off_resolved=True,
+                on_resolved=True,
+            ),
+            "RESOLVED",
+        ),
+        (
+            TaskResult(
+                artifact_dir="/safe/unresolved",
+                report_path="/safe/unresolved/report.md",
+                off_resolved=False,
+                on_resolved=False,
+            ),
+            "UNRESOLVED",
+        ),
+    ],
+)
+def test_valid_official_outcomes_are_never_retryable(
+    store: TaskStore,
+    result: TaskResult,
+    label: str,
+) -> None:
+    batch = store.create_batch(
+        batch_request(f"valid-outcome-{label.lower()}"),
+        ("instance_owner__repo-a",),
+        now=NOW,
+    )[0]
+    task = store.list_batch_tasks(batch.batch_id)[0]
+    claimed = store.claim_next("worker-a", now=NOW + timedelta(seconds=1))
+    assert claimed is not None
+    completed = store.succeed(task.task_id, "worker-a", result, now=NOW + timedelta(seconds=2))
+
+    assert completed.retryable is False
+    with pytest.raises(TaskConflict, match="not retryable"):
+        store.retry_failed_task(
+            batch.batch_id,
+            task.task_id,
+            idempotency_key=f"retry-valid-{label.lower()}",
+            now=NOW + timedelta(seconds=3),
+        )
+    assert len(store.list_task_attempts(batch.batch_id, task.task_id)) == 1
+
+
+def test_retry_rejects_a_non_retryable_request_failure(store: TaskStore) -> None:
+    batch = store.create_batch(
+        batch_request("nonretryable-failure"),
+        ("instance_owner__repo-a",),
+        now=NOW,
+    )[0]
+    task = store.list_batch_tasks(batch.batch_id)[0]
+    claimed = store.claim_next("worker-a", now=NOW + timedelta(seconds=1))
+    assert claimed is not None
+    failed = store.fail(
+        task.task_id,
+        "worker-a",
+        SafeFailure(
+            category=FailureCategory.INVALID_REQUEST,
+            phase=TaskPhase.PREPARING,
+            summary="Invalid request",
+        ),
+        now=NOW + timedelta(seconds=2),
+    )
+
+    assert failed.retryable is False
+    with pytest.raises(TaskConflict, match="not retryable"):
+        store.retry_failed_task(
+            batch.batch_id,
+            task.task_id,
+            idempotency_key="retry-invalid-request",
+            now=NOW + timedelta(seconds=3),
+        )
 
 
 def test_create_batch_replays_idempotency_key_without_duplicate_children(store: TaskStore) -> None:
