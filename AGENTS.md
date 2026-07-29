@@ -34,6 +34,28 @@ specific regression:
 Include doctests when public examples are useful. For changes that affect supported Python versions, prefer `tox`
 before opening a PR. Tests may use plain `assert`; Ruff allows `S101` under `tests/`.
 
+## Agent Execution & Communication
+
+For a feature with three or more related behavior scenarios, write the complete behavior matrix before editing and
+implement it as a small number of vertical slices. Group related tests and implementation work; do not repeat a
+separate micro-cycle for every individual test. Keep separate tests for distinct observable invariants, and use
+parameterization only when the mechanism is identical and only the inputs vary.
+
+Use stable checkpoints:
+
+- If the same test file has been edited in three consecutive edit/run cycles, stop and consolidate the remaining
+  cases before making another patch.
+- If an implementation phase has not reached a stable checkpoint within 15 minutes, report the completed cases,
+  remaining cases, current failures, and whether a real blocker exists.
+- Organize commits by vertical behavior such as usage safety, boundary controls, or retry integrity. Run focused
+  tests once per slice and the full regression suite after the slice is complete.
+
+User communication preempts ongoing work. When a new user message arrives, acknowledge and answer it before
+continuing the previous tool or implementation workflow. Do not wait for a test, command, or planned checkpoint to
+finish before responding. After every test or command failure, immediately report the pass/fail count and the exact
+remaining issue before editing again. During long-running work, provide a concise factual update at each stable
+checkpoint and never leave the user without an update for more than 60 seconds.
+
 ## Commit & Pull Request Guidelines
 
 Recent history uses short Conventional Commit-style subjects, such as `feat: init powercontext`, `docs: init zensical i18n`, and `chore(github): add more templates for PRs and issues`. Keep the subject concise and scoped.
