@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from collections.abc import Iterator, Sequence
@@ -12,7 +13,19 @@ from re import fullmatch
 from typing import Any, Literal, TypedDict
 
 from powercontext_eval.paths import EvaluationPaths
-from powercontext_eval.web.batches import BatchCreate, BatchRecord, BatchStatus, derive_batch_status
+from powercontext_eval.web.batches import (
+    BatchControlEvent,
+    BatchControlEventType,
+    BatchCreate,
+    BatchRecord,
+    BatchStatus,
+)
+from powercontext_eval.web.controls import (
+    BatchControlIntent,
+    BatchControlState,
+    BatchPauseReason,
+    derive_controlled_batch_status,
+)
 from powercontext_eval.web.models import (
     FailureCategory,
     SafeFailure,
@@ -23,6 +36,7 @@ from powercontext_eval.web.models import (
     TaskStatus,
     TaskSummary,
 )
+from powercontext_eval.web.usage import UsageSnapshot
 
 
 class TaskStoreError(RuntimeError):
@@ -97,7 +111,12 @@ class TaskStore:
                     request_json TEXT NOT NULL,
                     total_tasks INTEGER NOT NULL CHECK (total_tasks > 0),
                     created_at TEXT NOT NULL,
-                    resolved_powercontext_sha TEXT
+                    resolved_powercontext_sha TEXT,
+                    control_intent TEXT NOT NULL DEFAULT 'run',
+                    usage_pause_percent INTEGER NOT NULL DEFAULT 80,
+                    pause_reason TEXT,
+                    control_updated_at TEXT,
+                    control_version INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS tasks (
                     queue_seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,15 +143,62 @@ class TaskStore:
                     task_id TEXT NOT NULL UNIQUE REFERENCES tasks(task_id),
                     expires_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS usage_snapshots (
+                    snapshot_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS batch_control_events (
+                    event_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id TEXT NOT NULL REFERENCES batches(batch_id),
+                    event_type TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    details_json TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL
+                );
                 """
             )
-            columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(tasks)").fetchall()}
-            if "batch_id" not in columns:
+            task_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(tasks)").fetchall()}
+            if "batch_id" not in task_columns:
                 connection.execute("ALTER TABLE tasks ADD COLUMN batch_id TEXT REFERENCES batches(batch_id)")
-            if "instance_id" not in columns:
+            if "instance_id" not in task_columns:
                 connection.execute("ALTER TABLE tasks ADD COLUMN instance_id TEXT")
-            if "source_index" not in columns:
+            if "source_index" not in task_columns:
                 connection.execute("ALTER TABLE tasks ADD COLUMN source_index INTEGER")
+            batch_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(batches)").fetchall()}
+            if "control_intent" not in batch_columns:
+                connection.execute("ALTER TABLE batches ADD COLUMN control_intent TEXT NOT NULL DEFAULT 'run'")
+            if "usage_pause_percent" not in batch_columns:
+                connection.execute(
+                    "ALTER TABLE batches ADD COLUMN usage_pause_percent INTEGER NOT NULL DEFAULT 80"
+                )
+            if "pause_reason" not in batch_columns:
+                connection.execute("ALTER TABLE batches ADD COLUMN pause_reason TEXT")
+            if "control_updated_at" not in batch_columns:
+                connection.execute("ALTER TABLE batches ADD COLUMN control_updated_at TEXT")
+            if "control_version" not in batch_columns:
+                connection.execute(
+                    "ALTER TABLE batches ADD COLUMN control_version INTEGER NOT NULL DEFAULT 0"
+                )
+            connection.execute(
+                "UPDATE batches SET control_updated_at = created_at WHERE control_updated_at IS NULL"
+            )
+            connection.execute(
+                """
+                UPDATE batches
+                SET control_intent = ?
+                WHERE EXISTS (
+                    SELECT 1 FROM tasks WHERE tasks.batch_id = batches.batch_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM tasks
+                    WHERE tasks.batch_id = batches.batch_id
+                    AND tasks.status != ?
+                )
+                """,
+                (BatchControlIntent.CANCEL.value, TaskStatus.CANCELLED.value),
+            )
             connection.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS tasks_status_queue
@@ -143,6 +209,10 @@ class TaskStore:
                 CREATE UNIQUE INDEX IF NOT EXISTS tasks_batch_source_index
                     ON tasks(batch_id, source_index)
                     WHERE batch_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS usage_snapshots_observed
+                    ON usage_snapshots(observed_at, snapshot_seq);
+                CREATE INDEX IF NOT EXISTS batch_control_events_batch_sequence
+                    ON batch_control_events(batch_id, event_seq);
                 """
             )
 
@@ -173,8 +243,9 @@ class TaskStore:
             cursor = connection.execute(
                 """
                 INSERT INTO batches(
-                    batch_id, idempotency_key, request_json, total_tasks, created_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    batch_id, idempotency_key, request_json, total_tasks, created_at,
+                    control_intent, usage_pause_percent, control_updated_at, control_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     placeholder,
@@ -182,6 +253,10 @@ class TaskStore:
                     request.model_dump_json(),
                     len(ordered_ids),
                     created_at,
+                    BatchControlIntent.RUN.value,
+                    request.usage_pause_percent,
+                    created_at,
+                    0,
                 ),
             )
             sequence = cursor.lastrowid
@@ -220,12 +295,236 @@ class TaskStore:
                         created_at,
                     ),
                 )
+            self._append_control_event(
+                connection,
+                batch_id,
+                BatchControlEventType.BATCH_CREATED,
+                "system",
+                {"usage_pause_percent": request.usage_pause_percent},
+                now,
+            )
             return self._batch_record(connection, self._select_batch(connection, batch_id)), True
 
     def get_batch(self, batch_id: str) -> BatchRecord:
         """Return one batch with lifecycle state derived from its children."""
 
         with self._connection() as connection:
+            return self._batch_record(connection, self._select_batch(connection, batch_id))
+
+    def save_usage_snapshot(self, snapshot: UsageSnapshot) -> UsageSnapshot:
+        """Append one normalized account-wide usage observation."""
+
+        observed_at = _timestamp(snapshot.observed_at)
+        with self._write() as connection:
+            connection.execute(
+                """
+                INSERT INTO usage_snapshots(snapshot_json, observed_at)
+                VALUES (?, ?)
+                """,
+                (snapshot.model_dump_json(), observed_at),
+            )
+        return snapshot
+
+    def latest_usage_snapshot(self) -> UsageSnapshot | None:
+        """Return the newest immutable usage observation, if one exists."""
+
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT snapshot_json
+                FROM usage_snapshots
+                ORDER BY snapshot_seq DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        return UsageSnapshot.model_validate_json(row["snapshot_json"], strict=True)
+
+    def list_control_events(self, batch_id: str) -> tuple[BatchControlEvent, ...]:
+        """Return the sanitized control audit trail in insertion order."""
+
+        with self._connection() as connection:
+            self._select_batch(connection, batch_id)
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM batch_control_events
+                WHERE batch_id = ?
+                ORDER BY event_seq ASC
+                """,
+                (batch_id,),
+            ).fetchall()
+        return tuple(self._control_event(row) for row in rows)
+
+    def request_pause(
+        self,
+        batch_id: str,
+        *,
+        reason: BatchPauseReason,
+        now: datetime,
+    ) -> BatchRecord:
+        """Persist a pause intent and stop only at a benchmark-task boundary."""
+
+        if not isinstance(reason, BatchPauseReason):
+            raise TypeError("reason must be a BatchPauseReason")
+        now_text = _timestamp(now)
+        with self._write() as connection:
+            row = self._select_batch(connection, batch_id)
+            intent = BatchControlIntent(row["control_intent"])
+            if intent is BatchControlIntent.PAUSE:
+                return self._batch_record(connection, row)
+            if intent is BatchControlIntent.CANCEL:
+                raise TaskConflict("A cancelling batch cannot be paused")
+            if self._all_batch_tasks_terminal(connection, batch_id):
+                raise TaskConflict("A completed batch cannot be paused")
+
+            connection.execute(
+                """
+                UPDATE batches
+                SET control_intent = ?, pause_reason = ?, control_updated_at = ?,
+                    control_version = control_version + 1
+                WHERE batch_id = ?
+                """,
+                (BatchControlIntent.PAUSE.value, reason.value, now_text, batch_id),
+            )
+            event_type, actor = _pause_event(reason)
+            self._append_control_event(connection, batch_id, event_type, actor, {}, now)
+            self._finalize_batch_intent(connection, batch_id, now=now)
+            return self._batch_record(connection, self._select_batch(connection, batch_id))
+
+    def request_resume(
+        self,
+        batch_id: str,
+        *,
+        snapshot: UsageSnapshot,
+        now: datetime,
+    ) -> BatchRecord:
+        """Resume a paused batch only below its configured usage threshold."""
+
+        _timestamp(now)
+        with self._write() as connection:
+            row = self._select_batch(connection, batch_id)
+            intent = BatchControlIntent(row["control_intent"])
+            if intent is BatchControlIntent.RUN:
+                return self._batch_record(connection, row)
+            if intent is BatchControlIntent.CANCEL:
+                raise TaskConflict("A cancelling batch cannot be resumed")
+            if self._all_batch_tasks_terminal(connection, batch_id):
+                raise TaskConflict("A completed batch cannot be resumed")
+            threshold = _stored_int(row["usage_pause_percent"], name="usage threshold")
+            if snapshot.used_percent >= threshold:
+                raise TaskConflict("Current Codex usage is at or above the batch threshold")
+
+            self._append_control_event(
+                connection,
+                batch_id,
+                BatchControlEventType.RESUME_REQUESTED,
+                "user",
+                {"used_percent": snapshot.used_percent, "threshold_percent": threshold},
+                now,
+            )
+            connection.execute(
+                """
+                UPDATE batches
+                SET control_intent = ?, pause_reason = NULL, control_updated_at = ?,
+                    control_version = control_version + 1
+                WHERE batch_id = ?
+                """,
+                (BatchControlIntent.RUN.value, _timestamp(now), batch_id),
+            )
+            self._append_control_event(
+                connection,
+                batch_id,
+                BatchControlEventType.RESUMED,
+                "system",
+                {"used_percent": snapshot.used_percent, "threshold_percent": threshold},
+                now,
+            )
+            return self._batch_record(connection, self._select_batch(connection, batch_id))
+
+    def request_cancel(self, batch_id: str, *, now: datetime) -> BatchRecord:
+        """Persist cancellation and cancel queued work once no child is running."""
+
+        now_text = _timestamp(now)
+        with self._write() as connection:
+            row = self._select_batch(connection, batch_id)
+            intent = BatchControlIntent(row["control_intent"])
+            if intent is BatchControlIntent.CANCEL:
+                self._finalize_batch_intent(connection, batch_id, now=now)
+                return self._batch_record(connection, self._select_batch(connection, batch_id))
+            if self._all_batch_tasks_terminal(connection, batch_id):
+                raise TaskConflict("A completed batch cannot be cancelled")
+
+            connection.execute(
+                """
+                UPDATE batches
+                SET control_intent = ?, pause_reason = NULL, control_updated_at = ?,
+                    control_version = control_version + 1
+                WHERE batch_id = ?
+                """,
+                (BatchControlIntent.CANCEL.value, now_text, batch_id),
+            )
+            self._append_control_event(
+                connection,
+                batch_id,
+                BatchControlEventType.CANCEL_REQUESTED,
+                "user",
+                {},
+                now,
+            )
+            self._finalize_batch_intent(connection, batch_id, now=now)
+            return self._batch_record(connection, self._select_batch(connection, batch_id))
+
+    def update_usage_threshold(
+        self,
+        batch_id: str,
+        *,
+        percent: int,
+        expected_version: int,
+        now: datetime,
+    ) -> BatchRecord:
+        """Update a threshold with optimistic concurrency and no implicit resume."""
+
+        _validate_percentage(percent)
+        if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version < 0:
+            raise ValueError("expected_version must be a non-negative integer")
+        now_text = _timestamp(now)
+        with self._write() as connection:
+            row = self._select_batch(connection, batch_id)
+            version = _stored_int(row["control_version"], name="control version")
+            if version != expected_version:
+                raise TaskConflict("Batch control version does not match")
+            previous = _stored_int(row["usage_pause_percent"], name="usage threshold")
+            if previous == percent:
+                return self._batch_record(connection, row)
+
+            connection.execute(
+                """
+                UPDATE batches
+                SET usage_pause_percent = ?, control_updated_at = ?,
+                    control_version = control_version + 1
+                WHERE batch_id = ?
+                """,
+                (percent, now_text, batch_id),
+            )
+            self._append_control_event(
+                connection,
+                batch_id,
+                BatchControlEventType.THRESHOLD_CHANGED,
+                "user",
+                {"from_percent": previous, "to_percent": percent},
+                now,
+            )
+            return self._batch_record(connection, self._select_batch(connection, batch_id))
+
+    def finalize_batch_intent_after_attempt(self, batch_id: str, *, now: datetime) -> BatchRecord:
+        """Apply a pending pause or cancel after the active benchmark task ends."""
+
+        _timestamp(now)
+        with self._write() as connection:
+            self._select_batch(connection, batch_id)
+            self._finalize_batch_intent(connection, batch_id, now=now)
             return self._batch_record(connection, self._select_batch(connection, batch_id))
 
     def pin_batch_revision(self, batch_id: str, sha: str) -> BatchRecord:
@@ -277,27 +576,9 @@ class TaskStore:
             return self._record(row)
 
     def cancel_batch_queued(self, batch_id: str, *, now: datetime) -> BatchRecord:
-        """Cancel every child that has not started, without interrupting a running child."""
+        """Compatibility alias for the durable boundary-based cancellation action."""
 
-        finished_at = _timestamp(now)
-        with self._write() as connection:
-            self._select_batch(connection, batch_id)
-            cursor = connection.execute(
-                """
-                UPDATE tasks
-                SET status = ?, finished_at = ?, version = version + 1
-                WHERE batch_id = ? AND status = ?
-                """,
-                (
-                    TaskStatus.CANCELLED.value,
-                    finished_at,
-                    batch_id,
-                    TaskStatus.QUEUED.value,
-                ),
-            )
-            if cursor.rowcount == 0:
-                raise TaskConflict("Batch has no queued tasks to cancel")
-            return self._batch_record(connection, self._select_batch(connection, batch_id))
+        return self.request_cancel(batch_id, now=now)
 
     def create(self, request: TaskCreate, *, now: datetime) -> tuple[TaskRecord, bool]:
         """Create a queued task, or replay the task for an idempotency key."""
@@ -594,6 +875,130 @@ class TaskStore:
             connection.execute("DELETE FROM worker_lease WHERE singleton = ?", (1,))
             return recovered
 
+    def _finalize_batch_intent(
+        self,
+        connection: sqlite3.Connection,
+        batch_id: str,
+        *,
+        now: datetime,
+    ) -> None:
+        running = connection.execute(
+            "SELECT 1 FROM tasks WHERE batch_id = ? AND status = ? LIMIT 1",
+            (batch_id, TaskStatus.RUNNING.value),
+        ).fetchone()
+        if running is not None:
+            return
+
+        row = self._select_batch(connection, batch_id)
+        intent = BatchControlIntent(row["control_intent"])
+        if intent is BatchControlIntent.CANCEL:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = ?, finished_at = ?, version = version + 1
+                WHERE batch_id = ? AND status = ?
+                """,
+                (
+                    TaskStatus.CANCELLED.value,
+                    _timestamp(now),
+                    batch_id,
+                    TaskStatus.QUEUED.value,
+                ),
+            )
+            self._append_control_event_once(
+                connection,
+                batch_id,
+                BatchControlEventType.CANCELLED,
+                "system",
+                {},
+                now,
+            )
+        elif intent is BatchControlIntent.PAUSE:
+            self._append_control_event_once(
+                connection,
+                batch_id,
+                BatchControlEventType.PAUSED,
+                "system",
+                {},
+                now,
+            )
+        elif self._all_batch_tasks_terminal(connection, batch_id):
+            self._append_control_event_once(
+                connection,
+                batch_id,
+                BatchControlEventType.BATCH_COMPLETED,
+                "system",
+                {},
+                now,
+            )
+
+    @staticmethod
+    def _all_batch_tasks_terminal(connection: sqlite3.Connection, batch_id: str) -> bool:
+        nonterminal = connection.execute(
+            """
+            SELECT 1
+            FROM tasks
+            WHERE batch_id = ?
+              AND status NOT IN (?, ?, ?, ?)
+            LIMIT 1
+            """,
+            (
+                batch_id,
+                TaskStatus.SUCCEEDED.value,
+                TaskStatus.FAILED.value,
+                TaskStatus.INTERRUPTED.value,
+                TaskStatus.CANCELLED.value,
+            ),
+        ).fetchone()
+        return nonterminal is None
+
+    @staticmethod
+    def _append_control_event(
+        connection: sqlite3.Connection,
+        batch_id: str,
+        event_type: BatchControlEventType,
+        actor: Literal["user", "system"],
+        details: dict[str, int | str | None],
+        now: datetime,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO batch_control_events(
+                batch_id, event_type, actor, details_json, occurred_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                batch_id,
+                event_type.value,
+                actor,
+                json.dumps(details, sort_keys=True, separators=(",", ":")),
+                _timestamp(now),
+            ),
+        )
+
+    @classmethod
+    def _append_control_event_once(
+        cls,
+        connection: sqlite3.Connection,
+        batch_id: str,
+        event_type: BatchControlEventType,
+        actor: Literal["user", "system"],
+        details: dict[str, int | str | None],
+        now: datetime,
+    ) -> None:
+        existing = connection.execute(
+            """
+            SELECT event_type
+            FROM batch_control_events
+            WHERE batch_id = ?
+            ORDER BY event_seq DESC
+            LIMIT 1
+            """,
+            (batch_id,),
+        ).fetchone()
+        if existing is None or existing["event_type"] != event_type.value:
+            cls._append_control_event(connection, batch_id, event_type, actor, details, now)
+
     def _require_running_owner(
         self,
         connection: sqlite3.Connection,
@@ -629,6 +1034,23 @@ class TaskStore:
         return row
 
     @staticmethod
+    def _control_event(row: sqlite3.Row) -> BatchControlEvent:
+        details = json.loads(row["details_json"])
+        if not isinstance(details, dict):
+            raise TypeError("Stored control event details are not an object")
+        return BatchControlEvent.model_validate(
+            {
+                "sequence": row["event_seq"],
+                "batch_id": row["batch_id"],
+                "event_type": BatchControlEventType(row["event_type"]),
+                "actor": row["actor"],
+                "details": details,
+                "occurred_at": _parse_timestamp(row["occurred_at"]),
+            },
+            strict=True,
+        )
+
+    @staticmethod
     def _batch_record(connection: sqlite3.Connection, row: sqlite3.Row) -> BatchRecord:
         batch_id = row["batch_id"]
         if not isinstance(batch_id, str):
@@ -643,16 +1065,26 @@ class TaskStore:
             (batch_id,),
         ).fetchall()
         statuses = tuple(TaskStatus(child["status"]) for child in child_rows)
-        status = derive_batch_status(statuses)
+        intent = BatchControlIntent(row["control_intent"])
+        status = derive_controlled_batch_status(intent=intent, task_statuses=statuses)
         starts = [_parse_timestamp(child["started_at"]) for child in child_rows if child["started_at"] is not None]
         finishes = [_parse_timestamp(child["finished_at"]) for child in child_rows if child["finished_at"] is not None]
         terminal = status in {BatchStatus.COMPLETED, BatchStatus.CANCELLED}
+        pause_reason = row["pause_reason"]
+        control = BatchControlState(
+            intent=intent,
+            usage_pause_percent=_stored_int(row["usage_pause_percent"], name="usage threshold"),
+            pause_reason=BatchPauseReason(pause_reason) if pause_reason is not None else None,
+            updated_at=_parse_timestamp(row["control_updated_at"]),
+            version=_stored_int(row["control_version"], name="control version"),
+        )
         return BatchRecord.model_validate(
             {
                 "batch_id": batch_id,
                 "request": BatchCreate.model_validate_json(row["request_json"], strict=True),
                 "total_tasks": row["total_tasks"],
                 "status": status,
+                "control": control,
                 "created_at": _parse_timestamp(row["created_at"]),
                 "started_at": min(starts) if starts else None,
                 "finished_at": max(finishes) if terminal and finishes else None,
@@ -744,6 +1176,29 @@ def _parse_timestamp(value: Any) -> datetime:
 
 def _parse_optional_timestamp(value: Any) -> datetime | None:
     return None if value is None else _parse_timestamp(value)
+
+
+def _stored_int(value: Any, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"Stored {name} is not an integer")
+    return value
+
+
+def _validate_percentage(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 100:
+        raise ValueError("percent must be an integer between 1 and 100")
+
+
+def _pause_event(
+    reason: BatchPauseReason,
+) -> tuple[BatchControlEventType, Literal["user", "system"]]:
+    if reason is BatchPauseReason.USER:
+        return BatchControlEventType.PAUSE_REQUESTED, "user"
+    if reason is BatchPauseReason.USAGE_THRESHOLD:
+        return BatchControlEventType.USAGE_THRESHOLD_REACHED, "system"
+    if reason is BatchPauseReason.USAGE_UNAVAILABLE:
+        return BatchControlEventType.USAGE_UNAVAILABLE, "system"
+    return BatchControlEventType.QUOTA_LIMIT_REACHED, "system"
 
 
 def _task_id(now: datetime, sequence: int) -> str:

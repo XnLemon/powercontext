@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from powercontext_eval.models import PowerContextRef
+from powercontext_eval.web.controls import BatchControlState
 from powercontext_eval.web.models import TaskStatus
 
 
@@ -53,11 +54,44 @@ class PairCategory(StrEnum):
     EXECUTION_FAILURE = "execution_failure"
 
 
+class BatchControlEventType(StrEnum):
+    BATCH_CREATED = "batch_created"
+    THRESHOLD_CHANGED = "threshold_changed"
+    PAUSE_REQUESTED = "pause_requested"
+    PAUSED = "paused"
+    RESUME_REQUESTED = "resume_requested"
+    RESUMED = "resumed"
+    CANCEL_REQUESTED = "cancel_requested"
+    CANCELLED = "cancelled"
+    USAGE_THRESHOLD_REACHED = "usage_threshold_reached"
+    USAGE_UNAVAILABLE = "usage_unavailable"
+    QUOTA_LIMIT_REACHED = "quota_limit_reached"
+    BATCH_COMPLETED = "batch_completed"
+    TASK_RETRY_REQUESTED = "task_retry_requested"
+
+
+class BatchControlEvent(_FrozenModel):
+    sequence: Annotated[int, Field(ge=1)]
+    batch_id: str
+    event_type: BatchControlEventType
+    actor: Literal["user", "system"]
+    details: dict[str, int | str | None]
+    occurred_at: datetime
+
+    @field_validator("occurred_at")
+    @classmethod
+    def require_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
+            raise ValueError("Control event timestamps must use UTC")
+        return value
+
+
 class BatchRecord(_FrozenModel):
     batch_id: str
     request: BatchCreate
     total_tasks: Annotated[int, Field(ge=1)]
     status: BatchStatus
+    control: BatchControlState
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None

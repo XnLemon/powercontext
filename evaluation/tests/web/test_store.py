@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from powercontext_eval.paths import EvaluationPaths
-from powercontext_eval.web.batches import BatchCreate, BatchStatus
+from powercontext_eval.web.batches import BatchControlEventType, BatchCreate, BatchStatus
+from powercontext_eval.web.controls import BatchControlIntent, BatchPauseReason
 from powercontext_eval.web.models import (
     FailureCategory,
     SafeFailure,
@@ -15,6 +16,7 @@ from powercontext_eval.web.models import (
     TaskStatus,
 )
 from powercontext_eval.web.store import TaskConflict, TaskNotFound, TaskOwnershipError, TaskStore
+from powercontext_eval.web.usage import UsageSnapshot
 
 NOW = datetime(2026, 7, 29, 1, 2, 3, tzinfo=UTC)
 
@@ -40,6 +42,19 @@ def batch_request(key: str) -> BatchCreate:
         reasoning_effort="medium",
         treatment_mode="off_on",
         idempotency_key=key,
+    )
+
+
+def usage_snapshot(*, used_percent: int, observed_at: datetime = NOW) -> UsageSnapshot:
+    return UsageSnapshot(
+        limit_id="codex",
+        used_percent=used_percent,
+        remaining_percent=100 - used_percent,
+        window_duration_minutes=10_080,
+        resets_at=NOW + timedelta(days=7),
+        observed_at=observed_at,
+        plan_type="pro",
+        account_tokens=1_234,
     )
 
 
@@ -110,6 +125,116 @@ def test_initialize_migrates_legacy_task_without_deleting_it(database: Path) -> 
     assert store.list_batches() == []
 
 
+def test_initialize_migrates_current_cancelled_batch_control_without_rewriting_children(database: Path) -> None:
+    batch = batch_request("legacy-batch")
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE batches (
+                batch_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL UNIQUE,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                request_json TEXT NOT NULL,
+                total_tasks INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                resolved_powercontext_sha TEXT
+            );
+            CREATE TABLE tasks (
+                queue_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL UNIQUE,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                request_json TEXT NOT NULL,
+                batch_id TEXT REFERENCES batches(batch_id),
+                instance_id TEXT,
+                source_index INTEGER,
+                status TEXT NOT NULL,
+                phase TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                version INTEGER NOT NULL DEFAULT 0,
+                failure_category TEXT,
+                failure_phase TEXT,
+                failure_summary TEXT,
+                result_json TEXT
+            );
+            CREATE TABLE worker_lease (
+                singleton INTEGER PRIMARY KEY,
+                worker_id TEXT NOT NULL,
+                task_id TEXT NOT NULL UNIQUE REFERENCES tasks(task_id),
+                expires_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO batches(
+                batch_id, idempotency_key, request_json, total_tasks, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            ("batch-legacy", batch.idempotency_key, batch.model_dump_json(), 2, NOW.isoformat()),
+        )
+        for index in range(2):
+            child = request(f"legacy-child-{index}").model_copy(
+                update={"instance_id": f"instance_owner__repo-{index}"}
+            )
+            connection.execute(
+                """
+                INSERT INTO tasks(
+                    task_id, idempotency_key, request_json, batch_id, instance_id,
+                    source_index, status, created_at, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"run-legacy-{index}",
+                    child.idempotency_key,
+                    child.model_dump_json(),
+                    "batch-legacy",
+                    child.instance_id,
+                    index,
+                    TaskStatus.CANCELLED.value,
+                    NOW.isoformat(),
+                    (NOW + timedelta(seconds=1)).isoformat(),
+                ),
+            )
+    store = TaskStore(database, lease_duration=timedelta(seconds=60))
+
+    store.initialize()
+    store.initialize()
+
+    migrated = store.get_batch("batch-legacy")
+    assert migrated.status is BatchStatus.CANCELLED
+    assert migrated.control.intent is BatchControlIntent.CANCEL
+    assert migrated.control.usage_pause_percent == 80
+    assert migrated.control.version == 0
+    assert [task.status for task in store.list_batch_tasks("batch-legacy")] == [
+        TaskStatus.CANCELLED,
+        TaskStatus.CANCELLED,
+    ]
+    assert store.latest_usage_snapshot() is None
+    assert store.list_control_events("batch-legacy") == ()
+
+
+def test_usage_snapshots_are_append_only_and_survive_restart(database: Path) -> None:
+    store = TaskStore(database, lease_duration=timedelta(seconds=60))
+    store.initialize()
+    first = usage_snapshot(used_percent=9)
+    second = usage_snapshot(used_percent=12, observed_at=NOW + timedelta(minutes=1))
+
+    assert store.save_usage_snapshot(first) == first
+    assert store.save_usage_snapshot(second) == second
+    assert store.latest_usage_snapshot() == second
+
+    restarted = TaskStore(database, lease_duration=timedelta(seconds=60))
+    restarted.initialize()
+    assert restarted.latest_usage_snapshot() == second
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT snapshot_json FROM usage_snapshots ORDER BY snapshot_seq ASC"
+        ).fetchall()
+    assert [UsageSnapshot.model_validate_json(row[0], strict=True) for row in rows] == [first, second]
+
+
 def test_create_batch_expands_every_instance_atomically_in_source_order(store: TaskStore, tmp_path: Path) -> None:
     instance_ids = (
         "instance_owner__repo-a",
@@ -128,6 +253,220 @@ def test_create_batch_expands_every_instance_atomically_in_source_order(store: T
     assert all(task.batch_id == batch.batch_id for task in children)
     assert all(EvaluationPaths(tmp_path, task.task_id) for task in children)
     assert store.health_snapshot(now=NOW)["queued_tasks"] == 3
+
+
+def test_pause_without_a_running_task_is_immediate_idempotent_and_restart_safe(database: Path) -> None:
+    store = TaskStore(database, lease_duration=timedelta(seconds=60))
+    store.initialize()
+    batch = store.create_batch(
+        batch_request("pause-immediate"),
+        ("instance_owner__repo-a", "instance_owner__repo-b"),
+        now=NOW,
+    )[0]
+
+    paused = store.request_pause(batch.batch_id, reason=BatchPauseReason.USER, now=NOW + timedelta(seconds=1))
+    replay = store.request_pause(batch.batch_id, reason=BatchPauseReason.USER, now=NOW + timedelta(seconds=2))
+
+    assert paused.status is BatchStatus.PAUSED
+    assert paused.control.intent is BatchControlIntent.PAUSE
+    assert paused.control.pause_reason is BatchPauseReason.USER
+    assert paused.control.version == 1
+    assert replay == paused
+    assert [task.status for task in store.list_batch_tasks(batch.batch_id)] == [
+        TaskStatus.QUEUED,
+        TaskStatus.QUEUED,
+    ]
+    assert [event.event_type for event in store.list_control_events(batch.batch_id)] == [
+        BatchControlEventType.BATCH_CREATED,
+        BatchControlEventType.PAUSE_REQUESTED,
+        BatchControlEventType.PAUSED,
+    ]
+
+    restarted = TaskStore(database, lease_duration=timedelta(seconds=60))
+    restarted.initialize()
+    assert restarted.get_batch(batch.batch_id) == paused
+
+
+def test_pause_and_cancel_wait_for_the_running_benchmark_task_boundary(store: TaskStore) -> None:
+    paused_batch = store.create_batch(
+        batch_request("pause-boundary"),
+        ("instance_owner__repo-a", "instance_owner__repo-b"),
+        now=NOW,
+    )[0]
+    running = store.claim_next("worker-a", now=NOW + timedelta(seconds=1))
+    assert running is not None
+
+    pausing = store.request_pause(
+        paused_batch.batch_id,
+        reason=BatchPauseReason.USER,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    assert pausing.status is BatchStatus.PAUSING
+    assert [event.event_type for event in store.list_control_events(paused_batch.batch_id)][-1] is (
+        BatchControlEventType.PAUSE_REQUESTED
+    )
+    store.succeed(
+        running.task_id,
+        "worker-a",
+        TaskResult(
+            artifact_dir="/safe/artifacts",
+            report_path="/safe/artifacts/report.md",
+            off_resolved=False,
+            on_resolved=True,
+        ),
+        now=NOW + timedelta(seconds=3),
+    )
+    paused = store.finalize_batch_intent_after_attempt(paused_batch.batch_id, now=NOW + timedelta(seconds=3))
+
+    assert paused.status is BatchStatus.PAUSED
+    assert [task.status for task in store.list_batch_tasks(paused_batch.batch_id)] == [
+        TaskStatus.SUCCEEDED,
+        TaskStatus.QUEUED,
+    ]
+    assert [event.event_type for event in store.list_control_events(paused_batch.batch_id)][-1] is (
+        BatchControlEventType.PAUSED
+    )
+    store.request_cancel(paused_batch.batch_id, now=NOW + timedelta(seconds=4))
+
+    cancelled_batch = store.create_batch(
+        batch_request("cancel-boundary"),
+        ("instance_owner__repo-c", "instance_owner__repo-d"),
+        now=NOW + timedelta(seconds=5),
+    )[0]
+    cancelled_running = store.claim_next("worker-a", now=NOW + timedelta(seconds=6))
+    assert cancelled_running is not None
+    assert cancelled_running.batch_id == cancelled_batch.batch_id
+
+    cancelling = store.request_cancel(cancelled_batch.batch_id, now=NOW + timedelta(seconds=7))
+
+    assert cancelling.status is BatchStatus.CANCELLING
+    store.fail(
+        cancelled_running.task_id,
+        "worker-a",
+        SafeFailure(
+            category=FailureCategory.CODEX_EXECUTION,
+            phase=TaskPhase.RUNNING_OFF,
+            summary="Safe failure",
+        ),
+        now=NOW + timedelta(seconds=8),
+    )
+    cancelled = store.finalize_batch_intent_after_attempt(
+        cancelled_batch.batch_id,
+        now=NOW + timedelta(seconds=8),
+    )
+
+    assert cancelled.status is BatchStatus.CANCELLED
+    assert [task.status for task in store.list_batch_tasks(cancelled_batch.batch_id)] == [
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    ]
+    assert [event.event_type for event in store.list_control_events(cancelled_batch.batch_id)][-2:] == [
+        BatchControlEventType.CANCEL_REQUESTED,
+        BatchControlEventType.CANCELLED,
+    ]
+
+
+def test_cancel_without_a_running_task_marks_queued_tasks_once(store: TaskStore) -> None:
+    batch = store.create_batch(
+        batch_request("cancel-immediate"),
+        ("instance_owner__repo-a", "instance_owner__repo-b"),
+        now=NOW,
+    )[0]
+
+    cancelled = store.request_cancel(batch.batch_id, now=NOW + timedelta(seconds=1))
+    replay = store.request_cancel(batch.batch_id, now=NOW + timedelta(seconds=2))
+
+    assert cancelled.status is BatchStatus.CANCELLED
+    assert replay == cancelled
+    assert [task.status for task in store.list_batch_tasks(batch.batch_id)] == [
+        TaskStatus.CANCELLED,
+        TaskStatus.CANCELLED,
+    ]
+    assert [event.event_type for event in store.list_control_events(batch.batch_id)] == [
+        BatchControlEventType.BATCH_CREATED,
+        BatchControlEventType.CANCEL_REQUESTED,
+        BatchControlEventType.CANCELLED,
+    ]
+
+
+def test_resume_requires_usage_below_threshold_and_never_happens_implicitly(store: TaskStore) -> None:
+    batch = store.create_batch(
+        batch_request("resume-control"),
+        ("instance_owner__repo-a",),
+        now=NOW,
+    )[0]
+    paused = store.request_pause(batch.batch_id, reason=BatchPauseReason.USER, now=NOW + timedelta(seconds=1))
+    at_threshold = usage_snapshot(used_percent=80, observed_at=NOW + timedelta(seconds=2))
+    store.save_usage_snapshot(at_threshold)
+
+    with pytest.raises(TaskConflict, match="threshold"):
+        store.request_resume(batch.batch_id, snapshot=at_threshold, now=NOW + timedelta(seconds=2))
+
+    assert store.get_batch(batch.batch_id) == paused
+    below_threshold = usage_snapshot(used_percent=79, observed_at=NOW + timedelta(seconds=3))
+    store.save_usage_snapshot(below_threshold)
+    resumed = store.request_resume(
+        batch.batch_id,
+        snapshot=below_threshold,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    assert resumed.status is BatchStatus.QUEUED
+    assert resumed.control.intent is BatchControlIntent.RUN
+    assert resumed.control.pause_reason is None
+    assert resumed.control.version == paused.control.version + 1
+    assert [event.event_type for event in store.list_control_events(batch.batch_id)][-2:] == [
+        BatchControlEventType.RESUME_REQUESTED,
+        BatchControlEventType.RESUMED,
+    ]
+
+
+def test_threshold_updates_use_optimistic_concurrency_and_do_not_auto_resume(store: TaskStore) -> None:
+    batch = store.create_batch(
+        batch_request("threshold-control"),
+        ("instance_owner__repo-a",),
+        now=NOW,
+    )[0]
+    paused = store.request_pause(
+        batch.batch_id,
+        reason=BatchPauseReason.USAGE_THRESHOLD,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    with pytest.raises(TaskConflict, match="version"):
+        store.update_usage_threshold(
+            batch.batch_id,
+            percent=90,
+            expected_version=0,
+            now=NOW + timedelta(seconds=2),
+        )
+
+    updated = store.update_usage_threshold(
+        batch.batch_id,
+        percent=90,
+        expected_version=paused.control.version,
+        now=NOW + timedelta(seconds=2),
+    )
+    replay = store.update_usage_threshold(
+        batch.batch_id,
+        percent=90,
+        expected_version=updated.control.version,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    assert updated.status is BatchStatus.PAUSED
+    assert updated.control.intent is BatchControlIntent.PAUSE
+    assert updated.control.usage_pause_percent == 90
+    assert updated.control.version == paused.control.version + 1
+    assert replay == updated
+    threshold_events = [
+        event
+        for event in store.list_control_events(batch.batch_id)
+        if event.event_type is BatchControlEventType.THRESHOLD_CHANGED
+    ]
+    assert len(threshold_events) == 1
+    assert threshold_events[0].details == {"from_percent": 80, "to_percent": 90}
 
 
 def test_create_batch_replays_idempotency_key_without_duplicate_children(store: TaskStore) -> None:

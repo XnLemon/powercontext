@@ -1,13 +1,18 @@
 """Public batch execution controls and lifecycle derivation."""
 
+from __future__ import annotations
+
+from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from powercontext_eval.models import PowerContextRef
-from powercontext_eval.web.batches import BatchStatus
 from powercontext_eval.web.models import TaskStatus
+
+if TYPE_CHECKING:
+    from powercontext_eval.web.batches import BatchStatus
 
 
 class _FrozenModel(BaseModel):
@@ -46,12 +51,38 @@ class BatchPreviewRequest(_FrozenModel):
         return value
 
 
+class BatchControlPatch(_FrozenModel):
+    """Optimistically update a batch's current subscription threshold."""
+
+    usage_pause_percent: Annotated[int, Field(ge=1, le=100)]
+    expected_version: Annotated[int, Field(ge=0)]
+
+
+class BatchControlState(_FrozenModel):
+    """Durable operator intent and current threshold for one batch."""
+
+    intent: BatchControlIntent
+    usage_pause_percent: Annotated[int, Field(ge=1, le=100)]
+    pause_reason: BatchPauseReason | None = None
+    updated_at: datetime
+    version: Annotated[int, Field(ge=0)]
+
+    @field_validator("updated_at")
+    @classmethod
+    def require_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
+            raise ValueError("Control timestamps must use UTC")
+        return value
+
+
 def derive_controlled_batch_status(
     *,
     intent: BatchControlIntent,
     task_statuses: tuple[TaskStatus, ...],
 ) -> BatchStatus:
     """Derive the visible batch lifecycle from operator intent and child tasks."""
+
+    from powercontext_eval.web.batches import BatchStatus
 
     if not task_statuses:
         raise ValueError("A batch must contain at least one task")
