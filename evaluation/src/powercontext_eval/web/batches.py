@@ -24,6 +24,7 @@ class BatchCreate(_FrozenModel):
     reasoning_effort: Literal["medium"]
     treatment_mode: Literal["off_on"]
     idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
+    usage_pause_percent: Annotated[int, Field(ge=1, le=100)] = 80
 
     @field_validator("powercontext_ref")
     @classmethod
@@ -37,6 +38,9 @@ class BatchCreate(_FrozenModel):
 class BatchStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
+    PAUSING = "pausing"
+    PAUSED = "paused"
+    CANCELLING = "cancelling"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
 

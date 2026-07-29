@@ -68,6 +68,10 @@ def test_web_config_defaults_match_m0_layout() -> None:
     assert config.auth_json == root / "codex-home" / "auth.json"
     assert config.proxy_url == "http://127.0.0.1:7890"
     assert config.frontend_dist == root / "deploy" / "powercontext" / "evaluation" / "web" / "dist"
+    assert config.usage_pause_percent == 80
+    assert config.usage_probe_seconds == 60
+    assert config.usage_probe_timeout_seconds == 15
+    assert config.usage_snapshot_max_age_seconds == 120
 
 
 @pytest.mark.parametrize(
@@ -98,6 +102,10 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
         "POWERCONTEXT_EVAL_PORT": "8123",
         "POWERCONTEXT_EVAL_LEASE_SECONDS": "90",
         "POWERCONTEXT_EVAL_POLL_SECONDS": "2.5",
+        "POWERCONTEXT_EVAL_USAGE_PAUSE_PERCENT": "75",
+        "POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS": "90",
+        "POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS": "20",
+        "POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS": "180",
         "ROOT": "/ignored",
         "PORT": "1",
         "PROXY_URL": "https://ignored.invalid",
@@ -111,6 +119,10 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
     assert config.port == 8123
     assert config.lease_seconds == 90
     assert config.poll_seconds == 2.5
+    assert config.usage_pause_percent == 75
+    assert config.usage_probe_seconds == 90
+    assert config.usage_probe_timeout_seconds == 20
+    assert config.usage_snapshot_max_age_seconds == 180
 
 
 @pytest.mark.parametrize(
@@ -144,6 +156,14 @@ def test_web_config_rejects_relative_paths(tmp_path: Path, name: str, value: str
         ("POWERCONTEXT_EVAL_LEASE_SECONDS", "0"),
         ("POWERCONTEXT_EVAL_POLL_SECONDS", "0"),
         ("POWERCONTEXT_EVAL_POLL_SECONDS", "31"),
+        ("POWERCONTEXT_EVAL_USAGE_PAUSE_PERCENT", "0"),
+        ("POWERCONTEXT_EVAL_USAGE_PAUSE_PERCENT", "101"),
+        ("POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS", "9"),
+        ("POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS", "3601"),
+        ("POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS", "0"),
+        ("POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS", "61"),
+        ("POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS", "9"),
+        ("POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS", "7201"),
     ],
 )
 def test_web_config_rejects_invalid_numeric_settings(tmp_path: Path, name: str, value: str) -> None:
@@ -157,11 +177,26 @@ def test_web_config_rejects_invalid_numeric_settings(tmp_path: Path, name: str, 
         ("POWERCONTEXT_EVAL_PORT", "not-a-port"),
         ("POWERCONTEXT_EVAL_LEASE_SECONDS", "never"),
         ("POWERCONTEXT_EVAL_POLL_SECONDS", "soon"),
+        ("POWERCONTEXT_EVAL_USAGE_PAUSE_PERCENT", "many"),
+        ("POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS", "often"),
+        ("POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS", "later"),
+        ("POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS", "fresh"),
     ],
 )
 def test_web_config_rejects_malformed_numeric_environment_values(tmp_path: Path, name: str, value: str) -> None:
     with pytest.raises(ValidationError):
         WebConfig.from_environment({"POWERCONTEXT_EVAL_ROOT": str(tmp_path), name: value})
+
+
+def test_web_config_requires_usage_snapshot_to_cover_probe_interval(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError):
+        WebConfig.from_environment(
+            {
+                "POWERCONTEXT_EVAL_ROOT": str(tmp_path),
+                "POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS": "90",
+                "POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS": "60",
+            }
+        )
 
 
 def test_web_config_has_no_public_serialization_that_leaks_secrets(tmp_path: Path) -> None:
@@ -229,6 +264,7 @@ def test_batch_create_pins_the_public_v2_task_set() -> None:
     )
 
     assert request.task_set == "swebench-pro-public-v2"
+    assert request.usage_pause_percent == 80
     assert [category.value for category in PairCategory] == [
         "off_fail_on_pass",
         "off_pass_on_fail",
@@ -236,6 +272,38 @@ def test_batch_create_pins_the_public_v2_task_set() -> None:
         "both_fail",
         "execution_failure",
     ]
+
+
+def test_batch_create_accepts_a_per_batch_usage_threshold_override() -> None:
+    request = BatchCreate(
+        powercontext_ref="latest",
+        benchmark="swebench-pro",
+        task_set="swebench-pro-public-v2",
+        model="gpt-5.6-sol",
+        reasoning_effort="medium",
+        treatment_mode="off_on",
+        idempotency_key="batch-request",
+        usage_pause_percent=75,
+    )
+
+    assert request.usage_pause_percent == 75
+
+
+@pytest.mark.parametrize("value", [0, 101, True, 80.5, "80"])
+def test_batch_create_strictly_rejects_invalid_usage_threshold(value: object) -> None:
+    payload = {
+        "powercontext_ref": "latest",
+        "benchmark": "swebench-pro",
+        "task_set": "swebench-pro-public-v2",
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "medium",
+        "treatment_mode": "off_on",
+        "idempotency_key": "batch-request",
+        "usage_pause_percent": value,
+    }
+
+    with pytest.raises(ValidationError):
+        BatchCreate.model_validate(payload)
 
 
 @pytest.mark.parametrize(

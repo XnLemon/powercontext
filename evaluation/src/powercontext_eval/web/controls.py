@@ -1,0 +1,84 @@
+"""Public batch execution controls and lifecycle derivation."""
+
+from enum import StrEnum
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from powercontext_eval.models import PowerContextRef
+from powercontext_eval.web.batches import BatchStatus
+from powercontext_eval.web.models import TaskStatus
+
+
+class _FrozenModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+
+class BatchControlIntent(StrEnum):
+    """The operator's durable intent for a batch."""
+
+    RUN = "run"
+    PAUSE = "pause"
+    CANCEL = "cancel"
+
+
+class BatchPauseReason(StrEnum):
+    """Stable public reasons why a batch stopped starting new tasks."""
+
+    USER = "user"
+    USAGE_THRESHOLD = "usage_threshold"
+    USAGE_UNAVAILABLE = "usage_unavailable"
+    QUOTA_LIMIT = "quota_limit"
+
+
+class BatchPreviewRequest(_FrozenModel):
+    """Inputs required to preview a full public-v2 run before confirmation."""
+
+    powercontext_ref: str
+    usage_pause_percent: Annotated[int, Field(ge=1, le=100)] = 80
+
+    @field_validator("powercontext_ref")
+    @classmethod
+    def validate_ref(cls, value: str) -> str:
+        PowerContextRef.parse(value)
+        if value != "latest" and not value.startswith("commit:"):
+            raise ValueError("Web evaluations accept only latest or an exact commit")
+        return value
+
+
+def derive_controlled_batch_status(
+    *,
+    intent: BatchControlIntent,
+    task_statuses: tuple[TaskStatus, ...],
+) -> BatchStatus:
+    """Derive the visible batch lifecycle from operator intent and child tasks."""
+
+    if not task_statuses:
+        raise ValueError("A batch must contain at least one task")
+
+    if intent is BatchControlIntent.CANCEL:
+        if any(status is TaskStatus.RUNNING for status in task_statuses):
+            return BatchStatus.CANCELLING
+        if all(status is not TaskStatus.QUEUED for status in task_statuses):
+            return BatchStatus.CANCELLED
+        return BatchStatus.CANCELLING
+
+    terminal = {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.INTERRUPTED,
+        TaskStatus.CANCELLED,
+    }
+    if all(status in terminal for status in task_statuses):
+        if all(status is TaskStatus.CANCELLED for status in task_statuses):
+            return BatchStatus.CANCELLED
+        return BatchStatus.COMPLETED
+
+    if intent is BatchControlIntent.PAUSE:
+        if any(status is TaskStatus.RUNNING for status in task_statuses):
+            return BatchStatus.PAUSING
+        return BatchStatus.PAUSED
+
+    if all(status is TaskStatus.QUEUED for status in task_statuses):
+        return BatchStatus.QUEUED
+    return BatchStatus.RUNNING

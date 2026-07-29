@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _EnvironmentNumbers(BaseModel):
@@ -15,6 +15,10 @@ class _EnvironmentNumbers(BaseModel):
     port: Annotated[int, Field(ge=1, le=65535)] = 8080
     lease_seconds: Annotated[int, Field(ge=1, le=3600)] = 60
     poll_seconds: Annotated[float, Field(gt=0, le=30)] = 1.0
+    usage_pause_percent: Annotated[int, Field(ge=1, le=100)] = 80
+    usage_probe_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
+    usage_probe_timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 15
+    usage_snapshot_max_age_seconds: Annotated[int, Field(ge=10, le=7200)] = 120
 
 
 class WebConfig(BaseModel):
@@ -38,6 +42,10 @@ class WebConfig(BaseModel):
     port: Annotated[int, Field(ge=1, le=65535)] = 8080
     lease_seconds: Annotated[int, Field(ge=1, le=3600)] = 60
     poll_seconds: Annotated[float, Field(gt=0, le=30)] = 1.0
+    usage_pause_percent: Annotated[int, Field(ge=1, le=100)] = 80
+    usage_probe_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
+    usage_probe_timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 15
+    usage_snapshot_max_age_seconds: Annotated[int, Field(ge=10, le=7200)] = 120
 
     @field_validator(
         "root",
@@ -57,6 +65,12 @@ class WebConfig(BaseModel):
         if not value.is_absolute():
             raise ValueError("Runtime paths must be absolute")
         return value
+
+    @model_validator(mode="after")
+    def require_usage_snapshot_to_cover_probe_interval(self) -> Self:
+        if self.usage_snapshot_max_age_seconds < self.usage_probe_seconds:
+            raise ValueError("Usage snapshot max age must cover at least one probe interval")
+        return self
 
     @classmethod
     def for_root(
@@ -79,6 +93,10 @@ class WebConfig(BaseModel):
         port: int = 8080,
         lease_seconds: int = 60,
         poll_seconds: float = 1.0,
+        usage_pause_percent: int = 80,
+        usage_probe_seconds: int = 60,
+        usage_probe_timeout_seconds: int = 15,
+        usage_snapshot_max_age_seconds: int = 120,
     ) -> Self:
         return cls(
             root=root,
@@ -99,6 +117,10 @@ class WebConfig(BaseModel):
             port=port,
             lease_seconds=lease_seconds,
             poll_seconds=poll_seconds,
+            usage_pause_percent=usage_pause_percent,
+            usage_probe_seconds=usage_probe_seconds,
+            usage_probe_timeout_seconds=usage_probe_timeout_seconds,
+            usage_snapshot_max_age_seconds=usage_snapshot_max_age_seconds,
         )
 
     @classmethod
@@ -115,6 +137,10 @@ class WebConfig(BaseModel):
                 "port": environ.get(f"{prefix}PORT", "8080"),
                 "lease_seconds": environ.get(f"{prefix}LEASE_SECONDS", "60"),
                 "poll_seconds": environ.get(f"{prefix}POLL_SECONDS", "1"),
+                "usage_pause_percent": environ.get(f"{prefix}USAGE_PAUSE_PERCENT", "80"),
+                "usage_probe_seconds": environ.get(f"{prefix}USAGE_PROBE_SECONDS", "60"),
+                "usage_probe_timeout_seconds": environ.get(f"{prefix}USAGE_PROBE_TIMEOUT_SECONDS", "15"),
+                "usage_snapshot_max_age_seconds": environ.get(f"{prefix}USAGE_SNAPSHOT_MAX_AGE_SECONDS", "120"),
             }
         )
 
@@ -135,6 +161,10 @@ class WebConfig(BaseModel):
             port=numbers.port,
             lease_seconds=numbers.lease_seconds,
             poll_seconds=numbers.poll_seconds,
+            usage_pause_percent=numbers.usage_pause_percent,
+            usage_probe_seconds=numbers.usage_probe_seconds,
+            usage_probe_timeout_seconds=numbers.usage_probe_timeout_seconds,
+            usage_snapshot_max_age_seconds=numbers.usage_snapshot_max_age_seconds,
         )
 
     @property
