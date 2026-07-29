@@ -1037,6 +1037,40 @@ def test_batch_report_reconciles_resolution_pairs_failures_and_total_tokens(
     assert "elapsed" not in response.text
 
 
+def test_batch_token_totals_use_only_pairs_with_both_arm_measurements(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    catalog = _BatchCatalog()
+    client = TestClient(create_app(config, store, catalog=catalog))
+    batch = client.post("/api/batches", json=_batch_payload("batch-paired-token-key")).json()
+    children = _finish_batch(config, store, batch["batch_id"])
+    report_path = config.run_root / "runs" / children[0].task_id / "report.json"
+    bundle = json.loads(report_path.read_text())
+    bundle["on"]["metrics"]["output_tokens"] = None
+    report_path.write_text(json.dumps(bundle))
+
+    response = client.get(f"/api/batches/{batch['batch_id']}/report")
+
+    assert response.status_code == 200
+    tokens = response.json()["tokens"]
+    assert tokens["input"]["off_measured_tasks"] == tokens["input"]["on_measured_tasks"] == 4
+    assert tokens["output"] == {
+        "off": 34,
+        "on": 35,
+        "delta": 1,
+        "off_measured_tasks": 3,
+        "on_measured_tasks": 3,
+    }
+    assert tokens["total"] == {
+        "off": 374,
+        "on": 390,
+        "delta": 16,
+        "off_measured_tasks": 3,
+        "on_measured_tasks": 3,
+    }
+
+
 def test_batch_task_report_filters_searches_sorts_and_drills_into_full_context(
     config: WebConfig,
     store: TaskStore,

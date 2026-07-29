@@ -454,13 +454,15 @@ def load_batch_report(
             comparable += 1
             off_resolved += int(bundle.off.resolved)
             on_resolved += int(bundle.on.resolved)
-            for arm_name, arm in (("off", bundle.off), ("on", bundle.on)):
-                if arm.metrics.input_tokens is not None:
-                    token_values["input"][arm_name].append(arm.metrics.input_tokens)
-                if arm.metrics.output_tokens is not None:
-                    token_values["output"][arm_name].append(arm.metrics.output_tokens)
-                if (total := _arm_total(arm)) is not None:
-                    token_values["total"][arm_name].append(total)
+            metric_pairs = {
+                "input": (bundle.off.metrics.input_tokens, bundle.on.metrics.input_tokens),
+                "output": (bundle.off.metrics.output_tokens, bundle.on.metrics.output_tokens),
+                "total": (_arm_total(bundle.off), _arm_total(bundle.on)),
+            }
+            for metric_name, (off_value, on_value) in metric_pairs.items():
+                if off_value is not None and on_value is not None:
+                    token_values[metric_name]["off"].append(off_value)
+                    token_values[metric_name]["on"].append(on_value)
             candidate_revisions = dict(bundle.revisions)
             candidate_configuration = {
                 key: value for key, value in bundle.configuration.items() if key != "instance"
