@@ -34,6 +34,7 @@ from powercontext_eval.web.batches import (
     TokenAggregate,
     TokenMetricAggregate,
 )
+from powercontext_eval.web.estimation import BatchEstimate, EstimateBasis, EstimateSample, estimate_batch
 from powercontext_eval.web.models import (
     ArmResponse,
     ComparisonResponse,
@@ -44,6 +45,7 @@ from powercontext_eval.web.models import (
     TaskStatus,
     TreatmentEvidence,
 )
+from powercontext_eval.web.usage import UsageSnapshot
 
 _REPORT_JSON_LIMIT = 1024 * 1024
 _REPORT_MARKDOWN_LIMIT = 4 * 1024 * 1024
@@ -337,7 +339,7 @@ def _load_batch_bundle(run_dir: Path, run_root: Path) -> ReportBundle:
 def _bundle_for_task(task: TaskRecord, runs_root: Path) -> ReportBundle:
     if task.status is not TaskStatus.SUCCEEDED or task.result is None:
         raise InvalidReportArtifact
-    bundle = _load_batch_bundle(runs_root / task.task_id, runs_root)
+    bundle = _load_batch_bundle(_task_run_dir(task, runs_root), runs_root)
     if (
         bundle.off.arm != "off"
         or bundle.on.arm != "on"
@@ -347,6 +349,18 @@ def _bundle_for_task(task: TaskRecord, runs_root: Path) -> ReportBundle:
     ):
         raise InvalidReportArtifact
     return bundle
+
+
+def _task_run_dir(task: TaskRecord, runs_root: Path) -> Path:
+    if task.result is None:
+        raise InvalidReportArtifact
+    expected_run_id = task.task_id if task.attempt_number == 1 else task.attempt_id
+    if expected_run_id is None:
+        raise InvalidReportArtifact
+    artifact_dir = Path(task.result.artifact_dir)
+    if artifact_dir.parts != ("runs", expected_run_id):
+        raise InvalidReportArtifact
+    return runs_root / expected_run_id
 
 
 def _pair_category(off_resolved: bool, on_resolved: bool) -> PairCategory:
@@ -434,6 +448,7 @@ def load_batch_report(
     *,
     runs_root: Path,
     catalog: BenchmarkCatalog,
+    latest_usage: UsageSnapshot | None = None,
 ) -> BatchReportResponse:
     """Aggregate factual batch outcomes without producing an acceptance conclusion."""
 
@@ -449,6 +464,7 @@ def load_batch_report(
     }
     revisions: dict[str, str] | None = None
     configuration: dict[str, str] | None = None
+    estimate_samples: list[EstimateSample] = []
     for task in tasks:
         catalog.require(task.request.instance_id)
         if task.status is TaskStatus.SUCCEEDED:
@@ -467,6 +483,19 @@ def load_batch_report(
                 if off_value is not None and on_value is not None:
                     token_values[metric_name]["off"].append(off_value)
                     token_values[metric_name]["on"].append(on_value)
+            paired_tokens = metric_pairs["total"]
+            if (
+                paired_tokens[0] is not None
+                and paired_tokens[1] is not None
+                and task.started_at is not None
+                and task.finished_at is not None
+            ):
+                estimate_samples.append(
+                    EstimateSample(
+                        tokens=paired_tokens[0] + paired_tokens[1],
+                        duration_seconds=max(0, round((task.finished_at - task.started_at).total_seconds())),
+                    )
+                )
             candidate_revisions = dict(bundle.revisions)
             candidate_configuration = {key: value for key, value in bundle.configuration.items() if key != "instance"}
             if revisions is None:
@@ -496,12 +525,14 @@ def load_batch_report(
         }
     )
     total = batch.total_tasks
+    terminal_tasks = sum(status_counts[status] for status in _TERMINAL_STATES)
     off_rate = off_resolved / total * 100
     on_rate = on_resolved / total * 100
     return BatchReportResponse(
         batch_id=batch.batch_id,
+        report_revision=batch.control.version + sum(task.attempt_count * 100 + task.version for task in tasks),
         total_tasks=total,
-        terminal_tasks=sum(status_counts[status] for status in _TERMINAL_STATES),
+        terminal_tasks=terminal_tasks,
         comparable_pairs=comparable,
         execution_failures=execution_failures,
         cancelled_tasks=status_counts[TaskStatus.CANCELLED],
@@ -514,6 +545,17 @@ def load_batch_report(
             input=_metric_aggregate(token_values["input"]),
             output=_metric_aggregate(token_values["output"]),
             total=_metric_aggregate(token_values["total"]),
+        ),
+        control=batch.control,
+        latest_usage=latest_usage,
+        estimate=(
+            estimate_batch(
+                samples=estimate_samples,
+                remaining_tasks=total - terminal_tasks,
+                basis=EstimateBasis.CURRENT_BATCH,
+            )
+            if estimate_samples
+            else BatchEstimate.unavailable(remaining_tasks=total - terminal_tasks)
         ),
         revisions=revisions,
         configuration=configuration,
@@ -685,7 +727,7 @@ def load_context_page(
         raise InvalidReportArtifact
     if limit < 1 or offset < 0:
         raise ValueError("Context page bounds are invalid")
-    events = _load_context_events(runs_root / task.task_id, runs_root, arm)
+    events = _load_context_events(_task_run_dir(task, runs_root), runs_root, arm)
     return ContextEventPage(items=events[offset : offset + limit], total=len(events), limit=limit, offset=offset)
 
 
@@ -701,7 +743,7 @@ def load_context_event(
 
     if sequence < 1 or task.batch_id != batch.batch_id or task.status is not TaskStatus.SUCCEEDED:
         raise InvalidReportArtifact
-    events = _load_context_events(runs_root / task.task_id, runs_root, arm)
+    events = _load_context_events(_task_run_dir(task, runs_root), runs_root, arm)
     if sequence > len(events):
         raise InvalidReportArtifact
     return events[sequence - 1]

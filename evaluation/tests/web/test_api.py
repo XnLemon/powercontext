@@ -1028,6 +1028,21 @@ def test_batch_report_reconciles_resolution_pairs_failures_and_total_tokens(
     }
     assert report["tokens"]["output"]["off"] == 44
     assert report["tokens"]["total"]["on"] == 478
+    assert report["control"]["intent"] == "run"
+    assert report["latest_usage"] is None
+    assert report["estimate"] == {
+        "quality": "preliminary",
+        "basis": "current_batch",
+        "sample_size": 4,
+        "remaining_tasks": 0,
+        "remaining_tokens": 0,
+        "remaining_duration_seconds": 0,
+        "low_tokens": 0,
+        "high_tokens": 0,
+        "low_duration_seconds": 0,
+        "high_duration_seconds": 0,
+    }
+    assert report["report_revision"] > 0
     assert "acceptance_valid" not in report
     assert "conclusion" not in report
     assert "patch_bytes" not in response.text
@@ -1067,6 +1082,74 @@ def test_batch_token_totals_use_only_pairs_with_both_arm_measurements(
         "off_measured_tasks": 3,
         "on_measured_tasks": 3,
     }
+
+
+def test_batch_report_uses_the_successful_retry_once_and_reads_its_attempt_artifacts(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    catalog = _BatchCatalog()
+    client = TestClient(create_app(config, store, catalog=catalog))
+    batch = client.post("/api/batches", json=_batch_payload("batch-retry-report-key")).json()
+    task = store.list_batch_tasks(batch["batch_id"])[0]
+    started = datetime.now(UTC) + timedelta(seconds=1)
+    claimed = store.claim_next("batch-worker", now=started)
+    assert claimed is not None and claimed.task_id == task.task_id
+    store.fail(
+        task.task_id,
+        "batch-worker",
+        SafeFailure(
+            category=FailureCategory.CODEX_EXECUTION,
+            phase=TaskPhase.RUNNING_OFF,
+            summary="First attempt failed",
+        ),
+        now=started + timedelta(seconds=1),
+    )
+    retry, created = store.retry_failed_task(
+        batch["batch_id"],
+        task.task_id,
+        idempotency_key="retry-report-0001",
+        now=started + timedelta(seconds=2),
+    )
+    assert created is True
+    claimed_retry = store.claim_next("batch-worker", now=started + timedelta(seconds=3))
+    assert claimed_retry is not None and claimed_retry.attempt_id == retry.attempt_id
+    _write_batch_artifacts(
+        config,
+        retry.attempt_id,
+        task.request.instance_id,
+        off_resolved=False,
+        on_resolved=True,
+        off_tokens=(100, 10),
+        on_tokens=(80, 8),
+    )
+    run_dir = config.run_root / "runs" / retry.attempt_id
+    store.succeed(
+        task.task_id,
+        "batch-worker",
+        TaskResult(
+            artifact_dir=str(run_dir.relative_to(config.run_root)),
+            report_path=str((run_dir / "report.json").relative_to(config.run_root)),
+            off_resolved=False,
+            on_resolved=True,
+        ),
+        now=started + timedelta(seconds=4),
+    )
+
+    report = client.get(f"/api/batches/{batch['batch_id']}/report")
+    task_page = client.get(f"/api/batches/{batch['batch_id']}/tasks")
+
+    assert report.status_code == 200
+    assert report.json()["comparable_pairs"] == 1
+    assert report.json()["execution_failures"] == 0
+    assert report.json()["on"]["resolved"] == 1
+    item = task_page.json()["items"][0]
+    assert item["attempt_number"] == item["attempt_count"] == 2
+    assert item["pair_category"] == "off_fail_on_pass"
+    assert [attempt.failure_summary for attempt in store.list_task_attempts(batch["batch_id"], task.task_id)] == [
+        "First attempt failed",
+        None,
+    ]
 
 
 def test_batch_task_report_filters_searches_sorts_and_drills_into_full_context(

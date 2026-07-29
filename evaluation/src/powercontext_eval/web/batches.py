@@ -10,7 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from powercontext_eval.models import PowerContextRef
 from powercontext_eval.web.controls import BatchControlState
+from powercontext_eval.web.estimation import BatchEstimate
 from powercontext_eval.web.models import TaskStatus
+from powercontext_eval.web.usage import UsageSnapshot
 
 
 class _FrozenModel(BaseModel):
@@ -127,6 +129,7 @@ class TokenAggregate(_FrozenModel):
 
 class BatchReportResponse(_FrozenModel):
     batch_id: str
+    report_revision: Annotated[int, Field(ge=0)]
     total_tasks: Annotated[int, Field(ge=1)]
     terminal_tasks: Annotated[int, Field(ge=0)]
     comparable_pairs: Annotated[int, Field(ge=0)]
@@ -138,6 +141,9 @@ class BatchReportResponse(_FrozenModel):
     pair_categories: dict[PairCategory, Annotated[int, Field(ge=0)]]
     task_statuses: dict[TaskStatus, Annotated[int, Field(ge=0)]]
     tokens: TokenAggregate
+    control: BatchControlState
+    latest_usage: UsageSnapshot | None
+    estimate: BatchEstimate
     revisions: dict[str, str]
     configuration: dict[str, str]
 

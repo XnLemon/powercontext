@@ -441,6 +441,7 @@ def create_app(
                 tasks,
                 runs_root=config.run_root / "runs",
                 catalog=get_catalog(),
+                latest_usage=task_store.latest_usage_snapshot(),
             )
         except (CatalogError, ReportingError, OSError, ValueError):
             return _error(409, "report_unavailable", "The batch report is not available.")
