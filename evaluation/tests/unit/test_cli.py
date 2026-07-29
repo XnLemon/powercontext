@@ -77,16 +77,30 @@ def test_cli_module_is_directly_executable() -> None:
 
 def test_swebench_pro_run_exposes_the_minimal_m0_command(monkeypatch) -> None:
     calls: list[object] = []
+    instance = object()
 
-    def fake_run(config: object) -> MinimalRunResult:
-        calls.append(config)
+    def fake_run(config: object, *, instance: object) -> MinimalRunResult:
+        calls.append((config, instance))
         return MinimalRunResult("run-fixed", Path("/data/powercontext-eval/runs/run-fixed/report.md"), False, True)
 
-    monkeypatch.setattr("powercontext_eval.cli.run_minimal_swebench_pro", fake_run)
-    result = CliRunner().invoke(app, ["swebench-pro", "run", "--run-id", "run-fixed"])
+    class FakeCatalog:
+        def require(self, instance_id: str) -> object:
+            assert instance_id == "instance_owner__repo-b"
+            return instance
+
+    monkeypatch.setattr(
+        "powercontext_eval.cli.SweBenchProCatalog.load",
+        lambda path: FakeCatalog(),
+    )
+    monkeypatch.setattr("powercontext_eval.cli.run_swebench_pro_instance", fake_run)
+    result = CliRunner().invoke(
+        app,
+        ["swebench-pro", "run", "--run-id", "run-fixed", "--instance-id", "instance_owner__repo-b"],
+    )
 
     assert result.exit_code == 0, result.output
     assert '"run_id": "run-fixed"' in result.output
     assert '"off_resolved": false' in result.output
     assert '"on_resolved": true' in result.output
     assert len(calls) == 1
+    assert calls[0][1] is instance

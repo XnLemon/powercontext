@@ -201,9 +201,14 @@ def _test_names(value: object, field: str) -> tuple[str, ...]:
             parsed = json.loads(value)
         except json.JSONDecodeError as error:
             raise DatasetSchemaError(f"Dataset row field {field} must contain a JSON array") from error
-    if not isinstance(parsed, list) or any(not isinstance(item, str) or not item for item in parsed):
+    if not isinstance(parsed, list):
         raise DatasetSchemaError(f"Dataset row field {field} must be an array of non-blank strings")
-    return tuple(parsed)
+    names: list[str] = []
+    for item in parsed:
+        if not isinstance(item, str) or not item:
+            raise DatasetSchemaError(f"Dataset row field {field} must be an array of non-blank strings")
+        names.append(item)
+    return tuple(names)
 
 
 def _docker_hub_image(image_name: str) -> str:

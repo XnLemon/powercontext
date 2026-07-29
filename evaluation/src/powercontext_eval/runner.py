@@ -1,9 +1,10 @@
-"""Minimal pinned Codex × SWE-bench Pro OFF/ON orchestration."""
+"""Codex × SWE-bench Pro OFF/ON orchestration for one pinned instance."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -12,7 +13,11 @@ from pathlib import Path
 
 from powercontext_eval.artifacts import ArmState, ArtifactStore
 from powercontext_eval.benchmarks.base import GoldResult, run_after_gold
-from powercontext_eval.benchmarks.swebench_pro.adapter import SweBenchProInstance
+from powercontext_eval.benchmarks.swebench_pro.adapter import (
+    DATASET_REVISION,
+    HARNESS_COMMIT,
+    SweBenchProInstance,
+)
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluation, OfficialEvaluator
 from powercontext_eval.benchmarks.swebench_pro.prediction import encode_predictions
 from powercontext_eval.git_source import GitSource
@@ -29,13 +34,13 @@ from powercontext_eval.powercontext_sut import (
 from powercontext_eval.process import ProcessRunner
 from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, render_report
 
+# Compatibility identifier for the legacy single-task web contract. The generic runner never consults it.
 INSTANCE_ID = "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"
-TASK_IMAGE = "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"
-IMAGE_MANIFEST_DIGEST = "sha256:d2c9d5460c479cb257a0588a603021f4e83e31f2614146728336689854f52803"
+_IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 class RunPhase(StrEnum):
-    """Stable observable phases of a minimal evaluation run."""
+    """Stable observable phases of one evaluation run."""
 
     PREPARING = "preparing"
     VALIDATING_GOLD = "validating_gold"
@@ -49,25 +54,24 @@ PhaseCallback = Callable[[RunPhase], None]
 
 
 @dataclass(frozen=True)
-class MinimalRunConfig:
-    """All external inputs for one pinned experiment."""
+class RunConfig:
+    """All external inputs shared by one pinned instance pair."""
 
     root: Path
     powercontext_source: Path
     powercontext_ref: str
     harness_root: Path
     harness_python: Path
-    raw_sample_path: Path
     codex_binary: Path
     uv_binary: Path
     auth_json: Path
     proxy_url: str
-    run_id: str | None = None
+    run_id: str
 
 
 @dataclass(frozen=True)
-class MinimalRunResult:
-    """Paths and official outcomes returned by the one-command runner."""
+class RunResult:
+    """Paths and official outcomes returned by the per-instance runner."""
 
     run_id: str
     report_path: Path
@@ -75,23 +79,24 @@ class MinimalRunResult:
     on_resolved: bool
 
 
-def run_minimal_swebench_pro(
-    config: MinimalRunConfig,
+# Public compatibility name retained while the web task schema migrates from a single task to batches.
+MinimalRunResult = RunResult
+
+
+def run_swebench_pro_instance(
+    config: RunConfig,
     *,
+    instance: SweBenchProInstance,
     on_phase: PhaseCallback | None = None,
-) -> MinimalRunResult:
-    """Resolve PowerContext once, run Gold then OFF/ON, and render a report."""
+) -> RunResult:
+    """Run Gold then OFF/ON for exactly the supplied catalog instance."""
 
     emit_phase = on_phase if on_phase is not None else (lambda phase: None)
-    run_id = config.run_id or datetime.now(UTC).strftime("run-%Y%m%d-%H%M%S")
+    run_id = config.run_id
     layout = EvaluationPaths(config.root.absolute(), run_id)
     if os.path.lexists(layout.run_artifacts) or os.path.lexists(config.root / "work" / run_id):
         raise ValueError(f"Run already exists: {run_id}")
     emit_phase(RunPhase.PREPARING)
-    raw = _read_one_jsonl(config.raw_sample_path)
-    instance = SweBenchProInstance.from_raw(raw, docker_manifest_digest=IMAGE_MANIFEST_DIGEST)
-    if instance.instance_id != INSTANCE_ID:
-        raise ValueError(f"The MVP supports only {INSTANCE_ID}")
 
     process = ProcessRunner()
     source = GitSource(cache_root=config.root / "cache" / "powercontext-git", runner=process)
@@ -100,26 +105,27 @@ def run_minimal_swebench_pro(
     materialized = source.materialize(resolved, work_root / "powercontext")
 
     run_store = ArtifactStore(layout.run_artifacts)
+    task_image_id = _resolve_task_image(process, instance.task_image, cwd=layout.run_artifacts)
     run_store.create_json(
         "manifest.json",
         {
             "run_id": run_id,
-            "instance_id": INSTANCE_ID,
+            "instance_id": instance.instance_id,
             "powercontext_requested_ref": config.powercontext_ref,
             "powercontext_sha": resolved.sha,
-            "task_image": TASK_IMAGE,
-            "image_manifest_digest": IMAGE_MANIFEST_DIGEST,
+            "task_image": instance.task_image,
+            "task_image_id": task_image_id,
         },
     )
     raw_copy = run_store.create_text(
         "instance.jsonl",
-        json.dumps(raw, ensure_ascii=False, separators=(",", ":")) + "\n",
+        json.dumps(instance.official_row(), ensure_ascii=False, separators=(",", ":")) + "\n",
     )
 
     evaluator = OfficialEvaluator(process, python_executable=os.fspath(config.harness_python))
     gold_prediction = run_store.create_text(
         "gold/predictions.json",
-        encode_predictions(INSTANCE_ID, instance.patch, "gold"),
+        encode_predictions(instance.instance_id, instance.patch, "gold"),
     )
     emit_phase(RunPhase.VALIDATING_GOLD)
     gold = evaluator.evaluate(
@@ -127,7 +133,7 @@ def run_minimal_swebench_pro(
         raw_sample_path=raw_copy,
         prediction_path=gold_prediction,
         output_dir=layout.run_artifacts / "gold" / "official",
-        instance_id=INSTANCE_ID,
+        instance_id=instance.instance_id,
     )
 
     def arms() -> tuple[OfficialEvaluation, OfficialEvaluation, Mapping[Arm, SutOutcome], dict[Arm, int]]:
@@ -147,10 +153,11 @@ def run_minimal_swebench_pro(
                 result_root=layout.arm_artifacts(arm),
             )
             stores[arm] = ArtifactStore(layout.arm_artifacts(arm), forbidden_values=secrets)
+        prompt = instance.codex_prompt().encode()
         outcomes = DockerSut(process).run_pair(
             SutConfig(
                 run_id=run_id,
-                task_image=TASK_IMAGE,
+                task_image=task_image_id,
                 codex_binary=config.codex_binary,
                 uv_binary=config.uv_binary,
                 source_checkout=materialized,
@@ -158,7 +165,7 @@ def run_minimal_swebench_pro(
                 proxy=ProxyRelayConfig(config.proxy_url),
             ),
             paths=arm_paths,
-            prompts={Arm.OFF: instance.codex_prompt().encode(), Arm.ON: instance.codex_prompt().encode()},
+            prompts={Arm.OFF: prompt, Arm.ON: prompt},
             stores=stores,
             before_arm=lambda arm: emit_phase(RunPhase.RUNNING_OFF if arm is Arm.OFF else RunPhase.RUNNING_ON),
         )
@@ -174,19 +181,19 @@ def run_minimal_swebench_pro(
             patch_sizes[arm] = len(patch.encode())
             prediction = stores[arm].create_text(
                 "prediction.json",
-                encode_predictions(INSTANCE_ID, patch, "codex-0.145.0"),
+                encode_predictions(instance.instance_id, patch, "codex-0.145.0"),
             )
             official[arm] = evaluator.evaluate(
                 harness_root=config.harness_root,
                 raw_sample_path=raw_copy,
                 prediction_path=prediction,
                 output_dir=layout.arm_artifacts(arm) / "official",
-                instance_id=INSTANCE_ID,
+                instance_id=instance.instance_id,
             )
         return official[Arm.OFF], official[Arm.ON], outcomes, patch_sizes
 
     off_eval, on_eval, outcomes, patch_sizes = run_after_gold(
-        GoldResult(INSTANCE_ID, gold.resolved),
+        GoldResult(instance.instance_id, gold.resolved),
         arms,
     )
     off_outcome = outcomes[Arm.OFF]
@@ -195,13 +202,13 @@ def run_minimal_swebench_pro(
     report = ReportBundle(
         title="PowerContext Codex SWE-bench Pro comparison",
         revisions={
-            "dataset": "7ab5114912baf22bb098818e604c02fe7ad2c11f",
-            "harness": "ca10a60a5fcae51e6948ffe1485d4153d421e6c5",
+            "dataset": DATASET_REVISION,
+            "harness": HARNESS_COMMIT,
             "powercontext": resolved.sha,
         },
         configuration={
             "codex": "0.145.0",
-            "instance": INSTANCE_ID,
+            "instance": instance.instance_id,
             "model": "gpt-5.6-sol",
             "reasoning_effort": "medium",
         },
@@ -213,7 +220,68 @@ def run_minimal_swebench_pro(
         raise RuntimeError("Report rendering is not deterministic")
     report_path = run_store.create_text("report.md", rendered)
     run_store.create_json("report.json", report.model_dump(mode="json"))
-    return MinimalRunResult(run_id, report_path, off_eval.resolved, on_eval.resolved)
+    return RunResult(run_id, report_path, off_eval.resolved, on_eval.resolved)
+
+
+@dataclass(frozen=True)
+class MinimalRunConfig:
+    """Compatibility configuration for the retired one-row runner interface."""
+
+    root: Path
+    powercontext_source: Path
+    powercontext_ref: str
+    harness_root: Path
+    harness_python: Path
+    raw_sample_path: Path
+    codex_binary: Path
+    uv_binary: Path
+    auth_json: Path
+    proxy_url: str
+    run_id: str | None = None
+
+
+def run_minimal_swebench_pro(
+    config: MinimalRunConfig,
+    *,
+    on_phase: PhaseCallback | None = None,
+) -> RunResult:
+    """Compatibility wrapper for an existing transformed one-row dataset."""
+
+    raw = _read_one_jsonl(config.raw_sample_path)
+    instance = SweBenchProInstance.from_raw(
+        raw,
+        docker_manifest_digest="sha256:" + "0" * 64,
+    )
+    run_id = config.run_id or datetime.now(UTC).strftime("run-%Y%m%d-%H%M%S")
+    return run_swebench_pro_instance(
+        RunConfig(
+            root=config.root,
+            powercontext_source=config.powercontext_source,
+            powercontext_ref=config.powercontext_ref,
+            harness_root=config.harness_root,
+            harness_python=config.harness_python,
+            codex_binary=config.codex_binary,
+            uv_binary=config.uv_binary,
+            auth_json=config.auth_json,
+            proxy_url=config.proxy_url,
+            run_id=run_id,
+        ),
+        instance=instance,
+        on_phase=on_phase,
+    )
+
+
+def _resolve_task_image(process: ProcessRunner, task_image: str, *, cwd: Path) -> str:
+    process.run(("docker", "pull", task_image), cwd=cwd, timeout=3_600)
+    result = process.run(
+        ("docker", "image", "inspect", "--format={{.Id}}", task_image),
+        cwd=cwd,
+        timeout=120,
+    )
+    image_id = result.stdout.strip()
+    if _IMAGE_ID.fullmatch(image_id) is None:
+        raise ValueError("Docker returned an invalid immutable task image ID")
+    return image_id
 
 
 def _read_one_jsonl(path: Path) -> dict[str, object]:

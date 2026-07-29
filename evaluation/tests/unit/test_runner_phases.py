@@ -7,18 +7,51 @@ from types import SimpleNamespace
 
 import pytest
 
+from powercontext_eval.benchmarks.swebench_pro.adapter import SweBenchProInstance
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluation
 from powercontext_eval.codex import CodexOutcome
 from powercontext_eval.models import Arm
 from powercontext_eval.report import ReportBundle
 from powercontext_eval.runner import (
-    INSTANCE_ID,
-    MinimalRunConfig,
     MinimalRunResult,
     PhaseCallback,
+    RunConfig,
     RunPhase,
-    run_minimal_swebench_pro,
+    run_swebench_pro_instance,
 )
+
+INSTANCE_ID = "instance_owner__repo-b"
+IMAGE_ID = "sha256:" + "d" * 64
+
+
+def _instance() -> SweBenchProInstance:
+    return SweBenchProInstance.from_public_raw(
+        {
+            "FAIL_TO_PASS": ["test_fix"],
+            "PASS_TO_PASS": '["test_regression"]',
+            "base_commit": "b" * 40,
+            "base_dockerfile": "FROM ubuntu:24.04",
+            "before_repo_set_cmd": "git reset --hard",
+            "created_at": "2026-01-01T00:00:00Z",
+            "hints_text": "",
+            "image_name": (
+                "084828598639.dkr.ecr.us-west-2.amazonaws.com/"
+                "sweap-images/owner.repo:owner__repo-b"
+            ),
+            "instance_dockerfile": "RUN true",
+            "instance_id": INSTANCE_ID,
+            "is_remote_image": True,
+            "parsing_script": "parse",
+            "patch": "gold patch",
+            "problem_statement": "Fix arbitrary instance B",
+            "repo": "owner/repo",
+            "repo_name": "repo",
+            "run_script": "pytest",
+            "selected_test_files_to_run": '["test_fix", "test_regression"]',
+            "test_patch": "test patch",
+            "version": "v2",
+        }
+    )
 
 
 def test_run_phases_have_stable_order_and_values() -> None:
@@ -40,18 +73,15 @@ def test_run_phases_have_stable_order_and_values() -> None:
     ]
 
 
-def _config(tmp_path: Path) -> MinimalRunConfig:
-    raw_sample_path = tmp_path / "instance.jsonl"
-    raw_sample_path.write_text("{}\n")
+def _config(tmp_path: Path) -> RunConfig:
     auth_json = tmp_path / "auth.json"
     auth_json.write_text('{"api_key":"runner-secret-value"}')
-    return MinimalRunConfig(
+    return RunConfig(
         root=tmp_path / "eval",
         powercontext_source=tmp_path / "source",
         powercontext_ref="latest",
         harness_root=tmp_path / "harness",
         harness_python=tmp_path / "python",
-        raw_sample_path=raw_sample_path,
         codex_binary=tmp_path / "codex",
         uv_binary=tmp_path / "uv",
         auth_json=auth_json,
@@ -65,20 +95,22 @@ def _run_with_fakes(
     monkeypatch: pytest.MonkeyPatch,
     events: list[object],
     on_phase: PhaseCallback | None = None,
-) -> tuple[MinimalRunConfig, MinimalRunResult]:
+) -> tuple[RunConfig, MinimalRunResult, dict[str, object]]:
     config = _config(tmp_path)
+    instance = _instance()
     materialized = tmp_path / "materialized"
     materialized.mkdir()
     resolved = SimpleNamespace(sha="a" * 40)
-    instance = SimpleNamespace(
-        instance_id=INSTANCE_ID,
-        patch="gold patch",
-        base_commit="base",
-        codex_prompt=lambda: "prompt",
-    )
+    observed: dict[str, object] = {"process_calls": [], "evaluator_calls": []}
 
     class FakeProcess:
-        def run(self, *args: object, **kwargs: object) -> SimpleNamespace:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+            observed["process_calls"].append((argv, kwargs))  # type: ignore[union-attr]
+            if argv[:2] == ("docker", "pull"):
+                return SimpleNamespace(stdout="pulled")
+            if argv[:3] == ("docker", "image", "inspect"):
+                return SimpleNamespace(stdout=IMAGE_ID + "\n")
+            assert argv == ("git", "diff", "--binary", "--full-index", instance.base_commit, "--")
             return SimpleNamespace(stdout="candidate patch")
 
     class FakeSource:
@@ -92,17 +124,26 @@ def _run_with_fakes(
     class FakeEvaluator:
         def evaluate(self, **kwargs: object) -> OfficialEvaluation:
             prediction_path = kwargs["prediction_path"]
+            raw_sample_path = kwargs["raw_sample_path"]
             assert isinstance(prediction_path, Path)
+            assert isinstance(raw_sample_path, Path)
+            observed["evaluator_calls"].append(kwargs)  # type: ignore[union-attr]
+            retained = json.loads(raw_sample_path.read_text())
+            assert retained["instance_id"] == instance.instance_id
             events.append("gold" if prediction_path.parent.name == "gold" else "official")
-            return OfficialEvaluation(INSTANCE_ID, True, "", "")
+            return OfficialEvaluation(instance.instance_id, True, "", "")
 
     class FakeSut:
         def run_pair(
             self,
-            *args: object,
+            sut_config: object,
+            *,
+            prompts: dict[Arm, bytes],
             before_arm: Callable[[Arm], None] | None = None,
             **kwargs: object,
         ) -> dict[Arm, object]:
+            observed["sut_config"] = sut_config
+            observed["prompts"] = prompts
             assert before_arm is not None
             for arm in (Arm.OFF, Arm.ON):
                 before_arm(arm)
@@ -114,13 +155,38 @@ def _run_with_fakes(
     monkeypatch.setattr("powercontext_eval.runner.GitSource", lambda **kwargs: FakeSource())
     monkeypatch.setattr("powercontext_eval.runner.OfficialEvaluator", lambda *args, **kwargs: FakeEvaluator())
     monkeypatch.setattr("powercontext_eval.runner.DockerSut", lambda *args, **kwargs: FakeSut())
-    monkeypatch.setattr(
-        "powercontext_eval.runner.SweBenchProInstance.from_raw",
-        lambda *args, **kwargs: instance,
-    )
     callback = on_phase if on_phase is not None else lambda phase: events.append(phase)
-    result = run_minimal_swebench_pro(config, on_phase=callback)
-    return config, result
+    result = run_swebench_pro_instance(config, instance=instance, on_phase=callback)
+    return config, result, observed
+
+
+def test_runner_uses_arbitrary_instance_prompt_image_and_base_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, result, observed = _run_with_fakes(tmp_path, monkeypatch, [])
+    instance = _instance()
+
+    manifest = json.loads((config.root / "runs" / result.run_id / "manifest.json").read_text())
+    assert manifest["instance_id"] == instance.instance_id
+    assert manifest["task_image"] == instance.task_image
+    assert manifest["task_image_id"] == IMAGE_ID
+    sut_config = observed["sut_config"]
+    assert sut_config.task_image == IMAGE_ID
+    prompts = observed["prompts"]
+    assert isinstance(prompts, dict)
+    assert prompts[Arm.OFF] == prompts[Arm.ON]
+    assert instance.problem_statement.encode() in prompts[Arm.OFF]
+    calls = observed["process_calls"]
+    assert isinstance(calls, list)
+    assert calls[0][0] == ("docker", "pull", instance.task_image)
+    assert calls[1][0] == ("docker", "image", "inspect", "--format={{.Id}}", instance.task_image)
+    assert [call[0] for call in calls].count(
+        ("git", "diff", "--binary", "--full-index", instance.base_commit, "--")
+    ) == 2
+    evaluator_calls = observed["evaluator_calls"]
+    assert isinstance(evaluator_calls, list)
+    assert len(evaluator_calls) == 3
+    assert {call["instance_id"] for call in evaluator_calls} == {instance.instance_id}
 
 
 def test_runner_emits_phases_immediately_before_named_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -165,7 +231,7 @@ def test_runner_preserves_falsey_phase_callback(tmp_path: Path, monkeypatch: pyt
 def test_runner_persists_strict_validated_report_json_without_secrets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config, result = _run_with_fakes(tmp_path, monkeypatch, [])
+    config, result, _observed = _run_with_fakes(tmp_path, monkeypatch, [])
 
     report_data = json.loads((config.root / "runs" / result.run_id / "report.json").read_text())
     report = ReportBundle.model_validate(report_data, strict=True)
