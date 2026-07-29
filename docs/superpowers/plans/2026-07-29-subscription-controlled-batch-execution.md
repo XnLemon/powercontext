@@ -1024,7 +1024,8 @@ The fake usage probe exposes scripted snapshots:
 preview 20%
 after task 1: 40%
 after task 2: 81%
-resume snapshot: 50%
+the fresh 81% snapshot remains after raising the threshold
+after the next task: 50%
 ```
 
 The fake runner blocks task 1 long enough to request pause/cancel and makes one selected task fail once then succeed

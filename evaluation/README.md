@@ -62,7 +62,7 @@ outcomes are benchmark results and cannot be retried.
 
 ## Build and test the checkout
 
-From `/data/powercontext-eval/deploy/powercontext`:
+On m0, from `/data/powercontext-eval/deploy/powercontext`, run the Python verification:
 
 ```sh
 /data/powercontext-eval/bin/uv sync --project evaluation --frozen
@@ -70,15 +70,35 @@ From `/data/powercontext-eval/deploy/powercontext`:
 /data/powercontext-eval/bin/uv run --project evaluation ruff check evaluation
 /data/powercontext-eval/bin/uv run --project evaluation ruff format --check evaluation
 /data/powercontext-eval/bin/uv run --directory evaluation ty check src tests
+```
+
+m0 does not provide Node/npm. Build the **prebuilt frontend** on a trusted operator workstation from the same clean,
+detached candidate SHA. Run its tests and browser E2E before packaging:
+
+```sh
+test -z "$(git status --porcelain)"
+git rev-parse HEAD
 cd evaluation/web
 npm ci
 npm test -- --run
 npm run build
+npm run e2e
+tar -czf /tmp/powercontext-eval-frontend-<sha>.tar.gz dist
+shasum -a 256 /tmp/powercontext-eval-frontend-<sha>.tar.gz
 ```
 
-Use the repository's committed `evaluation/web/package-lock.json`. The lock was generated with npm 11; use npm 11
-if another major version rejects or rewrites it. The built frontend is
-`/data/powercontext-eval/deploy/powercontext/evaluation/web/dist`.
+Use the committed `evaluation/web/package-lock.json`; it was generated with npm 11. Transfer the archive to the
+protected m0 staging directory, then verify the exact expected digest before extracting:
+
+```sh
+sha256sum /data/powercontext-eval/staging/frontend-dist-<sha>.tar.gz
+tar -C /data/powercontext-eval/deploy/powercontext/evaluation/web \
+  -xzf /data/powercontext-eval/staging/frontend-dist-<sha>.tar.gz
+```
+
+The archive's top-level entry is `dist`; the deployed frontend remains
+`/data/powercontext-eval/deploy/powercontext/evaluation/web/dist`. Do not install an unpinned Node toolchain on m0
+as part of a release.
 
 ## Install configuration and units
 

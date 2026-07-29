@@ -62,7 +62,13 @@ def _default_safe_usage_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _config(root: Path, *, lease_seconds: int = 2, poll_seconds: float = 0.01) -> WebConfig:
+def _config(
+    root: Path,
+    *,
+    lease_seconds: int = 2,
+    poll_seconds: float = 0.01,
+    usage_probe_seconds: int = 60,
+) -> WebConfig:
     return WebConfig.for_root(
         root,
         run_root=root / "artifacts",
@@ -76,6 +82,7 @@ def _config(root: Path, *, lease_seconds: int = 2, poll_seconds: float = 0.01) -
         proxy_url="http://127.0.0.1:7890",
         lease_seconds=lease_seconds,
         poll_seconds=poll_seconds,
+        usage_probe_seconds=usage_probe_seconds,
     )
 
 
@@ -176,6 +183,27 @@ def test_worker_pauses_before_claim_when_usage_reaches_configured_threshold(tmp_
     assert paused.control.intent is BatchControlIntent.PAUSE
     assert paused.control.pause_reason is BatchPauseReason.USAGE_THRESHOLD
     assert store.latest_usage_snapshot() == _usage(80)
+
+
+def test_worker_reuses_usage_until_the_probe_interval_expires(tmp_path: Path) -> None:
+    config = _config(tmp_path, usage_probe_seconds=60)
+    store = _store(config)
+    store.save_usage_snapshot(_usage(10, observed_at=NOW))
+    probe = FakeUsageProbe([_usage(11), _usage(12)])
+    observations = iter((NOW + timedelta(seconds=30), NOW + timedelta(seconds=61)))
+    worker = EvaluationWorker(
+        config,
+        store,
+        usage_probe=probe,
+        clock=lambda: next(observations),
+    )
+
+    assert worker.run_once() is False
+    assert probe.calls == []
+
+    assert worker.run_once() is False
+    assert probe.calls == [NOW + timedelta(seconds=61)]
+    assert store.latest_usage_snapshot() == _usage(11, observed_at=NOW + timedelta(seconds=61))
 
 
 def test_worker_finishes_current_task_before_honoring_user_pause(

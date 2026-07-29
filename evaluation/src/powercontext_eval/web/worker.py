@@ -8,7 +8,7 @@ import stat
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -40,7 +40,7 @@ from powercontext_eval.web.controls import BatchPauseReason
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskPhase, TaskRecord, TaskResult
 from powercontext_eval.web.reporting import ReportingError, load_report
 from powercontext_eval.web.store import TaskConflict, TaskOwnershipError, TaskStore
-from powercontext_eval.web.usage import CodexUsageProbe, UsageSnapshot, UsageUnavailable
+from powercontext_eval.web.usage import CodexUsageProbe, UsageSnapshot, UsageUnavailable, is_fresh
 
 _INTERNAL_SUMMARY = "The evaluation worker failed unexpectedly. Inspect the retained m0 logs."
 _REPORT_SUMMARY = "Evaluation report validation failed."
@@ -118,7 +118,7 @@ class EvaluationWorker:
             now = self._clock()
             self._store.recover_expired(now=now)
             try:
-                snapshot = self._usage_probe.read(now=now)
+                snapshot = self._usage_before_claim(now)
             except UsageUnavailable:
                 self._store.pause_runnable_batches(
                     reason=BatchPauseReason.USAGE_UNAVAILABLE,
@@ -134,6 +134,16 @@ class EvaluationWorker:
             if task is None:
                 return False
             return self._run_claimed(task)
+
+    def _usage_before_claim(self, now: datetime) -> UsageSnapshot:
+        snapshot = self._store.latest_usage_snapshot()
+        if snapshot is not None and is_fresh(
+            snapshot,
+            now=now,
+            max_age=timedelta(seconds=self._config.usage_probe_seconds),
+        ):
+            return snapshot
+        return self._usage_probe.read(now=now)
 
     def _run_claimed(self, task: TaskRecord) -> bool:
         ownership_lost = threading.Event()

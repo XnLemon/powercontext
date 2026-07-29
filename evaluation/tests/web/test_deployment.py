@@ -148,6 +148,8 @@ def test_operator_guide_documents_safety_acceptance_and_rollback_contracts() -> 
         "usage unavailable",
         "attempt",
         "boundary",
+        "prebuilt frontend",
+        "sha256sum",
     }
     assert all(term.lower() in guide.lower() for term in required)
 

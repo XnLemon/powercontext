@@ -640,7 +640,7 @@ This table records direct evidence, rather than treating the design checklist it
 | 9 | Verified locally | store/worker boundary-pause tests and controlled-batch E2E |
 | 10 | Verified locally | pause boundary tests prove no later child is claimed |
 | 11 | Verified locally | cancel boundary tests and E2E verify remaining children become cancelled |
-| 12 | Verified locally | fresh-snapshot resume store test and 50-percent E2E resume snapshot |
+| 12 | Verified locally | fresh-snapshot resume store test and E2E manual resume below the edited threshold |
 | 13 | Verified locally | threshold update store test and controls UI test |
 | 14 | Verified locally | `test_restart_reuses_persisted_batch_sha_and_completed_children` |
 | 15 | Verified locally | `test_worker_skips_paused_oldest_batch_and_claims_next_runnable_batch` |
@@ -653,7 +653,7 @@ This table records direct evidence, rather than treating the design checklist it
 | 22 | Verified locally | `test_valid_official_outcomes_are_never_retryable` and attempt-history UI test |
 | 23 | Verified locally | `test_worker_executes_only_the_new_attempt_when_a_failed_task_is_retried` and E2E retained-attempt check |
 
-Local verification on 2026-07-30 produced 609 passing Python tests, 64 passing frontend tests, a successful production
+Local verification on 2026-07-30 produced 610 passing Python tests, 64 passing frontend tests, a successful production
 build, two passing browser E2E scenarios, passing Ruff/format checks, and passing type checks for the changed runtime
 and deterministic deployment-test surfaces. Full evaluation-project `ty check src tests` still reports 52 pre-existing
 test-fixture typing diagnostics; the immediately preceding `0f089a8` baseline reports the same diagnostics, so this is

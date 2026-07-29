@@ -134,7 +134,7 @@ test("controls a serial batch at task boundaries and retains a retried attempt",
   await expect.poll(async () => (await batchState(page, batchId)).control.usage_pause_percent).toBe(90);
   expect((await batchState(page, batchId)).status).toBe("paused");
   expect((await batchTasks(page, batchId)).items[2]?.status).toBe("queued");
-  await expect.poll(async () => usedPercent(page), { intervals: [30] }).toBe(50);
+  expect(await usedPercent(page)).toBe(81);
 
   await page.getByRole("button", { name: "继续运行" }).click();
   await expect.poll(
@@ -147,6 +147,7 @@ test("controls a serial batch at task boundaries and retains a retried attempt",
   const afterCancel = await batchTasks(page, batchId);
   expect(afterCancel.items[2]?.status).toBe("succeeded");
   expect(afterCancel.items.slice(3).every((task) => task.status === "cancelled")).toBe(true);
+  expect(await usedPercent(page)).toBe(50);
 
   await page.getByRole("navigation", { name: "报告导航" }).getByRole("link", { name: "任务详细报告" }).click();
   await page.reload();
