@@ -1,5 +1,15 @@
 import type {
+  BatchCreate,
+  BatchEventSubscription,
+  BatchRecord,
+  BatchReport,
+  BatchTaskDetail,
+  BatchTaskListOptions,
+  BatchTaskPage,
   Capabilities,
+  ContextEvent,
+  ContextEventPage,
+  ContextPageOptions,
   EventStreamError,
   HealthResponse,
   ReportResponse,
@@ -22,6 +32,7 @@ const TASK_STATUSES = [
   "cancelled",
 ] as const;
 const TERMINAL_STATUSES = new Set<TaskStatus>(["succeeded", "failed", "interrupted", "cancelled"]);
+const TERMINAL_BATCH_STATUSES = new Set(["completed", "cancelled"]);
 const GENERIC_ERROR_MESSAGE = "The evaluation service could not complete the request.";
 const INSTANCE_ID = "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9" as const;
 
@@ -278,6 +289,139 @@ const reportSchema = z.strictObject({
   configuration: z.record(z.string(), z.string()),
   generated_at: timestampSchema,
 });
+const batchCreateSchema = z.strictObject({
+  powercontext_ref: z.union([z.literal("latest"), z.string().regex(/^commit:[0-9a-fA-F]{40}$/)]),
+  benchmark: z.literal("swebench-pro"),
+  task_set: z.literal("swebench-pro-public-v2"),
+  model: z.literal("gpt-5.6-sol"),
+  reasoning_effort: z.literal("medium"),
+  treatment_mode: z.literal("off_on"),
+  idempotency_key: z.string().min(8).max(128).regex(/^[A-Za-z0-9._-]+$/),
+});
+const batchRecordSchema = z.strictObject({
+  batch_id: z.string(),
+  request: batchCreateSchema,
+  total_tasks: z.number().int().positive(),
+  status: z.enum(["queued", "running", "completed", "cancelled"]),
+  created_at: timestampSchema,
+  started_at: timestampSchema.nullable(),
+  finished_at: timestampSchema.nullable(),
+  resolved_powercontext_sha: z.string().regex(/^[0-9a-f]{40}$/).nullable(),
+});
+const pairCategorySchema = z.enum([
+  "off_fail_on_pass",
+  "off_pass_on_fail",
+  "both_pass",
+  "both_fail",
+  "execution_failure",
+]);
+const resolutionAggregateSchema = z.strictObject({
+  resolved: nonnegativeIntegerSchema,
+  total: z.number().int().positive(),
+  rate_percent: z.number().min(0).max(100),
+});
+const tokenMetricAggregateSchema = z.strictObject({
+  off: nonnegativeIntegerSchema,
+  on: nonnegativeIntegerSchema,
+  delta: z.number().int(),
+  off_measured_tasks: nonnegativeIntegerSchema,
+  on_measured_tasks: nonnegativeIntegerSchema,
+});
+const batchReportSchema = z.strictObject({
+  batch_id: z.string(),
+  total_tasks: z.number().int().positive(),
+  terminal_tasks: nonnegativeIntegerSchema,
+  comparable_pairs: nonnegativeIntegerSchema,
+  execution_failures: nonnegativeIntegerSchema,
+  cancelled_tasks: nonnegativeIntegerSchema,
+  off: resolutionAggregateSchema,
+  on: resolutionAggregateSchema,
+  resolution_rate_delta_points: z.number(),
+  pair_categories: z.record(pairCategorySchema, nonnegativeIntegerSchema),
+  task_statuses: z.record(taskStatusSchema, nonnegativeIntegerSchema),
+  tokens: z.strictObject({
+    input: tokenMetricAggregateSchema,
+    output: tokenMetricAggregateSchema,
+    total: tokenMetricAggregateSchema,
+  }),
+  revisions: z.record(z.string(), z.string()),
+  configuration: z.record(z.string(), z.string()),
+});
+const taskArmSummarySchema = z.strictObject({
+  resolved: z.boolean(),
+  input_tokens: nonnegativeIntegerSchema.nullable(),
+  output_tokens: nonnegativeIntegerSchema.nullable(),
+  total_tokens: nonnegativeIntegerSchema.nullable(),
+});
+const taskTokenDeltaSchema = z.strictObject({
+  off: nonnegativeIntegerSchema.nullable(),
+  on: nonnegativeIntegerSchema.nullable(),
+  delta: z.number().int().nullable(),
+});
+const batchTaskItemSchema = z.strictObject({
+  task_id: z.string(),
+  instance_id: z.string(),
+  repository: z.string(),
+  source_index: nonnegativeIntegerSchema,
+  status: taskStatusSchema,
+  pair_category: pairCategorySchema.nullable(),
+  off: taskArmSummarySchema.nullable(),
+  on: taskArmSummarySchema.nullable(),
+  tokens: taskTokenDeltaSchema,
+  failure_category: z.string().nullable(),
+  failure_summary: z.string().nullable(),
+});
+const batchTaskPageSchema = z.strictObject({
+  items: z.array(batchTaskItemSchema),
+  total: nonnegativeIntegerSchema,
+  limit: z.number().int().positive(),
+  offset: nonnegativeIntegerSchema,
+});
+const officialTestGroupSchema = z.strictObject({
+  passed: nonnegativeIntegerSchema,
+  total: nonnegativeIntegerSchema,
+  failed: z.array(z.string()),
+});
+const taskDetailArmSchema = z.strictObject({
+  resolved: z.boolean(),
+  patch_applied: z.boolean().nullable(),
+  fail_to_pass: officialTestGroupSchema,
+  pass_to_pass: officialTestGroupSchema,
+  log_excerpt: z.string().max(4_000).nullable(),
+  input_tokens: nonnegativeIntegerSchema.nullable(),
+  output_tokens: nonnegativeIntegerSchema.nullable(),
+  total_tokens: nonnegativeIntegerSchema.nullable(),
+});
+const batchTaskDetailSchema = z.strictObject({
+  task: batchTaskItemSchema,
+  problem_statement: z.string(),
+  required_tests: z.strictObject({
+    fail_to_pass: z.array(z.string()),
+    pass_to_pass: z.array(z.string()),
+    selected_test_files_to_run: z.string(),
+    test_patch: z.string(),
+  }),
+  off: taskDetailArmSchema.nullable(),
+  on: taskDetailArmSchema.nullable(),
+});
+const contextEventSchema = z.strictObject({
+  sequence: z.number().int().positive(),
+  observed_at: timestampSchema,
+  elapsed_ms: nonnegativeIntegerSchema,
+  arm: z.enum(["off", "on"]),
+  actor: z.string(),
+  event_type: z.string(),
+  input: z.record(z.string(), z.unknown()).nullable(),
+  output: z.record(z.string(), z.unknown()).nullable(),
+  source_artifact: z.string(),
+  source_sequence: nonnegativeIntegerSchema,
+});
+const contextEventPageSchema = z.strictObject({
+  items: z.array(contextEventSchema),
+  total: nonnegativeIntegerSchema,
+  limit: z.number().int().positive(),
+  offset: nonnegativeIntegerSchema,
+});
 const errorEnvelopeSchema = z.strictObject({
   error: z.strictObject({
     code: z.string(),
@@ -313,6 +457,30 @@ function validateReport(value: unknown): ReportResponse {
   return validateWithSchema(reportSchema, value);
 }
 
+function validateBatch(value: unknown): BatchRecord {
+  return validateWithSchema(batchRecordSchema, value);
+}
+
+function validateBatchReport(value: unknown): BatchReport {
+  return validateWithSchema(batchReportSchema, value);
+}
+
+function validateBatchTaskPage(value: unknown): BatchTaskPage {
+  return validateWithSchema(batchTaskPageSchema, value);
+}
+
+function validateBatchTaskDetail(value: unknown): BatchTaskDetail {
+  return validateWithSchema(batchTaskDetailSchema, value);
+}
+
+function validateContextEvent(value: unknown): ContextEvent {
+  return validateWithSchema(contextEventSchema, value);
+}
+
+function validateContextEventPage(value: unknown): ContextEventPage {
+  return validateWithSchema(contextEventPageSchema, value);
+}
+
 function mediaType(response: Response): string {
   return response.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
 }
@@ -323,6 +491,10 @@ function apiPath(path: string): string {
 
 function taskPath(taskId: string, suffix = ""): string {
   return apiPath(`/tasks/${encodeURIComponent(taskId)}${suffix}`);
+}
+
+function batchPath(batchId: string, suffix = ""): string {
+  return apiPath(`/batches/${encodeURIComponent(batchId)}${suffix}`);
 }
 
 function withSignal(signal: AbortSignal | undefined): Pick<RequestInit, "signal"> {
@@ -341,6 +513,139 @@ export class EvaluationApi {
 
   getCapabilities(signal?: AbortSignal): Promise<Capabilities> {
     return this.#json(apiPath("/capabilities"), validateCapabilities, withSignal(signal));
+  }
+
+  listBatches(signal?: AbortSignal): Promise<BatchRecord[]> {
+    return this.#json(
+      apiPath("/batches"),
+      (value) => {
+        if (!Array.isArray(value)) throw new ApiError(null, "invalid_response", GENERIC_ERROR_MESSAGE);
+        return value.map(validateBatch);
+      },
+      withSignal(signal),
+    );
+  }
+
+  getBatch(batchId: string, signal?: AbortSignal): Promise<BatchRecord> {
+    return this.#json(batchPath(batchId), validateBatch, withSignal(signal));
+  }
+
+  createBatch(batch: BatchCreate, signal?: AbortSignal): Promise<BatchRecord> {
+    return this.#json(apiPath("/batches"), validateBatch, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(batch),
+      ...withSignal(signal),
+    });
+  }
+
+  cancelBatch(batchId: string, signal?: AbortSignal): Promise<BatchRecord> {
+    return this.#json(batchPath(batchId, "/cancel"), validateBatch, {
+      method: "POST",
+      ...withSignal(signal),
+    });
+  }
+
+  getBatchReport(batchId: string, signal?: AbortSignal): Promise<BatchReport> {
+    return this.#json(batchPath(batchId, "/report"), validateBatchReport, withSignal(signal));
+  }
+
+  listBatchTasks(
+    batchId: string,
+    options: BatchTaskListOptions = {},
+    signal?: AbortSignal,
+  ): Promise<BatchTaskPage> {
+    const query = new URLSearchParams();
+    if (options.category !== undefined) query.set("category", options.category);
+    if (options.query !== undefined && options.query !== "") query.set("q", options.query);
+    if (options.sort !== undefined) query.set("sort", options.sort);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.offset !== undefined) query.set("offset", String(options.offset));
+    const suffix = query.size === 0 ? "/tasks" : `/tasks?${query.toString()}`;
+    return this.#json(batchPath(batchId, suffix), validateBatchTaskPage, withSignal(signal));
+  }
+
+  getBatchTask(batchId: string, taskId: string, signal?: AbortSignal): Promise<BatchTaskDetail> {
+    return this.#json(
+      batchPath(batchId, `/tasks/${encodeURIComponent(taskId)}`),
+      validateBatchTaskDetail,
+      withSignal(signal),
+    );
+  }
+
+  listContextEvents(
+    batchId: string,
+    taskId: string,
+    arm: "off" | "on",
+    options: ContextPageOptions = {},
+    signal?: AbortSignal,
+  ): Promise<ContextEventPage> {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.offset !== undefined) query.set("offset", String(options.offset));
+    const querySuffix = query.size === 0 ? "" : `?${query.toString()}`;
+    return this.#json(
+      batchPath(batchId, `/tasks/${encodeURIComponent(taskId)}/context/${arm}${querySuffix}`),
+      validateContextEventPage,
+      withSignal(signal),
+    );
+  }
+
+  getContextEvent(
+    batchId: string,
+    taskId: string,
+    arm: "off" | "on",
+    sequence: number,
+    signal?: AbortSignal,
+  ): Promise<ContextEvent> {
+    return this.#json(
+      batchPath(batchId, `/tasks/${encodeURIComponent(taskId)}/context/${arm}/${sequence}`),
+      validateContextEvent,
+      withSignal(signal),
+    );
+  }
+
+  subscribeBatchEvents(
+    batchId: string,
+    onEvent: (event: BatchRecord) => void,
+    onError: (error: EventStreamError) => void = () => undefined,
+  ): BatchEventSubscription {
+    const source = this.#eventSourceFactory(batchPath(batchId, "/events"));
+    let closed = false;
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      source.removeEventListener("batch", batchListener);
+      source.removeEventListener("error", errorListener);
+      source.close();
+    };
+    const batchListener: EventListener = (nativeEvent) => {
+      if (closed || !(nativeEvent instanceof MessageEvent) || typeof nativeEvent.data !== "string") return;
+      try {
+        const event = validateBatch(JSON.parse(nativeEvent.data) as unknown);
+        onEvent(event);
+        if (TERMINAL_BATCH_STATUSES.has(event.status)) close();
+      } catch {
+        onError({
+          code: "invalid_event",
+          message: "A live update could not be read safely.",
+          reconnecting: true,
+        });
+      }
+    };
+    const errorListener: EventListener = () => {
+      if (closed) {
+        return;
+      }
+      onError({
+        code: "event_stream_disconnected",
+        message: "Live updates were interrupted. Reconnecting automatically.",
+        reconnecting: true,
+      });
+    };
+    source.addEventListener("batch", batchListener);
+    source.addEventListener("error", errorListener);
+    return { close };
   }
 
   getHealth(signal?: AbortSignal): Promise<HealthResponse> {

@@ -233,3 +233,173 @@ export interface EventStreamError {
 export interface TaskEventSubscription {
   close(): void;
 }
+
+export type BatchStatus = "queued" | "running" | "completed" | "cancelled";
+
+export type PairCategory =
+  | "off_fail_on_pass"
+  | "off_pass_on_fail"
+  | "both_pass"
+  | "both_fail"
+  | "execution_failure";
+
+export interface BatchCreate {
+  powercontext_ref: string;
+  benchmark: "swebench-pro";
+  task_set: "swebench-pro-public-v2";
+  model: "gpt-5.6-sol";
+  reasoning_effort: "medium";
+  treatment_mode: "off_on";
+  idempotency_key: string;
+}
+
+export interface BatchRecord {
+  batch_id: string;
+  request: BatchCreate;
+  total_tasks: number;
+  status: BatchStatus;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  resolved_powercontext_sha: string | null;
+}
+
+export interface ResolutionAggregate {
+  resolved: number;
+  total: number;
+  rate_percent: number;
+}
+
+export interface TokenMetricAggregate {
+  off: number;
+  on: number;
+  delta: number;
+  off_measured_tasks: number;
+  on_measured_tasks: number;
+}
+
+export interface TokenAggregate {
+  input: TokenMetricAggregate;
+  output: TokenMetricAggregate;
+  total: TokenMetricAggregate;
+}
+
+export interface BatchReport {
+  batch_id: string;
+  total_tasks: number;
+  terminal_tasks: number;
+  comparable_pairs: number;
+  execution_failures: number;
+  cancelled_tasks: number;
+  off: ResolutionAggregate;
+  on: ResolutionAggregate;
+  resolution_rate_delta_points: number;
+  pair_categories: Record<PairCategory, number>;
+  task_statuses: Record<TaskStatus, number>;
+  tokens: TokenAggregate;
+  revisions: Record<string, string>;
+  configuration: Record<string, string>;
+}
+
+export interface TaskArmSummary {
+  resolved: boolean;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+}
+
+export interface TaskTokenDelta {
+  off: number | null;
+  on: number | null;
+  delta: number | null;
+}
+
+export interface BatchTaskItem {
+  task_id: string;
+  instance_id: string;
+  repository: string;
+  source_index: number;
+  status: TaskStatus;
+  pair_category: PairCategory | null;
+  off: TaskArmSummary | null;
+  on: TaskArmSummary | null;
+  tokens: TaskTokenDelta;
+  failure_category: string | null;
+  failure_summary: string | null;
+}
+
+export interface BatchTaskPage {
+  items: BatchTaskItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface OfficialTestGroup {
+  passed: number;
+  total: number;
+  failed: string[];
+}
+
+export interface TaskDetailArm {
+  resolved: boolean;
+  patch_applied: boolean | null;
+  fail_to_pass: OfficialTestGroup;
+  pass_to_pass: OfficialTestGroup;
+  log_excerpt: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+}
+
+export interface RequiredTests {
+  fail_to_pass: string[];
+  pass_to_pass: string[];
+  selected_test_files_to_run: string;
+  test_patch: string;
+}
+
+export interface BatchTaskDetail {
+  task: BatchTaskItem;
+  problem_statement: string;
+  required_tests: RequiredTests;
+  off: TaskDetailArm | null;
+  on: TaskDetailArm | null;
+}
+
+export interface ContextEvent {
+  sequence: number;
+  observed_at: string;
+  elapsed_ms: number;
+  arm: "off" | "on";
+  actor: string;
+  event_type: string;
+  input: Record<string, unknown> | null;
+  output: Record<string, unknown> | null;
+  source_artifact: string;
+  source_sequence: number;
+}
+
+export interface ContextEventPage {
+  items: ContextEvent[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface BatchTaskListOptions {
+  category?: PairCategory;
+  query?: string;
+  sort?: "source" | "token_delta_asc" | "token_delta_desc";
+  limit?: number;
+  offset?: number;
+}
+
+export interface ContextPageOptions {
+  limit?: number;
+  offset?: number;
+}
+
+export interface BatchEventSubscription {
+  close(): void;
+}

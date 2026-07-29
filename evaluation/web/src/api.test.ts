@@ -44,6 +44,47 @@ function apiWithResponse(response: Response): {
 }
 
 describe("EvaluationApi HTTP", () => {
+  it("creates and loads a complete batch through strict relative API routes", async () => {
+    const request = {
+      powercontext_ref: "latest",
+      benchmark: "swebench-pro",
+      task_set: "swebench-pro-public-v2",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "medium",
+      treatment_mode: "off_on",
+      idempotency_key: "batch-request-1",
+    } as const;
+    const batch = {
+      batch_id: "batch/1",
+      request,
+      total_tasks: 731,
+      status: "queued",
+      created_at: "2026-07-29T00:00:00Z",
+      started_at: null,
+      finished_at: null,
+      resolved_powercontext_sha: null,
+    } as const;
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse(batch, 201))
+      .mockResolvedValueOnce(jsonResponse([batch]))
+      .mockResolvedValueOnce(jsonResponse(batch));
+    const api = new EvaluationApi({ fetch });
+
+    await expect(api.createBatch(request)).resolves.toEqual(batch);
+    await expect(api.listBatches()).resolves.toEqual([batch]);
+    await expect(api.getBatch("batch/1")).resolves.toEqual(batch);
+
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      "/api/batches",
+      "/api/batches",
+      "/api/batches/batch%2F1",
+    ]);
+    expect(fetch.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({ method: "POST", body: JSON.stringify(request) }),
+    );
+  });
+
   it("loads capabilities, health, task summaries, and task detail from relative API URLs", async () => {
     const capabilities = {
       benchmarks: ["swebench-pro"],

@@ -1,13 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { EvaluationApi } from "./api";
 import { AppShell } from "./components/AppShell";
-import { TaskDetail } from "./components/TaskDetail";
 import { TaskForm } from "./components/TaskForm";
-import { TaskList } from "./components/TaskList";
-import { ReportView } from "./components/ReportView";
-import { ReportIndex } from "./components/ReportIndex";
-import type { TaskRecord, TaskSummary } from "./types";
 
 interface AppProps {
   api?: EvaluationApi;
@@ -27,49 +22,78 @@ function usePath(): [string, (next: string) => void] {
   return [path, navigate];
 }
 
+interface Route {
+  batchId: string | null;
+  taskId: string | null;
+  page: "overview" | "tasks" | "task";
+}
+
+function parseRoute(path: string): Route {
+  const taskMatch = path.match(/^\/report\/([^/]+)\/tasks\/([^/]+)$/);
+  if (taskMatch?.[1] && taskMatch[2]) {
+    return {
+      batchId: decodeURIComponent(taskMatch[1]),
+      taskId: decodeURIComponent(taskMatch[2]),
+      page: "task",
+    };
+  }
+  const tasksMatch = path.match(/^\/report\/([^/]+)\/tasks$/);
+  if (tasksMatch?.[1]) {
+    return { batchId: decodeURIComponent(tasksMatch[1]), taskId: null, page: "tasks" };
+  }
+  const overviewMatch = path.match(/^\/report\/([^/]+)$/);
+  if (overviewMatch?.[1]) {
+    return { batchId: decodeURIComponent(overviewMatch[1]), taskId: null, page: "overview" };
+  }
+  return { batchId: null, taskId: null, page: "overview" };
+}
+
 export function App({ api: injectedApi }: AppProps) {
   const [defaultApi] = useState(() => new EvaluationApi());
   const api = injectedApi ?? defaultApi;
   const [path, navigate] = usePath();
+  const route = parseRoute(path);
 
   let content;
-  const taskMatch = path.match(/^\/tasks\/([^/]+)$/);
-  const reportMatch = path.match(/^\/reports\/([^/]+)$/);
-  if (taskMatch?.[1]) {
+  if (route.page === "task" && route.batchId !== null && route.taskId !== null) {
     content = (
       <div className="page">
-        <PageHeader eyebrow="测试任务" title="任务详情" />
-        <TaskDetail api={api} taskId={decodeURIComponent(taskMatch[1])} />
+        <PageHeader eyebrow="任务详细报告" title="单任务详情" />
+        <section className="panel state-message">正在读取任务 {route.taskId}…</section>
       </div>
     );
-  } else if (path === "/tasks") {
+  } else if (route.page === "tasks" && route.batchId !== null) {
     content = (
       <div className="page">
-        <PageHeader eyebrow="队列" title="测试任务" description="查看已提交任务的当前阶段与最终结果。" />
-        <TaskList api={api} onSelect={(taskId) => navigate(`/tasks/${encodeURIComponent(taskId)}`)} />
+        <PageHeader eyebrow={route.batchId} title="任务详细报告" description="逐项比较 OFF / ON 的客观结果。" />
+        <section className="panel state-message">正在读取任务列表…</section>
       </div>
     );
-  } else if (reportMatch?.[1]) {
-    const taskId = decodeURIComponent(reportMatch[1]);
+  } else if (route.batchId !== null) {
     content = (
       <div className="page">
-        <PageHeader eyebrow="只读结果" title="验收报告" />
-        <ReportView api={api} taskId={taskId} />
-      </div>
-    );
-  } else if (path === "/reports" || path.startsWith("/reports/")) {
-    content = (
-      <div className="page">
-        <PageHeader eyebrow="只读结果" title="验收报告" />
-        <ReportIndex api={api} />
+        <PageHeader eyebrow={route.batchId} title="总体报告" />
+        <section className="panel state-message">正在读取批次报告…</section>
       </div>
     );
   } else {
-    content = <Workbench api={api} navigate={navigate} />;
+    content = (
+      <div className="page">
+        <PageHeader
+          eyebrow="PowerContext Evaluation"
+          title="总体报告"
+          description="选择已有批次，或提交一次固定 731 任务的完整 OFF / ON 评测。"
+        />
+        <TaskForm
+          api={api}
+          onCreated={(batch) => navigate(`/report/${encodeURIComponent(batch.batch_id)}`)}
+        />
+      </div>
+    );
   }
 
   return (
-    <AppShell api={api} path={path} navigate={navigate}>
+    <AppShell api={api} path={path} batchId={route.batchId} navigate={navigate}>
       {content}
     </AppShell>
   );
@@ -82,96 +106,5 @@ function PageHeader({ eyebrow, title, description }: { eyebrow: string; title: s
       <h1>{title}</h1>
       {description && <p>{description}</p>}
     </header>
-  );
-}
-
-function Workbench({ api, navigate }: { api: EvaluationApi; navigate(path: string): void }) {
-  const [focusTask, setFocusTask] = useState<TaskRecord | null>(null);
-  const [tasks, setTasks] = useState<TaskSummary[] | null>(null);
-  const [overviewError, setOverviewError] = useState(false);
-  const overviewGeneration = useRef(0);
-  const overviewController = useRef<AbortController | null>(null);
-  const loadOverview = useCallback(() => {
-    overviewController.current?.abort();
-    const controller = new AbortController();
-    overviewController.current = controller;
-    const generation = ++overviewGeneration.current;
-    setOverviewError(false);
-    api
-      .listTasks({ order: "newest", limit: 50, offset: 0 }, controller.signal)
-      .then((nextTasks) => {
-        if (!controller.signal.aborted && generation === overviewGeneration.current) setTasks(nextTasks);
-      })
-      .catch(() => {
-        if (!controller.signal.aborted && generation === overviewGeneration.current) setOverviewError(true);
-      });
-  }, [api]);
-  useEffect(() => {
-    loadOverview();
-    return () => {
-      overviewController.current?.abort();
-      overviewGeneration.current += 1;
-    };
-  }, [loadOverview]);
-
-  const running = tasks?.find((task) => task.status === "running");
-  const latestSucceeded = tasks
-    ?.filter((task) => task.status === "succeeded")
-    .reduce<TaskSummary | undefined>((latest, task) => {
-      if (latest === undefined) return task;
-      const taskTime = Date.parse(task.finished_at ?? task.created_at);
-      const latestTime = Date.parse(latest.finished_at ?? latest.created_at);
-      return taskTime > latestTime ? task : latest;
-    }, undefined);
-  const selectedId = focusTask?.task_id ?? running?.task_id;
-
-  return (
-    <div className="page">
-      <PageHeader eyebrow="工作台" title="评测工作台" description="提交固定范围的 SWE-bench Pro OFF / ON 对照任务。" />
-      <div className="workbench-grid">
-        <TaskForm
-          api={api}
-          onCreated={(task) => {
-            setFocusTask(task);
-            loadOverview();
-          }}
-        />
-        <div className="workbench-focus">
-          {selectedId ? (
-            <>
-              <h2 className="focus-heading">{focusTask ? "已提交任务" : "当前运行任务"}</h2>
-              <TaskDetail api={api} taskId={selectedId} onTaskChanged={loadOverview} />
-            </>
-          ) : overviewError ? (
-            <section className="panel empty-state">
-              <p>任务概览暂时无法加载。</p>
-              <button type="button" className="secondary-button" onClick={loadOverview}>
-                重试
-              </button>
-            </section>
-          ) : tasks === null ? (
-            <section className="panel state-message">正在加载任务概览…</section>
-          ) : latestSucceeded ? (
-            <section className="panel latest-report">
-              <p className="eyebrow">上次运行</p>
-              <h2>最近完成</h2>
-              <p className="task-id">{latestSucceeded.task_id}</p>
-              <p>报告已生成，可进入只读报告页查看系统产出。</p>
-              <a className="primary-link" href={`/reports/${encodeURIComponent(latestSucceeded.task_id)}`}>
-                查看验收报告
-              </a>
-            </section>
-          ) : (
-            <section className="panel empty-state">
-              <h2>等待第一个任务</h2>
-              <p>提交任务后，这里会显示当前阶段。完成后可从任务详情进入验收报告。</p>
-              <button type="button" className="text-button" onClick={() => navigate("/tasks")}>
-                查看任务队列
-              </button>
-            </section>
-          )}
-        </div>
-      </div>
-    </div>
   );
 }

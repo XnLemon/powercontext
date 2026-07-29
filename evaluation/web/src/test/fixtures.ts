@@ -1,7 +1,21 @@
 import { vi } from "vitest";
 
 import type { EvaluationApi } from "../api";
-import type { Capabilities, HealthResponse, ReportResponse, TaskCreate, TaskRecord, TaskSummary } from "../types";
+import type {
+  BatchCreate,
+  BatchRecord,
+  BatchReport,
+  BatchTaskDetail,
+  BatchTaskItem,
+  BatchTaskPage,
+  Capabilities,
+  ContextEventPage,
+  HealthResponse,
+  ReportResponse,
+  TaskCreate,
+  TaskRecord,
+  TaskSummary,
+} from "../types";
 
 export function deferred<T>(): {
   promise: Promise<T>;
@@ -108,6 +122,126 @@ export const request: TaskCreate = {
   reasoning_effort: "medium",
   treatment_mode: "off_on",
   idempotency_key: "fixture-key",
+};
+
+export const batchRequest: BatchCreate = {
+  powercontext_ref: "latest",
+  benchmark: "swebench-pro",
+  task_set: "swebench-pro-public-v2",
+  model: "gpt-5.6-sol",
+  reasoning_effort: "medium",
+  treatment_mode: "off_on",
+  idempotency_key: "fixture-batch-key",
+};
+
+export function batchRecord(overrides: Partial<BatchRecord> = {}): BatchRecord {
+  return {
+    batch_id: "batch-001",
+    request: batchRequest,
+    total_tasks: 731,
+    status: "queued",
+    created_at: "2026-07-29T01:00:00Z",
+    started_at: null,
+    finished_at: null,
+    resolved_powercontext_sha: null,
+    ...overrides,
+  };
+}
+
+export const batchReport: BatchReport = {
+  batch_id: "batch-001",
+  total_tasks: 100,
+  terminal_tasks: 100,
+  comparable_pairs: 100,
+  execution_failures: 0,
+  cancelled_tasks: 0,
+  off: { resolved: 41, total: 100, rate_percent: 41 },
+  on: { resolved: 48, total: 100, rate_percent: 48 },
+  resolution_rate_delta_points: 7,
+  pair_categories: {
+    off_fail_on_pass: 14,
+    off_pass_on_fail: 7,
+    both_pass: 34,
+    both_fail: 45,
+    execution_failure: 0,
+  },
+  task_statuses: {
+    queued: 0,
+    running: 0,
+    succeeded: 100,
+    failed: 0,
+    interrupted: 0,
+    cancelled: 0,
+  },
+  tokens: {
+    input: { off: 72_400_000, on: 79_800_000, delta: 7_400_000, off_measured_tasks: 100, on_measured_tasks: 100 },
+    output: { off: 612_000, on: 668_000, delta: 56_000, off_measured_tasks: 100, on_measured_tasks: 100 },
+    total: { off: 73_012_000, on: 80_468_000, delta: 7_456_000, off_measured_tasks: 100, on_measured_tasks: 100 },
+  },
+  revisions: { powercontext: "a".repeat(40), dataset: "public-v2", harness: "harness-sha" },
+  configuration: { model: "gpt-5.6-sol", reasoning_effort: "medium", task_set: "swebench-pro-public-v2" },
+};
+
+export function batchTask(overrides: Partial<BatchTaskItem> = {}): BatchTaskItem {
+  return {
+    task_id: "task-001",
+    instance_id: "instance_owner__repo-001",
+    repository: "owner/repo",
+    source_index: 0,
+    status: "succeeded",
+    pair_category: "off_pass_on_fail",
+    off: { resolved: true, input_tokens: 100, output_tokens: 10, total_tokens: 110 },
+    on: { resolved: false, input_tokens: 120, output_tokens: 15, total_tokens: 135 },
+    tokens: { off: 110, on: 135, delta: 25 },
+    failure_category: null,
+    failure_summary: null,
+    ...overrides,
+  };
+}
+
+export const batchTaskPage: BatchTaskPage = {
+  items: [batchTask()],
+  total: 1,
+  limit: 100,
+  offset: 0,
+};
+
+export const batchTaskDetail: BatchTaskDetail = {
+  task: batchTask(),
+  problem_statement: "完整的问题描述",
+  required_tests: {
+    fail_to_pass: ["test_issue"],
+    pass_to_pass: ["test_regression"],
+    selected_test_files_to_run: "tests/test_feature.py",
+    test_patch: "diff --git a/tests/test_feature.py b/tests/test_feature.py",
+  },
+  off: {
+    resolved: true,
+    patch_applied: true,
+    fail_to_pass: { passed: 1, total: 1, failed: [] },
+    pass_to_pass: { passed: 1, total: 1, failed: [] },
+    log_excerpt: null,
+    input_tokens: 100,
+    output_tokens: 10,
+    total_tokens: 110,
+  },
+  on: {
+    resolved: false,
+    patch_applied: true,
+    fail_to_pass: { passed: 0, total: 1, failed: ["test_issue"] },
+    pass_to_pass: { passed: 1, total: 1, failed: [] },
+    log_excerpt: "test_issue failed",
+    input_tokens: 120,
+    output_tokens: 15,
+    total_tokens: 135,
+  },
+};
+
+export const contextEventPage: ContextEventPage = {
+  items: [],
+  total: 0,
+  limit: 100,
+  offset: 0,
 };
 
 export function summary(
@@ -219,6 +353,16 @@ export function record(status: TaskRecord["status"], taskId = `task-${status}`):
 
 export function apiStub(overrides: Partial<Record<keyof EvaluationApi, unknown>> = {}): EvaluationApi {
   return {
+    listBatches: vi.fn().mockResolvedValue([]),
+    getBatch: vi.fn().mockResolvedValue(batchRecord()),
+    createBatch: vi.fn().mockResolvedValue(batchRecord()),
+    cancelBatch: vi.fn().mockResolvedValue(batchRecord({ status: "cancelled" })),
+    getBatchReport: vi.fn().mockResolvedValue(batchReport),
+    listBatchTasks: vi.fn().mockResolvedValue(batchTaskPage),
+    getBatchTask: vi.fn().mockResolvedValue(batchTaskDetail),
+    listContextEvents: vi.fn().mockResolvedValue(contextEventPage),
+    getContextEvent: vi.fn(),
+    subscribeBatchEvents: vi.fn().mockReturnValue({ close: vi.fn() }),
     getCapabilities: vi.fn().mockResolvedValue(capabilities),
     getHealth: vi.fn().mockResolvedValue(health),
     listTasks: vi.fn().mockResolvedValue([]),

@@ -6,11 +6,12 @@ import type { HealthResponse } from "../types";
 interface AppShellProps {
   api: EvaluationApi;
   path: string;
+  batchId: string | null;
   navigate(path: string): void;
   children: ReactNode;
 }
 
-export function AppShell({ api, path, navigate, children }: AppShellProps) {
+export function AppShell({ api, path, batchId, navigate, children }: AppShellProps) {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState(false);
 
@@ -28,12 +29,27 @@ export function AppShell({ api, path, navigate, children }: AppShellProps) {
     return () => controller.abort();
   }, [api]);
 
+  const encodedBatchId = batchId === null ? null : encodeURIComponent(batchId);
+  const taskReport = path.match(/^\/report\/[^/]+\/tasks(?:\/|$)/) !== null;
   const links = [
-    { href: "/", label: "工作台", current: path === "/" },
-    { href: "/tasks", label: "测试任务", current: path.startsWith("/tasks") },
-    { href: "/reports", label: "验收报告", current: path.startsWith("/reports") },
+    {
+      href: encodedBatchId === null ? "/" : `/report/${encodedBatchId}`,
+      label: "总体报告",
+      current: !taskReport,
+      disabled: false,
+    },
+    {
+      href: encodedBatchId === null ? "/" : `/report/${encodedBatchId}/tasks`,
+      label: "任务详细报告",
+      current: taskReport,
+      disabled: encodedBatchId === null,
+    },
   ];
-  const onLink = (event: MouseEvent<HTMLAnchorElement>, href: string) => {
+  const onLink = (event: MouseEvent<HTMLAnchorElement>, href: string, disabled = false) => {
+    if (disabled) {
+      event.preventDefault();
+      return;
+    }
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
     navigate(href);
@@ -49,14 +65,15 @@ export function AppShell({ api, path, navigate, children }: AppShellProps) {
           <span>PowerContext</span>
           <small>Evaluation Console</small>
         </a>
-        <nav aria-label="主导航">
+        <nav aria-label="报告导航">
           {links.map((link) => (
             <a
               className="nav-link"
               href={link.href}
               aria-current={link.current ? "page" : undefined}
-              onClick={(event) => onLink(event, link.href)}
-              key={link.href}
+              aria-disabled={link.disabled ? "true" : undefined}
+              onClick={(event) => onLink(event, link.href, link.disabled)}
+              key={link.label}
             >
               {link.label}
             </a>
