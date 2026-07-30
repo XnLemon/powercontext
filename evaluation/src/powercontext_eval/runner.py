@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ from powercontext_eval.benchmarks.swebench_pro.adapter import (
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluation, OfficialEvaluator
 from powercontext_eval.benchmarks.swebench_pro.prediction import encode_predictions
 from powercontext_eval.context_trace import write_context_trace
+from powercontext_eval.errors import CommandFailed
 from powercontext_eval.git_source import GitSource
 from powercontext_eval.models import Arm, PowerContextRef
 from powercontext_eval.paths import EvaluationPaths
@@ -41,6 +43,12 @@ from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, TestGro
 # Compatibility identifier for the legacy single-task web contract. The generic runner never consults it.
 INSTANCE_ID = "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
+_IMAGE_REMOVAL_ATTEMPTS = 5
+_IMAGE_REMOVAL_RETRY_SECONDS = 0.25
+_TRANSIENT_IMAGE_REMOVAL_ERRORS = (
+    "is using its referenced image",
+    "is being used by stopped container",
+)
 
 
 class RunPhase(StrEnum):
@@ -108,11 +116,20 @@ def run_swebench_pro_instance(
         )
     finally:
         if not image_was_present and _inspect_task_image(process, instance.task_image, cwd=image_cwd) is not None:
-            process.run(
-                ("docker", "image", "rm", instance.task_image),
-                cwd=image_cwd,
-                timeout=600,
-            )
+            _remove_imported_task_image(process, instance.task_image, cwd=image_cwd)
+
+
+def _remove_imported_task_image(process: ProcessRunner, task_image: str, *, cwd: Path) -> None:
+    command = ("docker", "image", "rm", task_image)
+    for attempt in range(_IMAGE_REMOVAL_ATTEMPTS):
+        try:
+            process.run(command, cwd=cwd, timeout=600)
+            return
+        except CommandFailed as error:
+            retryable = any(marker in error.result.stderr for marker in _TRANSIENT_IMAGE_REMOVAL_ERRORS)
+            if not retryable or attempt == _IMAGE_REMOVAL_ATTEMPTS - 1:
+                raise
+            time.sleep(_IMAGE_REMOVAL_RETRY_SECONDS)
 
 
 def _run_swebench_pro_instance(
