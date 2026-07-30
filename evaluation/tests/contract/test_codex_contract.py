@@ -932,6 +932,26 @@ def test_plugin_locked_environment_is_prewarmed_and_injected_into_hook_path(tmp_
     assert "UV_OFFLINE=1" in task
 
 
+def test_managed_python_is_kept_in_the_writable_arm_runtime(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    docker = TranscriptDocker()
+
+    DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config, Arm.ON, paths, b"prompt", ArtifactStore(paths.result_root)
+    )
+
+    uv_consumers = [
+        command
+        for command in docker.commands
+        if any(value.startswith("UV_PROJECT_ENVIRONMENT=") for value in command)
+    ]
+    assert len(uv_consumers) >= 4
+    assert all("UV_PYTHON_INSTALL_DIR=/runtime/uv-python" in command for command in uv_consumers)
+
+
 def test_network_cleanup_survives_relay_stop_failure(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     config = sut_config(tmp_path)
