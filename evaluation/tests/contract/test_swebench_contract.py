@@ -209,6 +209,48 @@ def test_official_evaluator_retains_required_test_details_and_bounded_log(
     assert len(result.log_excerpt) <= 4_000
 
 
+def test_official_evaluator_accepts_duplicate_test_names_with_the_same_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    fake = Path(__file__).parent / "fixtures" / "fake_evaluator.py"
+    (harness / "swe_bench_pro_eval.py").write_bytes(fake.read_bytes())
+    (harness / "run_scripts").mkdir()
+    raw_path = tmp_path / "instance.jsonl"
+    raw_path.write_text(json.dumps(raw_instance()) + "\n")
+    prediction_path = tmp_path / "predictions.json"
+    prediction_path.write_text(encode_predictions(INSTANCE_ID, "diff --git a/a b/a\n", "codex-0.145.0"))
+    monkeypatch.setenv(
+        "FAKE_EVAL_OUTPUT",
+        json.dumps(
+            {
+                "tests": [
+                    {"name": "TestLoad", "status": "PASSED"},
+                    {"name": "TestLoad", "status": "PASSED"},
+                    {"name": "TestRegression", "status": "PASSED"},
+                ]
+            }
+        ),
+    )
+
+    result = OfficialEvaluator(ProcessRunner(), python_executable=sys.executable).evaluate(
+        harness_root=harness,
+        raw_sample_path=raw_path,
+        prediction_path=prediction_path,
+        output_dir=tmp_path / "output",
+        instance_id=INSTANCE_ID,
+        required_fail_to_pass=("TestLoad",),
+        required_pass_to_pass=("TestRegression",),
+        patch_applied=True,
+    )
+
+    assert result.resolved is True
+    assert result.fail_to_pass == TestGroupResult(passed=1, total=1, failed=())
+    assert result.pass_to_pass == TestGroupResult(passed=1, total=1, failed=())
+
+
 @pytest.mark.parametrize(
     "output",
     [

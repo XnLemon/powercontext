@@ -188,8 +188,8 @@ def _load_test_statuses(path: Path) -> dict[str, str]:
         status = test.get("status")
         if not isinstance(name, str) or not name or not isinstance(status, str) or status not in _TEST_STATUSES:
             raise OfficialResultError("Official test output contains an invalid name or status")
-        if name in statuses:
-            raise OfficialResultError("Official test output contains a duplicate test name")
+        if name in statuses and statuses[name] != status:
+            raise OfficialResultError("Official test output contains conflicting statuses for one test name")
         statuses[name] = status
     return statuses
 
