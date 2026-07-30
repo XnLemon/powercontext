@@ -117,6 +117,11 @@ temporary archive with `docker load`, verifies the immutable local image ID, and
 not reconfigure or restart the Docker daemon, so existing containers remain untouched. Verify the downloaded
 binary against the checksum published for its pinned upstream release before installing it.
 
+The official SWE-bench Pro evaluator keeps the harness default Docker network because some pinned task scripts
+install test dependencies at evaluation time. Do not pass `--block_network` for this task set: doing so can leave
+package-manager setup waiting until timeout and turns valid benchmark tasks into infrastructure failures. Official
+evaluation containers receive neither the Codex credential nor the host Docker socket.
+
 ## Install configuration and units
 
 Create the configuration without exposing its eventual contents in logs:

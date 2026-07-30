@@ -157,7 +157,7 @@ def test_official_evaluator_uses_exact_cli_and_retains_raw_output(tmp_path: Path
         "use_local_docker": True,
         "docker_platform": "linux/amd64",
         "redo": True,
-        "block_network": True,
+        "block_network": False,
     }
 
 

@@ -90,7 +90,6 @@ class OfficialEvaluator:
             "--docker_platform",
             "linux/amd64",
             "--redo",
-            "--block_network",
         )
         environment = {
             key: os.environ[key]
