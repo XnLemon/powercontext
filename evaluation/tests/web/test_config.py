@@ -59,7 +59,7 @@ def test_web_config_defaults_match_m0_layout() -> None:
 
     config = WebConfig.for_root(root)
 
-    assert config.powercontext_source == root / "deploy" / "powercontext"
+    assert config.powercontext_source == root / "source" / "powercontext.git"
     assert config.harness_root == root / "cache" / "swebench-pro.git"
     assert config.harness_python == root / "venvs" / "swebench-pro-ca10a60" / "bin" / "python"
     assert config.dataset_path == root / "cache" / "swebench-pro.git" / "helper_code" / "sweap_eval_full_v2.jsonl"
