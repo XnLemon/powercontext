@@ -20,6 +20,7 @@ from powercontext_eval.runner import (
     PhaseCallback,
     RunConfig,
     RunPhase,
+    _resolve_task_image,
     run_swebench_pro_instance,
 )
 
@@ -73,6 +74,97 @@ def test_run_phases_have_stable_order_and_values() -> None:
     ]
 
 
+def test_task_image_uses_an_existing_local_image_without_registry_access(tmp_path: Path) -> None:
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    class Process:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+            calls.append((argv, kwargs))
+            return SimpleNamespace(returncode=0, stdout=IMAGE_ID + "\n")
+
+    image_id = _resolve_task_image(
+        Process(),  # type: ignore[arg-type]
+        "owner/image:tag",
+        cwd=tmp_path,
+        registry_binary=tmp_path / "regctl",
+        proxy_url="http://127.0.0.1:7890",
+    )
+
+    assert image_id == IMAGE_ID
+    assert [call[0] for call in calls] == [("docker", "image", "inspect", "--format={{.Id}}", "owner/image:tag")]
+    assert calls[0][1]["check"] is False
+
+
+def test_missing_task_image_is_exported_through_proxy_loaded_and_verified(tmp_path: Path) -> None:
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    inspect_count = 0
+
+    class Process:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+            nonlocal inspect_count
+            calls.append((argv, kwargs))
+            if argv[:3] == ("docker", "image", "inspect"):
+                inspect_count += 1
+                if inspect_count == 1:
+                    return SimpleNamespace(returncode=1, stdout="")
+                return SimpleNamespace(returncode=0, stdout=IMAGE_ID + "\n")
+            if argv[:3] == (str(tmp_path / "regctl"), "image", "export"):
+                Path(argv[-1]).write_bytes(b"docker archive")
+            return SimpleNamespace(returncode=0, stdout="")
+
+    image_id = _resolve_task_image(
+        Process(),  # type: ignore[arg-type]
+        "owner/image:tag",
+        cwd=tmp_path,
+        registry_binary=tmp_path / "regctl",
+        proxy_url="http://127.0.0.1:7890",
+    )
+
+    assert image_id == IMAGE_ID
+    commands = [call[0] for call in calls]
+    assert commands[0] == ("docker", "image", "inspect", "--format={{.Id}}", "owner/image:tag")
+    assert commands[1][:7] == (
+        str(tmp_path / "regctl"),
+        "image",
+        "export",
+        "--platform",
+        "linux/amd64",
+        "--name",
+        "owner/image:tag",
+    )
+    assert commands[2][0:3] == ("docker", "load", "-i")
+    assert commands[3] == ("docker", "image", "inspect", "--format={{.Id}}", "owner/image:tag")
+    assert calls[1][1]["env"] == {
+        "HTTPS_PROXY": "http://127.0.0.1:7890",
+        "HTTP_PROXY": "http://127.0.0.1:7890",
+        "https_proxy": "http://127.0.0.1:7890",
+        "http_proxy": "http://127.0.0.1:7890",
+        "NO_PROXY": "127.0.0.1,localhost,::1",
+        "no_proxy": "127.0.0.1,localhost,::1",
+    }
+    assert not list(tmp_path.glob(".task-image-*.tar"))
+
+
+def test_failed_task_image_export_removes_the_partial_archive(tmp_path: Path) -> None:
+    class Process:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+            if argv[:3] == ("docker", "image", "inspect"):
+                return SimpleNamespace(returncode=1, stdout="")
+            Path(argv[-1]).write_bytes(b"partial")
+            raise RuntimeError("registry failed")
+
+    with pytest.raises(RuntimeError, match="registry failed"):
+        _resolve_task_image(
+            Process(),  # type: ignore[arg-type]
+            "owner/image:tag",
+            cwd=tmp_path,
+            registry_binary=tmp_path / "regctl",
+            proxy_url="http://127.0.0.1:7890",
+        )
+
+    assert not list(tmp_path.glob(".task-image-*.tar"))
+
+
 def _config(tmp_path: Path) -> RunConfig:
     auth_json = tmp_path / "auth.json"
     auth_json.write_text('{"api_key":"runner-secret-value"}')
@@ -84,6 +176,7 @@ def _config(tmp_path: Path) -> RunConfig:
         harness_python=tmp_path / "python",
         codex_binary=tmp_path / "codex",
         uv_binary=tmp_path / "uv",
+        registry_binary=tmp_path / "regctl",
         auth_json=auth_json,
         proxy_url="http://127.0.0.1:7890",
         run_id="run-test",
@@ -106,10 +199,8 @@ def _run_with_fakes(
     class FakeProcess:
         def run(self, argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
             observed["process_calls"].append((argv, kwargs))  # type: ignore[union-attr]
-            if argv[:2] == ("docker", "pull"):
-                return SimpleNamespace(stdout="pulled")
             if argv[:3] == ("docker", "image", "inspect"):
-                return SimpleNamespace(stdout=IMAGE_ID + "\n")
+                return SimpleNamespace(returncode=0, stdout=IMAGE_ID + "\n")
             if argv[:2] == ("docker", "run"):
                 return SimpleNamespace(stdout="", returncode=0)
             assert argv == ("git", "diff", "--binary", "--full-index", instance.base_commit, "--")
@@ -187,8 +278,7 @@ def test_runner_uses_arbitrary_instance_prompt_image_and_base_commit(
     assert instance.problem_statement.encode() in prompts[Arm.OFF]
     calls = observed["process_calls"]
     assert isinstance(calls, list)
-    assert calls[0][0] == ("docker", "pull", instance.task_image)
-    assert calls[1][0] == ("docker", "image", "inspect", "--format={{.Id}}", instance.task_image)
+    assert calls[0][0] == ("docker", "image", "inspect", "--format={{.Id}}", instance.task_image)
     patch_checks = [call for call in calls if call[0][:2] == ("docker", "run")]
     assert len(patch_checks) == 3
     assert patch_checks[0][1]["input_bytes"] == instance.patch.encode()

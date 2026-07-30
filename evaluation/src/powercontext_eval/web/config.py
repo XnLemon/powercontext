@@ -36,6 +36,7 @@ class WebConfig(BaseModel):
     dataset_path: Path
     codex_binary: Path
     uv_binary: Path
+    registry_binary: Path
     auth_json: Path = Field(exclude=True, repr=False)
     proxy_url: str = Field(exclude=True, repr=False)
     host: str = Field(default="127.0.0.1", min_length=1)
@@ -58,6 +59,7 @@ class WebConfig(BaseModel):
         "dataset_path",
         "codex_binary",
         "uv_binary",
+        "registry_binary",
         "auth_json",
     )
     @classmethod
@@ -87,6 +89,7 @@ class WebConfig(BaseModel):
         raw_sample_path: Path | None = None,
         codex_binary: Path | None = None,
         uv_binary: Path | None = None,
+        registry_binary: Path | None = None,
         auth_json: Path | None = None,
         proxy_url: str = "http://127.0.0.1:7890",
         host: str = "127.0.0.1",
@@ -111,6 +114,7 @@ class WebConfig(BaseModel):
             or root / "cache" / "swebench-pro.git" / "helper_code" / "sweap_eval_full_v2.jsonl",
             codex_binary=codex_binary or root / "bin" / "codex",
             uv_binary=uv_binary or root / "bin" / "uv",
+            registry_binary=registry_binary or root / "bin" / "regctl",
             auth_json=auth_json or root / "codex-home" / "auth.json",
             proxy_url=proxy_url,
             host=host,
@@ -155,6 +159,7 @@ class WebConfig(BaseModel):
             dataset_path=path("DATASET_PATH") or path("RAW_SAMPLE_PATH"),
             codex_binary=path("CODEX_BINARY"),
             uv_binary=path("UV_BINARY"),
+            registry_binary=path("REGISTRY_BINARY"),
             auth_json=path("AUTH_JSON"),
             proxy_url=environ.get(f"{prefix}PROXY_URL", "http://127.0.0.1:7890"),
             host=environ.get(f"{prefix}HOST", "127.0.0.1"),

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -31,6 +33,7 @@ from powercontext_eval.powercontext_sut import (
     SutConfig,
     SutOutcome,
     auth_secret_variants,
+    loopback_proxy_environment,
 )
 from powercontext_eval.process import ProcessRunner
 from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, TestGroupReport, render_report
@@ -65,6 +68,7 @@ class RunConfig:
     harness_python: Path
     codex_binary: Path
     uv_binary: Path
+    registry_binary: Path
     auth_json: Path
     proxy_url: str
     run_id: str
@@ -106,7 +110,13 @@ def run_swebench_pro_instance(
     materialized = source.materialize(resolved, work_root / "powercontext")
 
     run_store = ArtifactStore(layout.run_artifacts)
-    task_image_id = _resolve_task_image(process, instance.task_image, cwd=layout.run_artifacts)
+    task_image_id = _resolve_task_image(
+        process,
+        instance.task_image,
+        cwd=layout.run_artifacts,
+        registry_binary=config.registry_binary,
+        proxy_url=config.proxy_url,
+    )
     run_store.create_json(
         "manifest.json",
         {
@@ -265,6 +275,7 @@ class MinimalRunConfig:
     raw_sample_path: Path
     codex_binary: Path
     uv_binary: Path
+    registry_binary: Path
     auth_json: Path
     proxy_url: str
     run_id: str | None = None
@@ -292,6 +303,7 @@ def run_minimal_swebench_pro(
             harness_python=config.harness_python,
             codex_binary=config.codex_binary,
             uv_binary=config.uv_binary,
+            registry_binary=config.registry_binary,
             auth_json=config.auth_json,
             proxy_url=config.proxy_url,
             run_id=run_id,
@@ -301,13 +313,58 @@ def run_minimal_swebench_pro(
     )
 
 
-def _resolve_task_image(process: ProcessRunner, task_image: str, *, cwd: Path) -> str:
-    process.run(("docker", "pull", task_image), cwd=cwd, timeout=3_600)
+def _resolve_task_image(
+    process: ProcessRunner,
+    task_image: str,
+    *,
+    cwd: Path,
+    registry_binary: Path,
+    proxy_url: str,
+) -> str:
+    image_id = _inspect_task_image(process, task_image, cwd=cwd)
+    if image_id is not None:
+        return image_id
+
+    proxy = ProxyRelayConfig(proxy_url)
+    archive_prefix = f".task-image-{hashlib.sha256(task_image.encode()).hexdigest()[:16]}-"
+    with tempfile.NamedTemporaryFile(prefix=archive_prefix, suffix=".tar", dir=cwd, delete=False) as stream:
+        archive = Path(stream.name)
+    try:
+        process.run(
+            (
+                os.fspath(registry_binary),
+                "image",
+                "export",
+                "--platform",
+                "linux/amd64",
+                "--name",
+                task_image,
+                task_image,
+                os.fspath(archive),
+            ),
+            cwd=cwd,
+            timeout=3_600,
+            env=loopback_proxy_environment(proxy.url),
+        )
+        process.run(("docker", "load", "-i", os.fspath(archive)), cwd=cwd, timeout=3_600)
+    finally:
+        archive.unlink(missing_ok=True)
+
+    image_id = _inspect_task_image(process, task_image, cwd=cwd)
+    if image_id is None:
+        raise ValueError("Imported Docker task image is unavailable")
+    return image_id
+
+
+def _inspect_task_image(process: ProcessRunner, task_image: str, *, cwd: Path) -> str | None:
     result = process.run(
         ("docker", "image", "inspect", "--format={{.Id}}", task_image),
         cwd=cwd,
         timeout=120,
+        check=False,
     )
+    if result.returncode != 0:
+        return None
     image_id = result.stdout.strip()
     if _IMAGE_ID.fullmatch(image_id) is None:
         raise ValueError("Docker returned an invalid immutable task image ID")

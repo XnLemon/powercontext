@@ -110,6 +110,13 @@ find ../.. -name '._*' -print -quit | grep -q . && exit 1 || true
 Use the committed `evaluation/web/package-lock.json`. The deployed frontend remains
 `/data/powercontext-eval/deploy/powercontext/evaluation/web/dist`; no frontend archive crosses from Mac to Linux.
 
+Install the reviewed Linux `regctl` binary at `/data/powercontext-eval/bin/regctl` and configure
+`POWERCONTEXT_EVAL_REGISTRY_BINARY` to that absolute path. When a task image is not already local, the worker uses
+this user-space client through `POWERCONTEXT_EVAL_PROXY_URL` to export the `linux/amd64` image, imports the exact
+temporary archive with `docker load`, verifies the immutable local image ID, and removes the archive. This path does
+not reconfigure or restart the Docker daemon, so existing containers remain untouched. Verify the downloaded
+binary against the checksum published for its pinned upstream release before installing it.
+
 ## Install configuration and units
 
 Create the configuration without exposing its eventual contents in logs:

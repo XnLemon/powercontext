@@ -138,6 +138,7 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
         ("POWERCONTEXT_EVAL_DATASET_PATH", "sample.jsonl"),
         ("POWERCONTEXT_EVAL_CODEX_BINARY", "codex"),
         ("POWERCONTEXT_EVAL_UV_BINARY", "uv"),
+        ("POWERCONTEXT_EVAL_REGISTRY_BINARY", "regctl"),
         ("POWERCONTEXT_EVAL_AUTH_JSON", "auth.json"),
     ],
 )
