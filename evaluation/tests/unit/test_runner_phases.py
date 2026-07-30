@@ -188,19 +188,39 @@ def _run_with_fakes(
     monkeypatch: pytest.MonkeyPatch,
     events: list[object],
     on_phase: PhaseCallback | None = None,
+    *,
+    image_present: bool = True,
+    evaluator_failure: Exception | None = None,
+    image_cleanup_failure: Exception | None = None,
+    observed: dict[str, object] | None = None,
 ) -> tuple[RunConfig, MinimalRunResult, dict[str, object]]:
     config = _config(tmp_path)
     instance = _instance()
     materialized = tmp_path / "materialized"
     materialized.mkdir()
     resolved = SimpleNamespace(sha="a" * 40)
-    observed: dict[str, object] = {"process_calls": [], "evaluator_calls": []}
+    observed = observed if observed is not None else {}
+    observed.update({"process_calls": [], "evaluator_calls": []})
+    image_inspections = 0
 
     class FakeProcess:
         def run(self, argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+            nonlocal image_inspections
             observed["process_calls"].append((argv, kwargs))  # type: ignore[union-attr]
             if argv[:3] == ("docker", "image", "inspect"):
+                image_inspections += 1
+                if not image_present and image_inspections == 1:
+                    return SimpleNamespace(returncode=1, stdout="")
                 return SimpleNamespace(returncode=0, stdout=IMAGE_ID + "\n")
+            if argv[:3] == (str(config.registry_binary), "image", "export"):
+                Path(argv[-1]).write_bytes(b"docker archive")
+                return SimpleNamespace(returncode=0, stdout="")
+            if argv[:2] == ("docker", "load"):
+                return SimpleNamespace(returncode=0, stdout="")
+            if argv[:3] == ("docker", "image", "rm"):
+                if image_cleanup_failure is not None:
+                    raise image_cleanup_failure
+                return SimpleNamespace(returncode=0, stdout="")
             if argv[:2] == ("docker", "run"):
                 return SimpleNamespace(stdout="", returncode=0)
             assert argv == ("git", "diff", "--binary", "--full-index", instance.base_commit, "--")
@@ -216,6 +236,8 @@ def _run_with_fakes(
 
     class FakeEvaluator:
         def evaluate(self, **kwargs: object) -> OfficialEvaluation:
+            if evaluator_failure is not None:
+                raise evaluator_failure
             prediction_path = kwargs["prediction_path"]
             raw_sample_path = kwargs["raw_sample_path"]
             assert isinstance(prediction_path, Path)
@@ -306,6 +328,53 @@ def test_runner_uses_arbitrary_instance_prompt_image_and_base_commit(
             "codex",
             "official_evaluator",
         ]
+    assert not any(call[0][:3] == ("docker", "image", "rm") for call in calls)
+
+
+def test_runner_removes_a_task_image_imported_for_a_completed_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _config, _result, observed = _run_with_fakes(
+        tmp_path,
+        monkeypatch,
+        [],
+        image_present=False,
+    )
+
+    calls = cast(list[tuple[tuple[str, ...], dict[str, object]]], observed["process_calls"])
+    assert calls[-1][0] == ("docker", "image", "rm", _instance().task_image)
+
+
+def test_runner_removes_an_imported_task_image_when_evaluation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+
+    with pytest.raises(RuntimeError, match="official evaluator failed"):
+        _run_with_fakes(
+            tmp_path,
+            monkeypatch,
+            [],
+            image_present=False,
+            evaluator_failure=RuntimeError("official evaluator failed"),
+            observed=observed,
+        )
+
+    calls = cast(list[tuple[tuple[str, ...], dict[str, object]]], observed["process_calls"])
+    assert calls[-1][0] == ("docker", "image", "rm", _instance().task_image)
+
+
+def test_runner_surfaces_imported_task_image_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(RuntimeError, match="image cleanup failed"):
+        _run_with_fakes(
+            tmp_path,
+            monkeypatch,
+            [],
+            image_present=False,
+            image_cleanup_failure=RuntimeError("image cleanup failed"),
+        )
 
 
 def test_runner_emits_phases_immediately_before_named_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
