@@ -383,7 +383,8 @@ def test_worker_executes_only_the_new_attempt_when_a_failed_task_is_retried(tmp_
 
     assert worker.run_once() is True
 
-    assert calls == [retry.attempt_id]
+    assert retry.attempt_id == f"{task.task_id}.attempt-0002"
+    assert calls == [f"{task.task_id}-attempt-0002"]
     attempts = store.list_task_attempts(batch.batch_id, task.task_id)
     assert [attempt.status for attempt in attempts] == [TaskStatus.FAILED, TaskStatus.FAILED]
     assert attempts[0].failure_summary == "First attempt failed"

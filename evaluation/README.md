@@ -59,6 +59,8 @@ pause at the next safe boundary.
 Only infrastructure failures are retryable. A retry creates a new immutable attempt for that logical task; prior
 attempt evidence remains available, and no other completed task is rerun. Official `RESOLVED` and `UNRESOLVED`
 outcomes are benchmark results and cannot be retried.
+The durable attempt identity retains the form `<task-id>.attempt-0002`; filesystem and Docker resources use the
+deterministic safe slug `<task-id>-attempt-0002`, because Docker evaluation run IDs do not accept a period.
 
 ## Transfer, build, and test on m0
 

@@ -353,7 +353,10 @@ def _execution_run_id(task: TaskRecord) -> str:
         return task.task_id
     if task.attempt_id is None:
         raise ValueError("Retried task is missing an attempt ID")
-    return task.attempt_id
+    expected_attempt_id = f"{task.task_id}.attempt-{task.attempt_number:04d}"
+    if task.attempt_id != expected_attempt_id:
+        raise ValueError("Retried task has an invalid attempt ID")
+    return f"{task.task_id}-attempt-{task.attempt_number:04d}"
 
 
 @contextmanager
