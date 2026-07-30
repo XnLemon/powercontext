@@ -94,6 +94,34 @@ def run_swebench_pro_instance(
     instance: SweBenchProInstance,
     on_phase: PhaseCallback | None = None,
 ) -> RunResult:
+    """Run one instance and release a task image imported solely for this run."""
+
+    process = ProcessRunner()
+    image_cwd = config.root.absolute().parent
+    image_was_present = _inspect_task_image(process, instance.task_image, cwd=image_cwd) is not None
+    try:
+        return _run_swebench_pro_instance(
+            config,
+            instance=instance,
+            on_phase=on_phase,
+            process=process,
+        )
+    finally:
+        if not image_was_present and _inspect_task_image(process, instance.task_image, cwd=image_cwd) is not None:
+            process.run(
+                ("docker", "image", "rm", instance.task_image),
+                cwd=image_cwd,
+                timeout=600,
+            )
+
+
+def _run_swebench_pro_instance(
+    config: RunConfig,
+    *,
+    instance: SweBenchProInstance,
+    on_phase: PhaseCallback | None,
+    process: ProcessRunner,
+) -> RunResult:
     """Run Gold then OFF/ON for exactly the supplied catalog instance."""
 
     emit_phase = on_phase if on_phase is not None else (lambda phase: None)
@@ -103,7 +131,6 @@ def run_swebench_pro_instance(
         raise ValueError(f"Run already exists: {run_id}")
     emit_phase(RunPhase.PREPARING)
 
-    process = ProcessRunner()
     source = GitSource(cache_root=config.root / "cache" / "powercontext-git", runner=process)
     resolved = source.resolve(config.powercontext_source, PowerContextRef.parse(config.powercontext_ref))
     work_root = config.root / "work" / run_id

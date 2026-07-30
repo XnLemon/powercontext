@@ -201,25 +201,28 @@ def _run_with_fakes(
     resolved = SimpleNamespace(sha="a" * 40)
     observed = observed if observed is not None else {}
     observed.update({"process_calls": [], "evaluator_calls": []})
-    image_inspections = 0
+    image_loaded = image_present
 
     class FakeProcess:
         def run(self, argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
-            nonlocal image_inspections
+            nonlocal image_loaded
             observed["process_calls"].append((argv, kwargs))  # type: ignore[union-attr]
             if argv[:3] == ("docker", "image", "inspect"):
-                image_inspections += 1
-                if not image_present and image_inspections == 1:
-                    return SimpleNamespace(returncode=1, stdout="")
-                return SimpleNamespace(returncode=0, stdout=IMAGE_ID + "\n")
+                return (
+                    SimpleNamespace(returncode=0, stdout=IMAGE_ID + "\n")
+                    if image_loaded
+                    else SimpleNamespace(returncode=1, stdout="")
+                )
             if argv[:3] == (str(config.registry_binary), "image", "export"):
                 Path(argv[-1]).write_bytes(b"docker archive")
                 return SimpleNamespace(returncode=0, stdout="")
             if argv[:2] == ("docker", "load"):
+                image_loaded = True
                 return SimpleNamespace(returncode=0, stdout="")
             if argv[:3] == ("docker", "image", "rm"):
                 if image_cleanup_failure is not None:
                     raise image_cleanup_failure
+                image_loaded = False
                 return SimpleNamespace(returncode=0, stdout="")
             if argv[:2] == ("docker", "run"):
                 return SimpleNamespace(stdout="", returncode=0)
@@ -364,9 +367,7 @@ def test_runner_removes_an_imported_task_image_when_evaluation_fails(
     assert calls[-1][0] == ("docker", "image", "rm", _instance().task_image)
 
 
-def test_runner_surfaces_imported_task_image_cleanup_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_runner_surfaces_imported_task_image_cleanup_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(RuntimeError, match="image cleanup failed"):
         _run_with_fakes(
             tmp_path,
