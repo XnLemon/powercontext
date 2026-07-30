@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from powercontext_eval.benchmarks.swebench_pro.adapter import SweBenchProInstance
 from powercontext_eval.benchmarks.swebench_pro.catalog import (
     PUBLIC_V2_COUNT,
     PUBLIC_V2_SHA256,
@@ -56,6 +57,47 @@ def test_catalog_loads_pinned_rows_in_source_order_and_normalizes_lists(tmp_path
     assert second.fail_to_pass == ("test_b",)
     assert second.pass_to_pass == ()
     assert first.task_image == "jefzda/sweap-images:owner.repo-owner__repo-a"
+
+
+def test_public_image_tag_is_truncated_to_the_docker_tag_limit() -> None:
+    raw = json.loads(FIXTURE.read_text().splitlines()[0])
+    raw["repo"] = "qutebrowser/qutebrowser"
+    raw["instance_id"] = (
+        "instance_qutebrowser__qutebrowser-f91ace96223cac8161c16dd061907e138fe85111"
+        "-v059c6fdc75567943479b23ebca7c07b5e9a7f34c"
+    )
+    raw["image_name"] = (
+        "084828598639.dkr.ecr.us-west-2.amazonaws.com/sweap-images/"
+        "qutebrowser.qutebrowser:"
+        "qutebrowser__qutebrowser-f91ace96223cac8161c16dd061907e138fe85111"
+        "-v059c6fdc75567943479b23ebca7c07b5e9a7f34c"
+    )
+
+    image = SweBenchProInstance.from_public_raw(raw).task_image
+
+    assert image == (
+        "jefzda/sweap-images:"
+        "qutebrowser.qutebrowser-qutebrowser__qutebrowser-f91ace96223cac8161c16dd061907e138fe85111"
+        "-v059c6fdc75567943479b23ebca7c07b5e9a7f"
+    )
+    assert len(image.rsplit(":", 1)[1]) == 128
+
+
+def test_public_image_preserves_the_official_element_web_exception() -> None:
+    raw = json.loads(FIXTURE.read_text().splitlines()[0])
+    raw["repo"] = "element-hq/element-web"
+    raw["instance_id"] = "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan"
+    raw["image_name"] = (
+        "084828598639.dkr.ecr.us-west-2.amazonaws.com/sweap-images/"
+        "element-hq.element:element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5"
+    )
+
+    image = SweBenchProInstance.from_public_raw(raw).task_image
+
+    assert image == (
+        "jefzda/sweap-images:"
+        "element-hq.element-web-element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan"
+    )
 
 
 def test_catalog_lookup_does_not_reread_source_file(tmp_path: Path) -> None:

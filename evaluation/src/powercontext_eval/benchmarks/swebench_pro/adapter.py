@@ -64,6 +64,8 @@ _PUBLIC_IMAGE = re.compile(
     r"^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/"
     r"sweap-images/(?P<repository>[A-Za-z0-9_.-]+):(?P<tag>[A-Za-z0-9_.-]+)$"
 )
+_ELEMENT_WEB_VNAN_INSTANCE = "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan"
+_DOCKER_TAG_LIMIT = 128
 
 
 class DatasetSchemaError(PowerContextEvalError):
@@ -102,7 +104,7 @@ class SweBenchProInstance:
             raise DatasetSchemaError("Dataset row field is_remote_image must be a boolean")
 
         instance_id = _nonblank(raw["instance_id"], "instance_id")
-        task_image = _docker_hub_image(_nonblank(raw["image_name"], "image_name"))
+        task_image = _docker_hub_image(_nonblank(raw["image_name"], "image_name"), instance_id=instance_id)
         fail_to_pass = _test_names(raw["FAIL_TO_PASS"], "FAIL_TO_PASS")
         pass_to_pass = _test_names(raw["PASS_TO_PASS"], "PASS_TO_PASS")
         preserved = MappingProxyType(
@@ -212,8 +214,12 @@ def _test_names(value: object, field: str) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _docker_hub_image(image_name: str) -> str:
+def _docker_hub_image(image_name: str, *, instance_id: str) -> str:
     matched = _PUBLIC_IMAGE.fullmatch(image_name)
     if matched is None:
         raise DatasetSchemaError("Dataset row field image_name is not a recognized SWE-bench Pro ECR image")
-    return f"jefzda/sweap-images:{matched.group('repository')}-{matched.group('tag')}"
+    if instance_id == _ELEMENT_WEB_VNAN_INSTANCE:
+        tag = f"element-hq.element-web-{instance_id.removeprefix('instance_')}"
+    else:
+        tag = f"{matched.group('repository')}-{matched.group('tag')}"
+    return f"jefzda/sweap-images:{tag[:_DOCKER_TAG_LIMIT]}"
