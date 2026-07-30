@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -105,6 +106,7 @@ def test_example_environment_uses_only_supported_named_configuration() -> None:
     assert config.host == "100.88.99.11"
     assert config.port == 8787
     assert config.proxy_url == "http://127.0.0.1:7890"
+    assert config.powercontext_source == Path("/data/powercontext-eval/source/powercontext.git")
     assert config.dataset_path == Path(
         "/data/powercontext-eval/cache/swebench-pro.git/helper_code/sweap_eval_full_v2.jsonl"
     )
@@ -113,6 +115,14 @@ def test_example_environment_uses_only_supported_named_configuration() -> None:
     assert config.usage_probe_timeout_seconds == 15
     assert config.usage_snapshot_max_age_seconds == 120
     assert not re.search(r"(?i)(api[_-]?key|password|token|secret)=", example)
+
+
+def test_frontend_build_uses_the_portable_rollup_runtime_required_by_m0() -> None:
+    package = json.loads((EVALUATION / "web" / "package.json").read_text())
+    lock = json.loads((EVALUATION / "web" / "package-lock.json").read_text())
+
+    assert package["devDependencies"]["rollup"] == "npm:@rollup/wasm-node@4.62.3"
+    assert lock["packages"]["node_modules/rollup"]["name"] == "@rollup/wasm-node"
 
 
 def test_operator_guide_documents_safety_acceptance_and_rollback_contracts() -> None:
@@ -148,10 +158,14 @@ def test_operator_guide_documents_safety_acceptance_and_rollback_contracts() -> 
         "usage unavailable",
         "attempt",
         "boundary",
-        "prebuilt frontend",
-        "sha256sum",
+        "git push",
+        "/data/powercontext-eval/source/powercontext.git",
+        "node-v22.23.2-linux-x64-glibc-217",
+        "npm ci",
+        "npm run build",
     }
     assert all(term.lower() in guide.lower() for term in required)
+    assert "tar -czf /tmp/powercontext-eval-frontend" not in guide
 
 
 def test_operator_guide_stages_auth_without_printing_or_committing_it() -> None:

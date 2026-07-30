@@ -133,7 +133,7 @@ def codex_contract_smoke(
 @swebench_pro_app.command("run")
 def swebench_pro_run(
     root_path: str = typer.Option("/data/powercontext-eval", "--root"),
-    powercontext_source: str = typer.Option("/data/powercontext-eval/deploy/powercontext"),
+    powercontext_source: str = typer.Option("/data/powercontext-eval/source/powercontext.git"),
     powercontext_ref: str = typer.Option("latest"),
     harness_root: str = typer.Option("/data/powercontext-eval/cache/swebench-pro.git"),
     harness_python: str = typer.Option("/data/powercontext-eval/venvs/swebench-pro-ca10a60/bin/python"),

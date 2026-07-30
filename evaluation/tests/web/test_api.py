@@ -1050,6 +1050,45 @@ def test_batch_confirmation_rejects_usage_at_the_selected_threshold(
     assert store.list_batches() == []
 
 
+def test_batch_confirmation_pins_an_exact_commit_before_queuing_children(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
+
+    response = client.post("/api/batches", json=_batch_payload("batch-pinned-commit-key"))
+
+    assert response.status_code == 201
+    assert response.json()["resolved_powercontext_sha"] == "a" * 40
+    batch = store.get_batch(response.json()["batch_id"])
+    assert batch.resolved_powercontext_sha == "a" * 40
+    assert len(store.list_batch_tasks(batch.batch_id)) == len(_BatchCatalog.instance_ids)
+
+
+def test_batch_confirmation_rejects_unresolvable_latest_before_creating_children(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "missing-source"
+    config = WebConfig.for_root(root, powercontext_source=root / "source" / "powercontext.git")
+    store = TaskStore(config.database_path, lease_duration=timedelta(seconds=config.lease_seconds))
+    store.initialize()
+    store.save_usage_snapshot(_usage(9))
+    client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
+    request = _batch_payload("batch-unresolvable-source-key")
+    request["powercontext_ref"] = "latest"
+
+    response = client.post("/api/batches", json=request)
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "source_unavailable",
+            "message": "The selected PowerContext source could not be resolved.",
+        }
+    }
+    assert store.list_batches() == []
+
+
 def test_batch_control_usage_attempt_and_retry_routes_are_durable(
     config: WebConfig,
     store: TaskStore,

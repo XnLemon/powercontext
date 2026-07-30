@@ -294,6 +294,7 @@ class TaskStore:
         instance_ids: Sequence[str],
         *,
         now: datetime,
+        resolved_powercontext_sha: str | None = None,
     ) -> tuple[BatchRecord, bool]:
         """Create a durable batch and all of its queued children atomically."""
 
@@ -302,6 +303,8 @@ class TaskStore:
             raise ValueError("A batch must contain at least one instance")
         if len(set(ordered_ids)) != len(ordered_ids):
             raise ValueError("A batch cannot contain duplicate instance IDs")
+        if resolved_powercontext_sha is not None and fullmatch(r"[0-9a-f]{40}", resolved_powercontext_sha) is None:
+            raise ValueError("Resolved PowerContext SHA must be 40 lowercase hexadecimal characters")
         created_at = _timestamp(now)
         with self._write() as connection:
             existing = connection.execute(
@@ -316,8 +319,9 @@ class TaskStore:
                 """
                 INSERT INTO batches(
                     batch_id, idempotency_key, request_json, total_tasks, created_at,
-                    control_intent, usage_pause_percent, control_updated_at, control_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    resolved_powercontext_sha, control_intent, usage_pause_percent,
+                    control_updated_at, control_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     placeholder,
@@ -325,6 +329,7 @@ class TaskStore:
                     request.model_dump_json(),
                     len(ordered_ids),
                     created_at,
+                    resolved_powercontext_sha,
                     BatchControlIntent.RUN.value,
                     request.usage_pause_percent,
                     created_at,

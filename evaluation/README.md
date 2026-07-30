@@ -60,7 +60,27 @@ Only infrastructure failures are retryable. A retry creates a new immutable atte
 attempt evidence remains available, and no other completed task is rerun. Official `RESOLVED` and `UNRESOLVED`
 outcomes are benchmark results and cannot be retried.
 
-## Build and test the checkout
+## Transfer, build, and test on m0
+
+Mac must not build or package deployable frontend artifacts. Transfer committed Git objects directly into the bare
+source repository on m0:
+
+```sh
+git push m0:/data/powercontext-eval/source/powercontext.git \
+  <candidate-sha>:refs/heads/evaluation
+```
+
+On m0, verify the received commit and check it out in the deployment working tree:
+
+```sh
+cd /data/powercontext-eval/deploy/powercontext
+git fetch /data/powercontext-eval/source/powercontext.git evaluation
+git checkout --detach <candidate-sha>
+test "$(git rev-parse HEAD)" = "<candidate-sha>"
+```
+
+The evaluator reads `/data/powercontext-eval/source/powercontext.git`, not the deployment working tree. Frontend
+dependencies and `dist` therefore cannot dirty or alter the source used by `latest`.
 
 On m0, from `/data/powercontext-eval/deploy/powercontext`, run the Python verification:
 
@@ -72,33 +92,23 @@ On m0, from `/data/powercontext-eval/deploy/powercontext`, run the Python verifi
 /data/powercontext-eval/bin/uv run --directory evaluation ty check src tests
 ```
 
-m0 does not provide Node/npm. Build the **prebuilt frontend** on a trusted operator workstation from the same clean,
-detached candidate SHA. Run its tests and browser E2E before packaging:
+m0 uses the pinned `node-v22.23.2-linux-x64-glibc-217` toolchain because its host glibc is 2.17. The committed npm
+override selects Rollup's portable WASM runtime, so the frontend build does not load a newer-glibc native parser.
+Build and test directly on m0:
 
 ```sh
-test -z "$(git status --porcelain)"
-git rev-parse HEAD
+export PATH=/data/powercontext-eval/toolchains/node-v22.23.2-linux-x64-glibc-217/bin:$PATH
+export HTTP_PROXY=http://127.0.0.1:7890
+export HTTPS_PROXY=http://127.0.0.1:7890
 cd evaluation/web
-npm ci
+npm ci --cache /data/powercontext-eval/cache/npm --no-audit --no-fund
 npm test -- --run
 npm run build
-npm run e2e
-tar -czf /tmp/powercontext-eval-frontend-<sha>.tar.gz dist
-shasum -a 256 /tmp/powercontext-eval-frontend-<sha>.tar.gz
+find ../.. -name '._*' -print -quit | grep -q . && exit 1 || true
 ```
 
-Use the committed `evaluation/web/package-lock.json`; it was generated with npm 11. Transfer the archive to the
-protected m0 staging directory, then verify the exact expected digest before extracting:
-
-```sh
-sha256sum /data/powercontext-eval/staging/frontend-dist-<sha>.tar.gz
-tar -C /data/powercontext-eval/deploy/powercontext/evaluation/web \
-  -xzf /data/powercontext-eval/staging/frontend-dist-<sha>.tar.gz
-```
-
-The archive's top-level entry is `dist`; the deployed frontend remains
-`/data/powercontext-eval/deploy/powercontext/evaluation/web/dist`. Do not install an unpinned Node toolchain on m0
-as part of a release.
+Use the committed `evaluation/web/package-lock.json`. The deployed frontend remains
+`/data/powercontext-eval/deploy/powercontext/evaluation/web/dist`; no frontend archive crosses from Mac to Linux.
 
 ## Install configuration and units
 
@@ -260,15 +270,16 @@ This preview and deterministic control check is a deployment check, not authoriz
 
 ## Rollback
 
-Stop the two console units, check out the previously accepted commit in
-`/data/powercontext-eval/deploy/powercontext`, rebuild the frontend and resync the frozen evaluation environment,
-then start the units and repeat the m0 health and queue checks:
+Stop the two console units, check out the previously accepted commit received in the m0 bare repository, rebuild the
+frontend on m0, resync the frozen evaluation environment, then start the units and repeat the health and queue checks:
 
 ```sh
 sudo systemctl stop powercontext-eval-worker.service powercontext-eval-web.service
+git fetch /data/powercontext-eval/source/powercontext.git evaluation
 git checkout --detach <prior-accepted-commit>
 /data/powercontext-eval/bin/uv sync --project evaluation --frozen
-(cd evaluation/web && npm ci && npm run build)
+(export PATH=/data/powercontext-eval/toolchains/node-v22.23.2-linux-x64-glibc-217/bin:$PATH; \
+  cd evaluation/web && npm ci --cache /data/powercontext-eval/cache/npm --no-audit --no-fund && npm run build)
 sudo systemctl start powercontext-eval-web.service powercontext-eval-worker.service
 curl --fail --show-error http://100.88.99.11:8787/api/health
 ```

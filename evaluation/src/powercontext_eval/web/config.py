@@ -103,7 +103,7 @@ class WebConfig(BaseModel):
             database_path=database_path or root / "web" / "tasks.sqlite3",
             run_root=run_root or root,
             frontend_dist=frontend_dist or root / "deploy" / "powercontext" / "evaluation" / "web" / "dist",
-            powercontext_source=powercontext_source or root / "deploy" / "powercontext",
+            powercontext_source=powercontext_source or root / "source" / "powercontext.git",
             harness_root=harness_root or root / "cache" / "swebench-pro.git",
             harness_python=harness_python or root / "venvs" / "swebench-pro-ca10a60" / "bin" / "python",
             dataset_path=dataset_path

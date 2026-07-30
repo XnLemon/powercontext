@@ -21,6 +21,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from powercontext_eval.benchmarks.swebench_pro.catalog import CatalogError, SweBenchProCatalog
+from powercontext_eval.errors import GitSourceError
+from powercontext_eval.git_source import GitSource
+from powercontext_eval.models import PowerContextRef
 from powercontext_eval.web.batches import (
     BatchCreate,
     BatchPreviewResponse,
@@ -329,6 +332,7 @@ def create_app(
     task_store = store or TaskStore(config.database_path, lease_duration=timedelta(seconds=config.lease_seconds))
     task_store.initialize()
     benchmark_catalog = catalog
+    powercontext_source = GitSource(cache_root=config.run_root / "cache" / "powercontext-git")
 
     def get_catalog() -> BenchmarkCatalog:
         nonlocal benchmark_catalog
@@ -345,6 +349,14 @@ def create_app(
         ):
             return None
         return snapshot
+
+    def resolve_powercontext_ref(ref: str) -> str:
+        requested = PowerContextRef.parse(ref)
+        if requested.kind == "commit":
+            assert requested.value is not None
+            return requested.value.lower()
+        resolved = powercontext_source.resolve(config.powercontext_source, requested)
+        return resolved.sha
 
     def historical_estimate(request: BatchPreviewRequest, *, total_tasks: int) -> BatchEstimate:
         samples = []
@@ -441,13 +453,17 @@ def create_app(
             )
         try:
             selected_catalog = get_catalog()
+            resolved_powercontext_sha = resolve_powercontext_ref(request.powercontext_ref)
             record, created = task_store.create_batch(
                 request,
                 selected_catalog.instance_ids,
+                resolved_powercontext_sha=resolved_powercontext_sha,
                 now=datetime.now(UTC),
             )
         except CatalogError:
             return _error(503, "benchmark_unavailable", "The pinned benchmark task set is unavailable.")
+        except GitSourceError:
+            return _error(503, "source_unavailable", "The selected PowerContext source could not be resolved.")
         return JSONResponse(
             status_code=201 if created else 200,
             content=_batch_payload(record),
