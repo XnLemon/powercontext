@@ -39,6 +39,7 @@ _CONTAINER_UID_GID = "2950:100"
 _CONTAINER_CODEX = "/tools/codex-dir/codex"
 _CONTAINER_UV = "/tools/uv-dir/uv"
 _CONTAINER_RECORDER = "/evaluation/record_codex_jsonl.py"
+_CONTAINER_UV_PYTHON_INSTALL_DIR = "/runtime/uv-python"
 _DEFAULT_RECORDER_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "record_codex_jsonl.py"
 LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
 _PLUGIN_RELATIVE = Path("integrations/codex/plugins/powercontext")
@@ -681,6 +682,7 @@ class DockerSut:
                     "POWERCONTEXT_EVAL_TRACE_PATH": "/runtime/pc-home/evaluation-injections.jsonl",
                     "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env",
                     "UV_CACHE_DIR": "/runtime/uv-cache",
+                    "UV_PYTHON_INSTALL_DIR": _CONTAINER_UV_PYTHON_INSTALL_DIR,
                     "UV_OFFLINE": "1",
                 },
                 secrets=credential_variants,
@@ -854,6 +856,7 @@ class DockerSut:
         common_environment = {
             **loopback_proxy_environment(relay_url),
             "UV_CACHE_DIR": "/runtime/uv-cache",
+            "UV_PYTHON_INSTALL_DIR": _CONTAINER_UV_PYTHON_INSTALL_DIR,
         }
         command = (
             "docker",
@@ -1050,6 +1053,7 @@ class DockerSut:
                     "POWERCONTEXT_CODEX_SCOPE_ID": scope,
                     "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env",
                     "UV_CACHE_DIR": "/runtime/uv-cache",
+                    "UV_PYTHON_INSTALL_DIR": _CONTAINER_UV_PYTHON_INSTALL_DIR,
                     "UV_OFFLINE": "1",
                     "PATH": (
                         "/tools/uv-dir:/tools/codex-dir:/runtime/pc-env/bin:"

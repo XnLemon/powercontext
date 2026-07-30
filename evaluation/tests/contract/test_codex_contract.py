@@ -944,9 +944,7 @@ def test_managed_python_is_kept_in_the_writable_arm_runtime(tmp_path: Path) -> N
     )
 
     uv_consumers = [
-        command
-        for command in docker.commands
-        if any(value.startswith("UV_PROJECT_ENVIRONMENT=") for value in command)
+        command for command in docker.commands if any(value.startswith("UV_PROJECT_ENVIRONMENT=") for value in command)
     ]
     assert len(uv_consumers) >= 4
     assert all("UV_PYTHON_INSTALL_DIR=/runtime/uv-python" in command for command in uv_consumers)
