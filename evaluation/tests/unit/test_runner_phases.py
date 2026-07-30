@@ -13,7 +13,9 @@ from powercontext_eval.artifacts import ArtifactStore
 from powercontext_eval.benchmarks.swebench_pro.adapter import SweBenchProInstance
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluation
 from powercontext_eval.codex import CodexOutcome
+from powercontext_eval.errors import CommandFailed
 from powercontext_eval.models import Arm
+from powercontext_eval.process import CommandResult
 from powercontext_eval.report import ReportBundle
 from powercontext_eval.runner import (
     MinimalRunResult,
@@ -191,6 +193,7 @@ def _run_with_fakes(
     *,
     image_present: bool = True,
     evaluator_failure: Exception | None = None,
+    image_cleanup_conflicts: int = 0,
     image_cleanup_failure: Exception | None = None,
     observed: dict[str, object] | None = None,
 ) -> tuple[RunConfig, MinimalRunResult, dict[str, object]]:
@@ -202,10 +205,11 @@ def _run_with_fakes(
     observed = observed if observed is not None else {}
     observed.update({"process_calls": [], "evaluator_calls": []})
     image_loaded = image_present
+    image_cleanup_attempts = 0
 
     class FakeProcess:
         def run(self, argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
-            nonlocal image_loaded
+            nonlocal image_cleanup_attempts, image_loaded
             observed["process_calls"].append((argv, kwargs))  # type: ignore[union-attr]
             if argv[:3] == ("docker", "image", "inspect"):
                 return (
@@ -220,6 +224,21 @@ def _run_with_fakes(
                 image_loaded = True
                 return SimpleNamespace(returncode=0, stdout="")
             if argv[:3] == ("docker", "image", "rm"):
+                image_cleanup_attempts += 1
+                if image_cleanup_attempts <= image_cleanup_conflicts:
+                    raise CommandFailed(
+                        "image cleanup conflict",
+                        CommandResult(
+                            argv=argv,
+                            cwd=str(kwargs["cwd"]),
+                            returncode=1,
+                            stdout="",
+                            stderr=(
+                                "conflict: unable to remove repository reference - "
+                                "container abc123 is using its referenced image"
+                            ),
+                        ),
+                    )
                 if image_cleanup_failure is not None:
                     raise image_cleanup_failure
                 image_loaded = False
@@ -346,6 +365,42 @@ def test_runner_removes_a_task_image_imported_for_a_completed_run(
 
     calls = cast(list[tuple[tuple[str, ...], dict[str, object]]], observed["process_calls"])
     assert calls[-1][0] == ("docker", "image", "rm", _instance().task_image)
+
+
+def test_runner_retries_a_transient_container_destroy_race_when_removing_an_imported_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _config, _result, observed = _run_with_fakes(
+        tmp_path,
+        monkeypatch,
+        [],
+        image_present=False,
+        image_cleanup_conflicts=1,
+    )
+
+    calls = cast(list[tuple[tuple[str, ...], dict[str, object]]], observed["process_calls"])
+    cleanup_calls = [call for call in calls if call[0][:3] == ("docker", "image", "rm")]
+    assert len(cleanup_calls) == 2
+
+
+def test_runner_surfaces_a_persistent_container_reference_after_five_cleanup_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+
+    with pytest.raises(CommandFailed, match="image cleanup conflict"):
+        _run_with_fakes(
+            tmp_path,
+            monkeypatch,
+            [],
+            image_present=False,
+            image_cleanup_conflicts=5,
+            observed=observed,
+        )
+
+    calls = cast(list[tuple[tuple[str, ...], dict[str, object]]], observed["process_calls"])
+    cleanup_calls = [call for call in calls if call[0][:3] == ("docker", "image", "rm")]
+    assert len(cleanup_calls) == 5
 
 
 def test_runner_removes_an_imported_task_image_when_evaluation_fails(
