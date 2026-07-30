@@ -128,9 +128,16 @@ def run_swebench_pro_instance(
             "task_image_id": task_image_id,
         },
     )
-    raw_copy = run_store.create_text(
+    run_store.create_text(
         "instance.jsonl",
         json.dumps(instance.official_row(), ensure_ascii=False, separators=(",", ":")) + "\n",
+    )
+    evaluator_row = instance.official_row()
+    evaluator_row["fail_to_pass"] = json.dumps(instance.fail_to_pass, ensure_ascii=False, separators=(",", ":"))
+    evaluator_row["pass_to_pass"] = json.dumps(instance.pass_to_pass, ensure_ascii=False, separators=(",", ":"))
+    evaluator_copy = run_store.create_text(
+        "evaluator-instance.jsonl",
+        json.dumps(evaluator_row, ensure_ascii=False, separators=(",", ":")) + "\n",
     )
 
     evaluator = OfficialEvaluator(process, python_executable=os.fspath(config.harness_python))
@@ -148,7 +155,7 @@ def run_swebench_pro_instance(
     emit_phase(RunPhase.VALIDATING_GOLD)
     gold = evaluator.evaluate(
         harness_root=config.harness_root,
-        raw_sample_path=raw_copy,
+        raw_sample_path=evaluator_copy,
         prediction_path=gold_prediction,
         output_dir=layout.run_artifacts / "gold" / "official",
         instance_id=instance.instance_id,
@@ -213,7 +220,7 @@ def run_swebench_pro_instance(
             )
             official[arm] = evaluator.evaluate(
                 harness_root=config.harness_root,
-                raw_sample_path=raw_copy,
+                raw_sample_path=evaluator_copy,
                 prediction_path=prediction,
                 output_dir=layout.arm_artifacts(arm) / "official",
                 instance_id=instance.instance_id,

@@ -222,7 +222,10 @@ def _run_with_fakes(
             assert isinstance(raw_sample_path, Path)
             observed["evaluator_calls"].append(kwargs)  # type: ignore[union-attr]
             retained = json.loads(raw_sample_path.read_text())
+            assert raw_sample_path.name == "evaluator-instance.jsonl"
             assert retained["instance_id"] == instance.instance_id
+            assert json.loads(retained["fail_to_pass"]) == list(instance.fail_to_pass)
+            assert json.loads(retained["pass_to_pass"]) == list(instance.pass_to_pass)
             events.append("gold" if prediction_path.parent.name == "gold" else "official")
             return OfficialEvaluation(instance.instance_id, True, "", "")
 
@@ -270,6 +273,10 @@ def test_runner_uses_arbitrary_instance_prompt_image_and_base_commit(
     assert manifest["instance_id"] == instance.instance_id
     assert manifest["task_image"] == instance.task_image
     assert manifest["task_image_id"] == IMAGE_ID
+    retained = json.loads((config.root / "runs" / result.run_id / "instance.jsonl").read_text())
+    assert retained == instance.official_row()
+    assert "fail_to_pass" not in retained
+    assert "pass_to_pass" not in retained
     sut_config = observed["sut_config"]
     assert sut_config.task_image == IMAGE_ID
     prompts = observed["prompts"]

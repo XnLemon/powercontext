@@ -122,6 +122,12 @@ install test dependencies at evaluation time. Do not pass `--block_network` for 
 package-manager setup waiting until timeout and turns valid benchmark tasks into infrastructure failures. Official
 evaluation containers receive neither the Codex credential nor the host Docker socket.
 
+Each run retains the exact pinned public row as `instance.jsonl`. The selected harness commit predates the public
+file's uppercase `FAIL_TO_PASS` and `PASS_TO_PASS` columns, so the runner separately writes
+`evaluator-instance.jsonl` with the two evaluator-required lowercase fields encoded as JSON strings. Gold, OFF, and
+ON use this derived compatibility input while reports and provenance continue to reference the unmodified public
+row.
+
 ## Install configuration and units
 
 Create the configuration without exposing its eventual contents in logs:
