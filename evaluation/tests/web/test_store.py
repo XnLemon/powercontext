@@ -561,6 +561,48 @@ def test_retry_preserves_failed_attempt_and_idempotently_creates_attempt_two(sto
     )
 
 
+def test_retry_in_a_paused_batch_preserves_pause_control(store: TaskStore) -> None:
+    batch = store.create_batch(
+        batch_request("attempt-retry-paused"),
+        ("instance_owner__repo-a", "instance_owner__repo-b"),
+        now=NOW,
+    )[0]
+    task = store.list_batch_tasks(batch.batch_id)[0]
+    claimed = store.claim_next("worker-a", now=NOW + timedelta(seconds=1))
+    assert claimed is not None
+    store.fail(
+        task.task_id,
+        "worker-a",
+        SafeFailure(
+            category=FailureCategory.CODEX_EXECUTION,
+            phase=TaskPhase.RUNNING_OFF,
+            summary="Codex process failed",
+        ),
+        now=NOW + timedelta(seconds=2),
+    )
+    store.finalize_batch_intent_after_attempt(batch.batch_id, now=NOW + timedelta(seconds=2))
+    paused = store.request_pause(
+        batch.batch_id,
+        reason=BatchPauseReason.USER,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    retry, created = store.retry_failed_task(
+        batch.batch_id,
+        task.task_id,
+        idempotency_key="retry-paused-0001",
+        now=NOW + timedelta(seconds=4),
+    )
+
+    assert created is True
+    assert retry.status is TaskStatus.QUEUED
+    current_batch = store.get_batch(batch.batch_id)
+    assert current_batch.status is BatchStatus.PAUSED
+    assert current_batch.control.intent is BatchControlIntent.PAUSE
+    assert current_batch.control.pause_reason is BatchPauseReason.USER
+    assert current_batch.control.version == paused.control.version
+
+
 @pytest.mark.parametrize(
     ("result", "label"),
     [

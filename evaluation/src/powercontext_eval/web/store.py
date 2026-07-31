@@ -743,15 +743,6 @@ class TaskStore:
                 """,
                 (TaskStatus.QUEUED.value, task_id),
             )
-            connection.execute(
-                """
-                UPDATE batches
-                SET control_intent = ?, pause_reason = NULL, control_updated_at = ?,
-                    control_version = control_version + 1
-                WHERE batch_id = ?
-                """,
-                (BatchControlIntent.RUN.value, created_at, batch_id),
-            )
             self._append_control_event(
                 connection,
                 batch_id,
