@@ -932,6 +932,40 @@ def test_plugin_locked_environment_is_prewarmed_and_injected_into_hook_path(tmp_
     assert "UV_OFFLINE=1" in task
 
 
+def test_transient_plugin_install_failure_is_retried_after_partial_codex_config_write(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class InterruptedPluginInstallDocker(TranscriptDocker):
+        interrupted = False
+
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if not self.interrupted and argv[-4:] == ("plugin", "add", "powercontext@powercontext", "--json"):
+                self.commands.append(argv)
+                self.interrupted = True
+                raise CommandFailed("injected partial plugin install", command_result("", returncode=70))
+            return super().run(argv, **kwargs)
+
+    docker = InterruptedPluginInstallDocker()
+
+    DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config,
+        Arm.ON,
+        paths,
+        b"prompt",
+        ArtifactStore(paths.result_root),
+    )
+
+    plugin_installs = [
+        command
+        for command in docker.commands
+        if command[-4:] == ("plugin", "add", "powercontext@powercontext", "--json")
+    ]
+    assert len(plugin_installs) == 2
+
+
 def test_managed_python_is_kept_in_the_writable_arm_runtime(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     config = sut_config(tmp_path)

@@ -28,7 +28,7 @@ from powercontext_eval.codex import (
     CodexOutcome,
     CodexRunner,
 )
-from powercontext_eval.errors import PowerContextEvalError
+from powercontext_eval.errors import CommandError, PowerContextEvalError
 from powercontext_eval.models import Arm
 from powercontext_eval.process import CommandResult, ProcessRunner
 
@@ -985,11 +985,18 @@ class DockerSut:
             cwd=paths.runtime,
             timeout=120,
         )
-        self._docker.run(
-            (*setup_common, "add", PLUGIN_ID, "--json"),
-            cwd=paths.runtime,
-            timeout=120,
-        )
+        for attempt in range(2):
+            try:
+                self._docker.run(
+                    (*setup_common, "add", PLUGIN_ID, "--json"),
+                    cwd=paths.runtime,
+                    timeout=120,
+                )
+            except CommandError:
+                if attempt == 1:
+                    raise
+            else:
+                break
 
     def _start_container(
         self,
