@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-01
 
-**Status:** Design approved; written specification review pending
+**Status:** Written specification approved; implementation planning complete
 
 **Builds on:** `2026-07-29-subscription-controlled-batch-execution-design.md`
 
@@ -239,6 +239,11 @@ Worker health exposes non-secret fields:
 - `task_parallelism`: configured slot capacity;
 - `active_task_pairs`: current count of active, unexpired attempt leases;
 - existing Worker freshness and health fields.
+
+After acquiring the process-owner lock, the Worker writes its validated capacity to a singleton SQLite runtime-state
+row. The Web service reads capacity and active leases from SQLite for every health response. Changing capacity and
+restarting only the Worker therefore updates the console without restarting Web; a new Worker overwrites the previous
+runtime-state value after it owns the process lock.
 
 The console shows these values in operational status so an operator can distinguish configured capacity from actual
 activity. It does not expose worker IDs, host paths, credentials, raw Codex diagnostics, or account identity.
