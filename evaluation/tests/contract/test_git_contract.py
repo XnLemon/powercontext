@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import errno
+import fcntl
+import multiprocessing
 import os
 import platform
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import BinaryIO
 
@@ -149,6 +153,71 @@ def test_resolve_refreshes_an_existing_mirror(source: GitSource, git_fixture: Gi
     assert original.sha != moved_sha
     assert refreshed.sha == moved_sha
     assert refreshed.cache_path == original.cache_path
+
+
+def test_mirror_write_lock_is_cross_process_and_canonicalizes_cache_aliases(tmp_path: Path) -> None:
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    alias_parent = tmp_path / "alias"
+    alias_parent.symlink_to(real_parent, target_is_directory=True)
+    cache_root = real_parent / "cache"
+    cache_root.mkdir()
+    alias_root = alias_parent / "cache"
+    bucket = "a" * 64
+    cache_path = cache_root / bucket
+    alias_path = alias_root / bucket
+
+    lock_path = git_source_module._mirror_lock_path(cache_root, cache_path)
+    assert git_source_module._mirror_lock_path(alias_root, alias_path) == lock_path
+
+    process_context = multiprocessing.get_context("fork")
+    parent_connection, child_connection = process_context.Pipe()
+    process = process_context.Process(target=_probe_mirror_lock, args=(lock_path, child_connection))
+    try:
+        with git_source_module._mirror_write_lock(cache_root, cache_path):
+            process.start()
+            child_connection.close()
+            assert parent_connection.poll(timeout=5)
+            assert parent_connection.recv() == "blocked"
+
+        parent_connection.send("retry")
+        assert parent_connection.poll(timeout=5)
+        assert parent_connection.recv() == "acquired"
+        process.join(timeout=5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            try:
+                parent_connection.send("retry")
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+            process.join(timeout=1)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        parent_connection.close()
+
+
+def test_resolve_enters_the_cross_process_mirror_write_lock(
+    tmp_path: Path,
+    git_fixture: GitFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = GitSource(cache_root=tmp_path / "cache")
+    real_lock = git_source_module._mirror_write_lock
+    calls: list[tuple[Path, Path]] = []
+
+    @contextmanager
+    def recording_lock(cache_root: Path, cache_path: Path) -> Iterator[None]:
+        calls.append((cache_root, cache_path))
+        with real_lock(cache_root, cache_path):
+            yield
+
+    monkeypatch.setattr(git_source_module, "_mirror_write_lock", recording_lock)
+
+    resolved = source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature"))
+
+    assert calls == [(resolved.cache_root, resolved.cache_path)]
 
 
 def test_resolve_prunes_deleted_refs_from_existing_mirror(source: GitSource, git_fixture: GitFixture) -> None:
@@ -665,6 +734,25 @@ def test_resolve_does_not_interpret_revision_syntax_as_part_of_exact_ref(
 ) -> None:
     with pytest.raises(GitSourceError, match="could not resolve"):
         source.resolve(git_fixture.remote, PowerContextRef(kind="branch", value="feature^{commit}"))
+
+
+def _probe_mirror_lock(lock_path: Path, connection: Connection) -> None:
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            connection.send("blocked")
+        else:
+            connection.send("unexpectedly-acquired")
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        assert connection.recv() == "retry"
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        connection.send("acquired")
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+        connection.close()
 
 
 class FailIfProcessRuns(ProcessRunner):

@@ -19,6 +19,10 @@ describe("App batch report navigation", () => {
     expect(screen.queryByRole("link", { name: /工作台|测试任务|验收报告|单任务详情/ })).not.toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "预览评测" })).toBeVisible();
     expect(await screen.findByText("Worker 工作中")).toBeVisible();
+    expect(screen.getByText("任务对 3 / 4")).toBeVisible();
+    expect(screen.getByText("队列 1")).toBeVisible();
+    expect(screen.getByText("Worker 按配置并行运行独立任务对")).toBeVisible();
+    expect(screen.queryByText("全局同时只运行一个任务，其余任务排队")).not.toBeInTheDocument();
   });
 
   it("describes an inactive worker lease as idle instead of disconnected", async () => {
@@ -28,6 +32,8 @@ describe("App batch report navigation", () => {
         worker_lease_active: false,
         queued_tasks: 0,
         running_tasks: 0,
+        active_task_pairs: 0,
+        task_parallelism: 4,
       }),
     });
 

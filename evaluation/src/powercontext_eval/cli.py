@@ -80,7 +80,7 @@ def web(root_path: Annotated[Path | None, typer.Option("--root")] = None) -> Non
 
 @app.command("worker")
 def worker(root_path: Annotated[Path | None, typer.Option("--root")] = None) -> None:
-    """Run queued evaluations serially until shutdown is requested."""
+    """Run queued task pairs at configured parallelism until shutdown is requested."""
     from powercontext_eval.web.store import TaskStore
     from powercontext_eval.web.usage import CodexUsageProbe
     from powercontext_eval.web.worker import EvaluationWorker

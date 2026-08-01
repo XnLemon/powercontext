@@ -1,6 +1,8 @@
 import sqlite3
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, Literal
 
 import pytest
 
@@ -79,6 +81,85 @@ def test_initialize_is_idempotent_and_creates_expected_schema(database: Path) ->
     assert store.list_tasks(status=None, limit=10, offset=0) == []
 
 
+def test_initialize_rolls_back_entire_lease_migration_when_drop_fails(
+    database: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE tasks (
+                queue_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL UNIQUE,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                request_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                phase TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                version INTEGER NOT NULL DEFAULT 0,
+                failure_category TEXT,
+                failure_phase TEXT,
+                failure_summary TEXT,
+                result_json TEXT
+            );
+            CREATE TABLE worker_lease (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                task_id TEXT NOT NULL,
+                worker_id TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks(task_id, idempotency_key, request_json, status, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("legacy-run", "legacy-key", request("legacy-key").model_dump_json(), "running", NOW.isoformat()),
+        )
+        connection.execute(
+            "INSERT INTO worker_lease(singleton, task_id, worker_id, expires_at) VALUES (1, ?, ?, ?)",
+            ("legacy-run", "legacy-worker", (NOW + timedelta(minutes=1)).isoformat()),
+        )
+
+    original_connect = sqlite3.connect
+
+    class FailingDropConnection(sqlite3.Connection):
+        def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+            if sql.strip() == "DROP TABLE worker_lease":
+                raise RuntimeError("injected migration failure")
+            return super().execute(sql, parameters)
+
+    def connect_with_failing_drop(
+        database: Path,
+        *,
+        timeout: float = 5.0,
+        isolation_level: Literal["DEFERRED", "EXCLUSIVE", "IMMEDIATE"] | None = "DEFERRED",
+    ) -> sqlite3.Connection:
+        return original_connect(
+            database,
+            timeout=timeout,
+            isolation_level=isolation_level,
+            factory=FailingDropConnection,
+        )
+
+    monkeypatch.setattr("powercontext_eval.web.store.sqlite3.connect", connect_with_failing_drop)
+    store = TaskStore(database, lease_duration=timedelta(seconds=60))
+
+    with pytest.raises(RuntimeError, match="injected migration failure"):
+        store.initialize()
+
+    with original_connect(database) as connection:
+        tables = {
+            row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+    assert "worker_lease" in tables
+    assert "worker_leases" not in tables
+    assert "task_attempts" not in tables
+
+
 def test_initialize_migrates_legacy_task_without_deleting_it(database: Path) -> None:
     with sqlite3.connect(database) as connection:
         connection.executescript(
@@ -141,10 +222,119 @@ def test_initialize_migrates_legacy_task_without_deleting_it(database: Path) -> 
     renewed = store.heartbeat("run-legacy", "legacy-worker", now=NOW + timedelta(seconds=30))
     assert renewed.version == legacy.version + 1
     with sqlite3.connect(database) as connection:
-        lease_columns = [row[1] for row in connection.execute("PRAGMA table_info(worker_lease)").fetchall()]
-    assert "attempt_id" in lease_columns
-    assert "task_id" not in lease_columns
+        tables = {
+            row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        lease_columns = [row[1] for row in connection.execute("PRAGMA table_info(worker_leases)").fetchall()]
+    assert "worker_lease" not in tables
+    assert lease_columns == ["attempt_id", "worker_id", "expires_at"]
     assert store.list_batches() == []
+
+
+def test_initialize_migrates_current_attempt_lease_without_losing_owner(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE tasks (
+                queue_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL UNIQUE,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                request_json TEXT NOT NULL,
+                batch_id TEXT,
+                instance_id TEXT,
+                source_index INTEGER,
+                status TEXT NOT NULL,
+                phase TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                version INTEGER NOT NULL DEFAULT 0,
+                failure_category TEXT,
+                failure_phase TEXT,
+                failure_summary TEXT,
+                result_json TEXT
+            );
+            CREATE TABLE task_attempts (
+                attempt_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                attempt_id TEXT NOT NULL UNIQUE,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                attempt_number INTEGER NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                phase TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                version INTEGER NOT NULL DEFAULT 0,
+                failure_category TEXT,
+                failure_phase TEXT,
+                failure_summary TEXT,
+                result_json TEXT,
+                UNIQUE(task_id, attempt_number)
+            );
+            CREATE TABLE worker_lease (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                worker_id TEXT NOT NULL,
+                attempt_id TEXT NOT NULL UNIQUE REFERENCES task_attempts(attempt_id),
+                expires_at TEXT NOT NULL
+            );
+            """
+        )
+        task = request("current-lease-key")
+        connection.execute(
+            """
+            INSERT INTO tasks(
+                task_id, idempotency_key, request_json, instance_id, status, created_at, started_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run-current",
+                task.idempotency_key,
+                task.model_dump_json(),
+                task.instance_id,
+                TaskStatus.RUNNING.value,
+                NOW.isoformat(),
+                NOW.isoformat(),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO task_attempts(
+                attempt_id, task_id, attempt_number, idempotency_key, status, created_at, started_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run-current.attempt-0001",
+                "run-current",
+                1,
+                "run-current.attempt-0001",
+                TaskStatus.RUNNING.value,
+                NOW.isoformat(),
+                NOW.isoformat(),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO worker_lease(singleton, worker_id, attempt_id, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (1, "current-worker", "run-current.attempt-0001", (NOW + timedelta(seconds=60)).isoformat()),
+        )
+
+    store = TaskStore(database, lease_duration=timedelta(seconds=60))
+    store.initialize()
+    store.initialize()
+
+    renewed = store.heartbeat("run-current", "current-worker", now=NOW + timedelta(seconds=30))
+    assert renewed.status is TaskStatus.RUNNING
+    with sqlite3.connect(database) as connection:
+        lease = connection.execute("SELECT * FROM worker_leases").fetchone()
+        singular = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_lease'"
+        ).fetchone()
+    assert lease[:2] == ("run-current.attempt-0001", "current-worker")
+    assert datetime.fromisoformat(lease[2]) == NOW + timedelta(seconds=90)
+    assert singular is None
 
 
 def test_initialize_migrates_current_cancelled_batch_control_without_rewriting_children(database: Path) -> None:
@@ -379,10 +569,195 @@ def test_pause_and_cancel_wait_for_the_running_benchmark_task_boundary(store: Ta
         TaskStatus.FAILED,
         TaskStatus.CANCELLED,
     ]
-    assert [event.event_type for event in store.list_control_events(cancelled_batch.batch_id)][-2:] == [
+    assert [event.event_type for event in store.list_control_events(cancelled_batch.batch_id)][-3:] == [
         BatchControlEventType.CANCEL_REQUESTED,
+        BatchControlEventType.INFRASTRUCTURE_FAILURE,
         BatchControlEventType.CANCELLED,
     ]
+
+
+def test_infrastructure_failure_atomically_pauses_batch_without_stopping_other_running_pair(
+    store: TaskStore,
+) -> None:
+    batch = store.create_batch(
+        batch_request("infrastructure-failure-pause"),
+        (
+            "instance_owner__repo-a",
+            "instance_owner__repo-b",
+            "instance_owner__repo-c",
+        ),
+        now=NOW,
+    )[0]
+    first = store.claim_next("worker-a", max_concurrency=2, now=NOW + timedelta(seconds=1))
+    second = store.claim_next("worker-b", max_concurrency=2, now=NOW + timedelta(seconds=1))
+    assert first is not None
+    assert second is not None
+
+    store.fail(
+        first.task_id,
+        "worker-a",
+        SafeFailure(
+            category=FailureCategory.CODEX_EXECUTION,
+            phase=TaskPhase.RUNNING_OFF,
+            summary="Codex process failed",
+        ),
+        now=NOW + timedelta(seconds=2),
+    )
+
+    pausing = store.get_batch(batch.batch_id)
+    assert pausing.status is BatchStatus.PAUSING
+    assert pausing.control.intent is BatchControlIntent.PAUSE
+    assert pausing.control.pause_reason is BatchPauseReason.INFRASTRUCTURE_FAILURE
+    assert [task.status for task in store.list_batch_tasks(batch.batch_id)] == [
+        TaskStatus.FAILED,
+        TaskStatus.RUNNING,
+        TaskStatus.QUEUED,
+    ]
+    assert store.claim_next("worker-c", max_concurrency=2, now=NOW + timedelta(seconds=3)) is None
+    event = store.list_control_events(batch.batch_id)[-1]
+    assert event.event_type is BatchControlEventType.INFRASTRUCTURE_FAILURE
+    assert event.actor == "system"
+    assert event.details == {
+        "attempt_id": first.attempt_id,
+        "failure_category": FailureCategory.CODEX_EXECUTION.value,
+        "task_id": first.task_id,
+    }
+
+    store.succeed(
+        second.task_id,
+        "worker-b",
+        TaskResult(
+            artifact_dir="/safe/artifacts",
+            report_path="/safe/artifacts/report.md",
+            off_resolved=False,
+            on_resolved=True,
+        ),
+        now=NOW + timedelta(seconds=4),
+    )
+    paused = store.finalize_batch_intent_after_attempt(batch.batch_id, now=NOW + timedelta(seconds=4))
+    assert paused.status is BatchStatus.PAUSED
+
+
+def test_expired_batch_lease_pauses_batch_and_preserves_other_running_pair(store: TaskStore) -> None:
+    batch = store.create_batch(
+        batch_request("expired-infrastructure-failure-pause"),
+        (
+            "instance_owner__repo-a",
+            "instance_owner__repo-b",
+            "instance_owner__repo-c",
+        ),
+        now=NOW,
+    )[0]
+    first = store.claim_next("worker-a", max_concurrency=2, now=NOW)
+    second = store.claim_next("worker-b", max_concurrency=2, now=NOW)
+    assert first is not None
+    assert second is not None
+    store.heartbeat(second.task_id, "worker-b", now=NOW + timedelta(seconds=30))
+
+    recovered = store.recover_expired(now=NOW + timedelta(seconds=61))
+
+    assert recovered == [first.task_id]
+    pausing = store.get_batch(batch.batch_id)
+    assert pausing.status is BatchStatus.PAUSING
+    assert pausing.control.intent is BatchControlIntent.PAUSE
+    assert pausing.control.pause_reason is BatchPauseReason.INFRASTRUCTURE_FAILURE
+    assert [task.status for task in store.list_batch_tasks(batch.batch_id)] == [
+        TaskStatus.INTERRUPTED,
+        TaskStatus.RUNNING,
+        TaskStatus.QUEUED,
+    ]
+    assert store.claim_next("worker-c", max_concurrency=2, now=NOW + timedelta(seconds=61)) is None
+    event = store.list_control_events(batch.batch_id)[-1]
+    assert event.event_type is BatchControlEventType.INFRASTRUCTURE_FAILURE
+    assert event.details == {
+        "attempt_id": first.attempt_id,
+        "failure_category": FailureCategory.WORKER_INTERRUPTION.value,
+        "task_id": first.task_id,
+    }
+
+
+def test_standalone_infrastructure_failure_does_not_pause_unrelated_batch(store: TaskStore) -> None:
+    standalone, _ = store.create(request("standalone-infrastructure-failure"), now=NOW)
+    batch = store.create_batch(
+        batch_request("standalone-failure-batch"),
+        ("instance_owner__repo-a",),
+        now=NOW,
+    )[0]
+    claimed = store.claim_next("worker-a", max_concurrency=2, now=NOW + timedelta(seconds=1))
+    assert claimed is not None and claimed.task_id == standalone.task_id
+
+    store.fail(
+        standalone.task_id,
+        "worker-a",
+        SafeFailure(
+            category=FailureCategory.CODEX_EXECUTION,
+            phase=TaskPhase.RUNNING_OFF,
+            summary="Codex process failed",
+        ),
+        now=NOW + timedelta(seconds=2),
+    )
+
+    current = store.get_batch(batch.batch_id)
+    assert current.control.intent is BatchControlIntent.RUN
+    assert current.control.pause_reason is None
+
+
+def test_each_parallel_failure_records_event_without_overwriting_user_pause(store: TaskStore) -> None:
+    batch = store.create_batch(
+        batch_request("parallel-failures-under-user-pause"),
+        ("instance_owner__repo-a", "instance_owner__repo-b"),
+        now=NOW,
+    )[0]
+    first = store.claim_next("worker-a", max_concurrency=2, now=NOW + timedelta(seconds=1))
+    second = store.claim_next("worker-b", max_concurrency=2, now=NOW + timedelta(seconds=1))
+    assert first is not None
+    assert second is not None
+    store.request_pause(batch.batch_id, reason=BatchPauseReason.USER, now=NOW + timedelta(seconds=2))
+
+    for offset, (task, worker) in enumerate(((first, "worker-a"), (second, "worker-b")), start=3):
+        store.fail(
+            task.task_id,
+            worker,
+            SafeFailure(
+                category=FailureCategory.CODEX_EXECUTION,
+                phase=TaskPhase.RUNNING_OFF,
+                summary="Codex process failed",
+            ),
+            now=NOW + timedelta(seconds=offset),
+        )
+
+    current = store.get_batch(batch.batch_id)
+    assert current.status is BatchStatus.COMPLETED
+    assert current.control.intent is BatchControlIntent.PAUSE
+    assert current.control.pause_reason is BatchPauseReason.USER
+    failure_events = [
+        event
+        for event in store.list_control_events(batch.batch_id)
+        if event.event_type is BatchControlEventType.INFRASTRUCTURE_FAILURE
+    ]
+    assert [event.details["task_id"] for event in failure_events] == [first.task_id, second.task_id]
+
+
+def test_each_simultaneously_expired_batch_lease_records_its_own_event(store: TaskStore) -> None:
+    batch = store.create_batch(
+        batch_request("parallel-expired-events"),
+        ("instance_owner__repo-a", "instance_owner__repo-b", "instance_owner__repo-c"),
+        now=NOW,
+    )[0]
+    first = store.claim_next("worker-a", max_concurrency=2, now=NOW)
+    second = store.claim_next("worker-b", max_concurrency=2, now=NOW)
+    assert first is not None
+    assert second is not None
+
+    assert store.recover_expired(now=NOW + timedelta(seconds=61)) == [first.task_id, second.task_id]
+
+    failure_events = [
+        event
+        for event in store.list_control_events(batch.batch_id)
+        if event.event_type is BatchControlEventType.INFRASTRUCTURE_FAILURE
+    ]
+    assert [event.details["attempt_id"] for event in failure_events] == [first.attempt_id, second.attempt_id]
+    assert store.get_batch(batch.batch_id).control.pause_reason is BatchPauseReason.INFRASTRUCTURE_FAILURE
 
 
 def test_cancel_without_a_running_task_marks_queued_tasks_once(store: TaskStore) -> None:
@@ -555,7 +930,10 @@ def test_retry_preserves_failed_attempt_and_idempotently_creates_attempt_two(sto
     assert current.status is TaskStatus.QUEUED
     assert current.attempt_id == retry.attempt_id
     assert current.attempt_count == 2
-    assert store.get_batch(batch.batch_id).status is BatchStatus.QUEUED
+    current_batch = store.get_batch(batch.batch_id)
+    assert current_batch.status is BatchStatus.PAUSED
+    assert current_batch.control.intent is BatchControlIntent.PAUSE
+    assert current_batch.control.pause_reason is BatchPauseReason.INFRASTRUCTURE_FAILURE
     assert [event.event_type for event in store.list_control_events(batch.batch_id)][-1] is (
         BatchControlEventType.TASK_RETRY_REQUESTED
     )
@@ -570,6 +948,11 @@ def test_retry_in_a_paused_batch_preserves_pause_control(store: TaskStore) -> No
     task = store.list_batch_tasks(batch.batch_id)[0]
     claimed = store.claim_next("worker-a", now=NOW + timedelta(seconds=1))
     assert claimed is not None
+    paused = store.request_pause(
+        batch.batch_id,
+        reason=BatchPauseReason.USER,
+        now=NOW + timedelta(seconds=2),
+    )
     store.fail(
         task.task_id,
         "worker-a",
@@ -578,14 +961,9 @@ def test_retry_in_a_paused_batch_preserves_pause_control(store: TaskStore) -> No
             phase=TaskPhase.RUNNING_OFF,
             summary="Codex process failed",
         ),
-        now=NOW + timedelta(seconds=2),
-    )
-    store.finalize_batch_intent_after_attempt(batch.batch_id, now=NOW + timedelta(seconds=2))
-    paused = store.request_pause(
-        batch.batch_id,
-        reason=BatchPauseReason.USER,
         now=NOW + timedelta(seconds=3),
     )
+    store.finalize_batch_intent_after_attempt(batch.batch_id, now=NOW + timedelta(seconds=3))
 
     retry, created = store.retry_failed_task(
         batch.batch_id,
@@ -815,6 +1193,8 @@ def test_queue_position_and_read_only_health_snapshot(store: TaskStore) -> None:
     assert store.queue_position(second.task_id) == 1
     assert store.health_snapshot(now=NOW + timedelta(seconds=1)) == {
         "worker_lease_active": False,
+        "active_task_pairs": 0,
+        "task_parallelism": 1,
         "queued_tasks": 1,
         "running_tasks": 0,
     }
@@ -827,6 +1207,20 @@ def test_health_observes_only_nonexpired_worker_lease(store: TaskStore) -> None:
     assert store.health_snapshot(now=NOW + timedelta(seconds=30))["worker_lease_active"] is True
     assert store.health_snapshot(now=NOW + timedelta(seconds=61))["worker_lease_active"] is False
     assert store.get(task.task_id).status is TaskStatus.RUNNING
+
+
+def test_worker_capacity_is_published_without_web_configuration_reload(store: TaskStore) -> None:
+    assert store.health_snapshot(now=NOW)["task_parallelism"] == 1
+
+    store.record_worker_capacity(4, now=NOW + timedelta(seconds=1))
+
+    assert store.health_snapshot(now=NOW + timedelta(seconds=2))["task_parallelism"] == 4
+
+
+@pytest.mark.parametrize("value", [0, 5, True])
+def test_worker_capacity_rejects_out_of_range_values(store: TaskStore, value: object) -> None:
+    with pytest.raises(ValueError):
+        store.record_worker_capacity(value, now=NOW)  # ty: ignore[invalid-argument-type]
 
 
 def test_claim_is_fifo_atomic_and_globally_excludes_other_connection(database: Path) -> None:
@@ -845,6 +1239,90 @@ def test_claim_is_fifo_atomic_and_globally_excludes_other_connection(database: P
     assert claimed.version == first.version + 1
     assert second_store.claim_next("worker-b", now=NOW + timedelta(seconds=2)) is None
     assert second_store.list_tasks(status=TaskStatus.QUEUED, limit=10, offset=0)[0].task_id == second.task_id
+
+
+def test_claim_allows_exactly_four_concurrent_task_pairs(store: TaskStore) -> None:
+    created = [store.create(request(f"parallel-claim-{index}"), now=NOW)[0] for index in range(5)]
+
+    claimed = [
+        store.claim_next(f"worker-{index}", now=NOW + timedelta(seconds=1), max_concurrency=4) for index in range(4)
+    ]
+
+    assert [task.task_id for task in claimed if task is not None] == [task.task_id for task in created[:4]]
+    assert store.claim_next("worker-5", now=NOW + timedelta(seconds=1), max_concurrency=4) is None
+    health = store.health_snapshot(now=NOW + timedelta(seconds=1))
+    assert health["active_task_pairs"] == 4
+    assert health["running_tasks"] == 4
+    assert [task.task_id for task in store.list_tasks(status=TaskStatus.QUEUED, limit=10, offset=0)] == [
+        created[4].task_id
+    ]
+
+
+def test_finishing_one_of_four_leases_releases_only_its_capacity(store: TaskStore) -> None:
+    tasks = [store.create(request(f"release-one-{index}"), now=NOW)[0] for index in range(4)]
+    claimed = [store.claim_next(f"worker-{index}", max_concurrency=4, now=NOW) for index in range(4)]
+    assert all(task is not None for task in claimed)
+
+    store.succeed(
+        tasks[0].task_id,
+        "worker-0",
+        TaskResult(
+            artifact_dir="/safe/artifacts",
+            report_path="/safe/artifacts/report.md",
+            off_resolved=False,
+            on_resolved=True,
+        ),
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert store.health_snapshot(now=NOW + timedelta(seconds=1))["active_task_pairs"] == 3
+    assert [store.get(task.task_id).status for task in tasks] == [
+        TaskStatus.SUCCEEDED,
+        TaskStatus.RUNNING,
+        TaskStatus.RUNNING,
+        TaskStatus.RUNNING,
+    ]
+
+
+def test_one_worker_cannot_hold_two_active_leases(store: TaskStore) -> None:
+    first, _ = store.create(request("one-worker-first"), now=NOW)
+    second, _ = store.create(request("one-worker-second"), now=NOW)
+
+    claimed = store.claim_next("same-worker", max_concurrency=4, now=NOW)
+
+    assert claimed is not None and claimed.task_id == first.task_id
+    assert store.claim_next("same-worker", max_concurrency=4, now=NOW) is None
+    assert store.get(second.task_id).status is TaskStatus.QUEUED
+    assert store.health_snapshot(now=NOW)["active_task_pairs"] == 1
+
+
+def test_concurrent_claim_race_never_exceeds_capacity_or_duplicates_task(database: Path) -> None:
+    creator = TaskStore(database, lease_duration=timedelta(seconds=60))
+    creator.initialize()
+    for index in range(5):
+        creator.create(request(f"parallel-race-{index}"), now=NOW)
+    barrier = threading.Barrier(5)
+    claimed: list[str] = []
+    claimed_lock = threading.Lock()
+
+    def claim(index: int) -> None:
+        store = TaskStore(database, lease_duration=timedelta(seconds=60))
+        barrier.wait()
+        task = store.claim_next(f"race-worker-{index}", now=NOW + timedelta(seconds=1), max_concurrency=4)
+        if task is not None:
+            with claimed_lock:
+                claimed.append(task.task_id)
+
+    threads = [threading.Thread(target=claim, args=(index,)) for index in range(5)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(claimed) == 4
+    assert len(set(claimed)) == 4
+    assert creator.health_snapshot(now=NOW + timedelta(seconds=1))["active_task_pairs"] == 4
 
 
 def test_claim_clamps_stale_worker_time_to_task_creation_and_lease_chronology(store: TaskStore) -> None:

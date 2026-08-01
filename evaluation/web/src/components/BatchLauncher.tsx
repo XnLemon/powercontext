@@ -143,7 +143,7 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
         <strong>SWE-bench Pro public v2</strong>
         <span>731 个任务，每个任务依次运行 OFF / ON</span>
         <span>gpt-5.6-sol · medium</span>
-        <span>全局同时只运行一个任务，其余任务排队</span>
+        <span>Worker 按配置并行运行独立任务对</span>
       </div>
 
       <form onSubmit={requestPreview} className="launcher-form">

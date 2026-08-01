@@ -13,7 +13,8 @@ One report is one immutable `swebench-pro-public-v2` batch:
 - one PowerContext revision resolved to one full commit SHA for the complete batch;
 - one `gpt-5.6-sol` / `medium` Codex configuration;
 - one OFF and one ON execution for every task;
-- exactly one physical OFF/ON task pair running globally while all other children remain in the durable queue.
+- between one and four physical OFF/ON task pairs running concurrently, with every other child retained in the
+  durable queue.
 
 The pinned dataset SHA-256 is
 `b5b2462bfbf5aeb2cb7ba7d215778a1768b85f9d7ad7f748546c7f80a0ad1510`. The catalog refuses to start if the
@@ -33,20 +34,40 @@ If representative measurements do not yet exist, state that the estimate is unav
 is subscription-controlled here, so the console does not display currency or pretend that it has an account balance.
 A real batch requires explicit final approval after the non-mutating preview shows these facts.
 
-## Deferred TODO: configurable task-pair parallelism
+## Configurable task-pair parallelism
 
-Keep the first complete 731-task OFF/ON run strictly serial so that it produces a stable baseline before scheduler
-parallelism changes. Do not change the concurrency of an in-progress baseline batch.
+`POWERCONTEXT_EVAL_TASK_PARALLELISM` accepts an integer from `1` through `4` and defaults to `1`. Setting it to `4`
+runs up to four concurrent task pairs. Parallelism is across independent SWE-bench tasks only: each task remains one
+ordered OFF-then-ON comparison pair, followed by official evaluation and reporting.
 
-After the serial baseline and its aggregate report have been accepted, add configurable parallelism across independent
-SWE-bench tasks. Preserve the following constraints:
+Each concurrent task has its own workspace, runtime, Codex home, PowerContext home, Docker network, and scope. Leases
+are per immutable attempt, while one supervisor owns the configured slots. Codex subscription usage and rate limits
+remain account-wide rather than per slot.
 
-- one task remains an ordered OFF-then-ON comparison pair;
-- each concurrent task keeps its own workspace, runtime, Codex home, PowerContext home, Docker network, and scope;
-- pause and usage thresholds stop new claims without killing active task pairs;
-- Codex subscription usage and rate limits remain account-wide rather than per worker;
-- start validation at four concurrent task pairs, then consider a higher value only after checking isolation, Docker
-  cleanup, official evaluation, host load, and subscription throttling.
+Pause, cancel, an account-usage threshold, usage unavailability, and an infrastructure failure stop new claims.
+Active task pairs finish their current OFF/ON boundary; they are not killed midway. An infrastructure failure
+atomically pauses a runnable batch and records a sanitized control event, while already-active peers finish. Resume
+is always explicit after the failure is resolved, usage is freshly observed below the threshold, and service health
+is verified.
+
+`/api/health` reports `active_task_pairs` and `task_parallelism` in addition to the queue counts. Validate a capacity
+increase with this controlled four-task wave:
+
+1. keep the batch paused with zero running tasks, set `POWERCONTEXT_EVAL_TASK_PARALLELISM=4`, and restart only the
+   evaluation Worker;
+2. verify Web/Worker and existing services are healthy, account usage is freshly below the threshold, and health
+   reports `active_task_pairs: 0` with `task_parallelism: 4`;
+3. explicitly resume the batch, observe exactly four distinct running attempts, then immediately request pause so no
+   fifth task is claimed;
+4. let the four active task pairs finish naturally and wait until health and the database both report zero running;
+5. verify isolated workspaces, runtimes, Codex homes, PowerContext homes, Docker networks and scopes, official
+   evaluation, cleanup, retained evidence, service health, and a fresh below-threshold usage observation;
+6. only after every check passes, explicitly resume sustained processing at four task pairs.
+
+If the wave has an infrastructure failure, keep the batch paused, preserve every failed attempt and its evidence,
+set parallelism back to `1`, restart only the Worker, diagnose and fix the failure, and retry only the infrastructure
+failure items. Do not resume other queued work until those retries succeed and all safety checks pass. Do not raise
+the supported maximum above four from an in-progress evaluation.
 
 ## Subscription usage and batch controls
 
@@ -61,6 +82,7 @@ The deployment defaults are:
 | `POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS` | `60` | Normal interval between account-usage observations |
 | `POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS` | `15` | Maximum duration of one bounded usage probe |
 | `POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS` | `120` | Oldest observation accepted by preview, start, resume, and retry |
+| `POWERCONTEXT_EVAL_TASK_PARALLELISM` | `1` | Concurrent independent OFF/ON task pairs; allowed range is 1 through 4 |
 
 Pause and cancel use a complete SWE-bench task as the boundary: the active OFF/ON pair finishes, then pause starts no
 new child, while cancel marks every remaining unstarted child cancelled. They do not kill an arm midway. Resume is
@@ -207,10 +229,11 @@ journalctl -u powercontext-eval-web.service -u powercontext-eval-worker.service 
 curl --fail --show-error http://100.88.99.11:8787/api/health
 ```
 
-Submitting work adds it to the SQLite-backed queue. One worker atomically leases a queued task for
-`POWERCONTEXT_EVAL_LEASE_SECONDS`; polling is controlled by `POWERCONTEXT_EVAL_POLL_SECONDS`. A service crash causes
-systemd to restart it after five seconds. An interrupted lease becomes eligible again after expiry, so restart can
-delay a task but does not require manual queue editing. The web and worker share only the SQLite database and can
+Submitting work adds it to the SQLite-backed queue. The Worker supervisor runs the configured number of task-pair
+slots; every slot atomically leases at most one queued attempt for `POWERCONTEXT_EVAL_LEASE_SECONDS`. Polling is
+controlled by `POWERCONTEXT_EVAL_POLL_SECONDS`. A service crash causes systemd to restart it after five seconds. An
+interrupted lease is recovered independently after expiry; a batch infrastructure recovery fails closed by pausing
+new claims and preserving the failed attempt for diagnosis. The Web and Worker share only the SQLite database and can
 restart independently.
 
 Persistent state and artifacts live under `/data/powercontext-eval`:
@@ -304,6 +327,10 @@ To validate preview and the task-boundary control contract without accidentally 
 This preview and deterministic control check is a deployment check, not authorization to run the real benchmark.
 
 ## Rollback
+
+To roll back only concurrency, keep the batch paused, set `POWERCONTEXT_EVAL_TASK_PARALLELISM=1`, and restart only the
+evaluation Worker. Verify `/api/health` reports `task_parallelism: 1` before an explicit resume; changing capacity
+never resumes a batch automatically.
 
 Stop the two console units, check out the previously accepted commit received in the m0 bare repository, rebuild the
 frontend on m0, resync the frozen evaluation environment, then start the units and repeat the health and queue checks:

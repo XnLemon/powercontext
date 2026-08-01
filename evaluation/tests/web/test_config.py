@@ -72,6 +72,7 @@ def test_web_config_defaults_match_m0_layout() -> None:
     assert config.usage_probe_seconds == 60
     assert config.usage_probe_timeout_seconds == 15
     assert config.usage_snapshot_max_age_seconds == 120
+    assert config.task_parallelism == 1
 
 
 @pytest.mark.parametrize(
@@ -83,6 +84,9 @@ def test_web_config_defaults_match_m0_layout() -> None:
         ("port", 65536),
         ("lease_seconds", 0),
         ("poll_seconds", 0.0),
+        ("task_parallelism", 0),
+        ("task_parallelism", 5),
+        ("task_parallelism", "1"),
     ],
 )
 def test_web_config_direct_construction_rejects_invalid_values(tmp_path: Path, field: str, value: object) -> None:
@@ -106,6 +110,7 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
         "POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS": "90",
         "POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS": "20",
         "POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS": "180",
+        "POWERCONTEXT_EVAL_TASK_PARALLELISM": "4",
         "ROOT": "/ignored",
         "PORT": "1",
         "PROXY_URL": "https://ignored.invalid",
@@ -123,6 +128,7 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
     assert config.usage_probe_seconds == 90
     assert config.usage_probe_timeout_seconds == 20
     assert config.usage_snapshot_max_age_seconds == 180
+    assert config.task_parallelism == 4
 
 
 @pytest.mark.parametrize(
@@ -165,6 +171,8 @@ def test_web_config_rejects_relative_paths(tmp_path: Path, name: str, value: str
         ("POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS", "61"),
         ("POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS", "9"),
         ("POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS", "7201"),
+        ("POWERCONTEXT_EVAL_TASK_PARALLELISM", "0"),
+        ("POWERCONTEXT_EVAL_TASK_PARALLELISM", "5"),
     ],
 )
 def test_web_config_rejects_invalid_numeric_settings(tmp_path: Path, name: str, value: str) -> None:
@@ -182,6 +190,8 @@ def test_web_config_rejects_invalid_numeric_settings(tmp_path: Path, name: str, 
         ("POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS", "often"),
         ("POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS", "later"),
         ("POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS", "fresh"),
+        ("POWERCONTEXT_EVAL_TASK_PARALLELISM", "many"),
+        ("POWERCONTEXT_EVAL_TASK_PARALLELISM", "1.0"),
     ],
 )
 def test_web_config_rejects_malformed_numeric_environment_values(tmp_path: Path, name: str, value: str) -> None:

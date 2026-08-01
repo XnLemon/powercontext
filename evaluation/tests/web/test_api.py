@@ -6,7 +6,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,10 +14,11 @@ from httpx import Response
 from starlette.requests import Request
 
 from powercontext_eval.artifacts import ArmState
+from powercontext_eval.benchmarks.swebench_pro.adapter import SweBenchProInstance
 from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, TestGroupReport
 from powercontext_eval.web.api import TaskEventStream, create_app
 from powercontext_eval.web.config import WebConfig
-from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskCreate, TaskPhase, TaskResult
+from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskCreate, TaskPhase, TaskRecord, TaskResult
 from powercontext_eval.web.store import TaskStore
 from powercontext_eval.web.usage import UsageSnapshot
 
@@ -87,6 +88,8 @@ def test_health_and_capabilities_are_server_owned_and_secret_free(client: TestCl
     assert health.json() == {
         "service": "ok",
         "worker_lease_active": False,
+        "active_task_pairs": 0,
+        "task_parallelism": 1,
         "queued_tasks": 0,
         "running_tasks": 0,
     }
@@ -99,6 +102,29 @@ def test_health_and_capabilities_are_server_owned_and_secret_free(client: TestCl
     }
     assert_safe(health)
     assert_safe(capabilities)
+
+
+def test_health_reads_four_active_pairs_and_published_capacity_from_store(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    observed = datetime.now(UTC)
+    store.record_worker_capacity(4, now=observed)
+    for index in range(4):
+        store.create(TaskCreate.model_validate(payload(f"health-pair-{index}")), now=observed)
+        assert store.claim_next(f"health-worker-{index}", max_concurrency=4, now=observed) is not None
+
+    health = TestClient(create_app(config, store)).get("/api/health")
+
+    assert health.json() == {
+        "service": "ok",
+        "worker_lease_active": True,
+        "active_task_pairs": 4,
+        "task_parallelism": 4,
+        "queued_tasks": 0,
+        "running_tasks": 4,
+    }
+    assert_safe(health)
 
 
 def test_newest_succeeded_query_orders_before_limit_and_default_remains_fifo(
@@ -816,8 +842,8 @@ class _BatchCatalog:
             for letter, instance_id in zip("abcde", self.instance_ids, strict=True)
         }
 
-    def require(self, instance_id: str) -> object:
-        return self.instances[instance_id]
+    def require(self, instance_id: str) -> SweBenchProInstance:
+        return cast(SweBenchProInstance, self.instances[instance_id])
 
 
 def _batch_payload(key: str = "batch-api-key") -> dict[str, object]:
@@ -845,7 +871,7 @@ def _write_batch_artifacts(
     run_dir = config.run_root / "runs" / task_id
     run_dir.mkdir(parents=True)
 
-    def arm(name: str, resolved: bool, tokens: tuple[int, int]) -> ArmReport:
+    def arm(name: Literal["off", "on"], resolved: bool, tokens: tuple[int, int]) -> ArmReport:
         failed = () if resolved else (f"test_fix_{instance_id[-1]}",)
         return ArmReport(
             arm=name,
@@ -925,7 +951,7 @@ def _finish_batch(
     config: WebConfig,
     store: TaskStore,
     batch_id: str,
-) -> list[object]:
+) -> list[TaskRecord]:
     outcomes = [
         (False, True, (100, 10), (80, 8)),
         (True, False, (120, 12), (160, 16)),
@@ -1226,7 +1252,8 @@ def test_batch_report_reconciles_resolution_pairs_failures_and_total_tokens(
     }
     assert report["tokens"]["output"]["off"] == 44
     assert report["tokens"]["total"]["on"] == 478
-    assert report["control"]["intent"] == "run"
+    assert report["control"]["intent"] == "pause"
+    assert report["control"]["pause_reason"] == "infrastructure_failure"
     assert report["latest_usage"]["used_percent"] == 9
     assert report["estimate"] == {
         "quality": "preliminary",
@@ -1334,6 +1361,11 @@ def test_batch_report_uses_the_successful_retry_once_and_reads_its_attempt_artif
         now=started + timedelta(seconds=2),
     )
     assert created is True
+    store.request_resume(
+        batch["batch_id"],
+        snapshot=_usage(9, observed_at=started + timedelta(seconds=3)),
+        now=started + timedelta(seconds=3),
+    )
     claimed_retry = store.claim_next("batch-worker", now=started + timedelta(seconds=3))
     assert claimed_retry is not None and claimed_retry.attempt_id == retry.attempt_id
     _write_batch_artifacts(

@@ -153,6 +153,8 @@ export interface HealthResponse {
   worker_lease_active: boolean;
   queued_tasks: number;
   running_tasks: number;
+  active_task_pairs: number;
+  task_parallelism: number;
 }
 
 export interface ArmResponse {

@@ -1,4 +1,4 @@
-"""Serial orchestration for queued evaluation tasks."""
+"""Supervised task-pair orchestration for queued evaluations."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import stat
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -35,12 +35,13 @@ from powercontext_eval.runner import (
     run_minimal_swebench_pro,
     run_swebench_pro_instance,
 )
+from powercontext_eval.web.claiming import ClaimCoordinator
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.controls import BatchPauseReason
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskPhase, TaskRecord, TaskResult
 from powercontext_eval.web.reporting import ReportingError, load_report
 from powercontext_eval.web.store import TaskConflict, TaskOwnershipError, TaskStore
-from powercontext_eval.web.usage import CodexUsageProbe, UsageSnapshot, UsageUnavailable, is_fresh
+from powercontext_eval.web.usage import CodexUsageProbe, UsageSnapshot
 
 _INTERNAL_SUMMARY = "The evaluation worker failed unexpectedly. Inspect the retained m0 logs."
 _REPORT_SUMMARY = "Evaluation report validation failed."
@@ -68,14 +69,15 @@ class UsageProbe(Protocol):
     def read(self, *, now: datetime) -> UsageSnapshot: ...
 
 
-class EvaluationWorker:
-    """Claim and execute at most one queued evaluation at a time."""
+class TaskPairWorker:
+    """Claim and execute complete OFF/ON task pairs in one isolated slot."""
 
     def __init__(
         self,
         config: WebConfig,
         store: TaskStore,
         *,
+        coordinator: ClaimCoordinator | None = None,
         usage_probe: UsageProbe | None = None,
         runner: Runner | None = None,
         source: SourceResolver | None = None,
@@ -102,48 +104,24 @@ class EvaluationWorker:
         self._catalog = catalog
         self._worker_id = worker_id or f"worker-{uuid4().hex}"
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._coordinator = coordinator or ClaimCoordinator(
+            config, store, usage_probe=self._usage_probe, clock=self._clock
+        )
         self._stop = threading.Event()
         self._sleep = sleep or self._stop.wait
         self._thread_factory = thread_factory
 
     def stop(self) -> None:
         """Request shutdown after the active evaluation returns."""
+        self._coordinator.stop()
         self._stop.set()
 
     def run_once(self) -> bool:
         """Run the next task, returning whether one was claimed."""
-        with _nonblocking_worker_lock(self._config.database_path) as locked:
-            if not locked:
-                return False
-            now = self._clock()
-            self._store.recover_expired(now=now)
-            try:
-                snapshot = self._usage_before_claim(now)
-            except UsageUnavailable:
-                self._store.pause_runnable_batches(
-                    reason=BatchPauseReason.USAGE_UNAVAILABLE,
-                    now=now,
-                )
-                return False
-            task = self._store.claim_next_with_usage(
-                self._worker_id,
-                snapshot=snapshot,
-                default_threshold=self._config.usage_pause_percent,
-                now=now,
-            )
-            if task is None:
-                return False
-            return self._run_claimed(task)
-
-    def _usage_before_claim(self, now: datetime) -> UsageSnapshot:
-        snapshot = self._store.latest_usage_snapshot()
-        if snapshot is not None and is_fresh(
-            snapshot,
-            now=now,
-            max_age=timedelta(seconds=self._config.usage_probe_seconds),
-        ):
-            return snapshot
-        return self._usage_probe.read(now=now)
+        task = self._coordinator.claim(self._worker_id)
+        if task is None:
+            return False
+        return self._run_claimed(task)
 
     def _run_claimed(self, task: TaskRecord) -> bool:
         ownership_lost = threading.Event()
@@ -204,9 +182,10 @@ class EvaluationWorker:
                 self._finalize_batch(task.batch_id)
         return True
 
-    def run_forever(self) -> None:
+    def run_forever(self, stop: threading.Event | None = None) -> None:
         """Poll until stopped, recovering an expired predecessor before each claim."""
-        while not self._stop.is_set():
+        stop_event = stop or self._stop
+        while not stop_event.is_set():
             if not self.run_once():
                 self._sleep(self._config.poll_seconds)
 
@@ -336,16 +315,132 @@ class EvaluationWorker:
         return True
 
     def _finalize_batch(self, batch_id: str) -> None:
-        now = self._clock()
-        try:
-            snapshot = self._usage_probe.read(now=now)
-            self._store.apply_usage_snapshot(snapshot, now=now)
-        except UsageUnavailable:
-            self._store.pause_runnable_batches(
-                reason=BatchPauseReason.USAGE_UNAVAILABLE,
-                now=now,
+        self._coordinator.refresh_after_attempt(batch_id)
+
+
+class EvaluationWorker:
+    """Own one Worker process and supervise configured task-pair slots."""
+
+    def __init__(
+        self,
+        config: WebConfig,
+        store: TaskStore,
+        *,
+        usage_probe: UsageProbe | None = None,
+        runner: Runner | None = None,
+        source: SourceResolver | None = None,
+        catalog: Catalog | None = None,
+        worker_id: str | None = None,
+        clock: Callable[[], datetime] | None = None,
+        sleep: Callable[[float], None] | None = None,
+        thread_factory: ThreadFactory = threading.Thread,
+    ) -> None:
+        self._config = config
+        self._store = store
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._stop = threading.Event()
+        shared_probe = usage_probe or CodexUsageProbe(
+            codex_binary=config.codex_binary,
+            auth_json=config.auth_json,
+            proxy_url=config.proxy_url,
+            timeout_seconds=config.usage_probe_timeout_seconds,
+        )
+        coordinator = ClaimCoordinator(
+            config,
+            store,
+            usage_probe=shared_probe,
+            clock=self._clock,
+        )
+        self._coordinator = coordinator
+        base_worker_id = worker_id or f"worker-{uuid4().hex}"
+
+        def default_sleep(seconds: float) -> None:
+            self._stop.wait(seconds)
+
+        self._slots = tuple(
+            TaskPairWorker(
+                config,
+                store,
+                coordinator=coordinator,
+                usage_probe=shared_probe,
+                runner=runner,
+                source=source,
+                catalog=catalog,
+                worker_id=(base_worker_id if config.task_parallelism == 1 else f"{base_worker_id}-slot-{index + 1}"),
+                clock=self._clock,
+                sleep=sleep or default_sleep,
+                thread_factory=thread_factory,
             )
-        self._store.finalize_batch_intent_after_attempt(batch_id, now=now)
+            for index in range(config.task_parallelism)
+        )
+
+    def stop(self) -> None:
+        """Stop claiming replacements after active task pairs finish."""
+
+        self._coordinator.stop()
+        self._stop.set()
+
+    def run_once(self) -> bool:
+        """Run one slot once while retaining the process-owner compatibility boundary."""
+
+        with _nonblocking_worker_lock(self._config.database_path) as locked:
+            if not locked:
+                return False
+            return self._slots[0].run_once()
+
+    def run_forever(self) -> None:
+        """Own the process lock and supervise all configured task-pair slots."""
+
+        with _nonblocking_worker_lock(self._config.database_path) as locked:
+            if not locked:
+                return
+            self._store.record_worker_capacity(self._config.task_parallelism, now=self._clock())
+            failures: list[BaseException] = []
+            failures_lock = threading.Lock()
+
+            def pause_after_slot_failure() -> None:
+                try:
+                    self._store.pause_runnable_batches(
+                        reason=BatchPauseReason.INFRASTRUCTURE_FAILURE,
+                        now=self._clock(),
+                    )
+                except Exception as error:  # noqa: BLE001 - preserve the original supervisor failure too
+                    with failures_lock:
+                        failures.append(error)
+
+            def run_slot(slot: TaskPairWorker) -> None:
+                try:
+                    slot.run_forever(self._stop)
+                except Exception as error:  # noqa: BLE001 - a slot failure must stop the whole supervisor
+                    with failures_lock:
+                        failures.append(error)
+                    self.stop()
+                    pause_after_slot_failure()
+
+            threads = tuple(
+                threading.Thread(
+                    target=run_slot,
+                    args=(slot,),
+                    daemon=False,
+                    name=f"evaluation-slot-{index + 1}",
+                )
+                for index, slot in enumerate(self._slots)
+            )
+            started: list[threading.Thread] = []
+            try:
+                for thread in threads:
+                    thread.start()
+                    started.append(thread)
+            except Exception:  # noqa: BLE001 - partial startup must stop and join every started slot
+                self.stop()
+                pause_after_slot_failure()
+                for thread in started:
+                    thread.join()
+                raise RuntimeError("Evaluation worker slot failed") from None
+            for thread in started:
+                thread.join()
+            if failures:
+                raise RuntimeError("Evaluation worker slot failed") from None
 
 
 def _execution_run_id(task: TaskRecord) -> str:

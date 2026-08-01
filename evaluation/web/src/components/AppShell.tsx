@@ -93,6 +93,9 @@ export function AppShell({ api, path, batchId, navigate, children }: AppShellPro
               <span className={`health ${health.worker_lease_active ? "health--ok" : "health--idle"}`}>
                 {health.worker_lease_active ? "Worker 工作中" : "Worker 空闲"}
               </span>
+              <span className="queue-count">
+                任务对 {health.active_task_pairs} / {health.task_parallelism}
+              </span>
               <span className="queue-count">队列 {health.queued_tasks}</span>
             </>
           )}

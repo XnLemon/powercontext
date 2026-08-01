@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -121,11 +122,11 @@ def test_catalog_lookup_does_not_reread_source_file(tmp_path: Path) -> None:
 )
 def test_catalog_rejects_invalid_rows(
     tmp_path: Path,
-    mutate: object,
+    mutate: Callable[[list[dict[str, object]]], list[object]],
     message: str,
 ) -> None:
-    rows = [json.loads(line) for line in FIXTURE.read_text().splitlines()]
-    changed = mutate(rows)  # type: ignore[operator]
+    rows: list[dict[str, object]] = [json.loads(line) for line in FIXTURE.read_text().splitlines()]
+    changed = mutate(rows)
     dataset = tmp_path / "invalid.jsonl"
     dataset.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in changed))
 

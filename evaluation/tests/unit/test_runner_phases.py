@@ -15,7 +15,8 @@ from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluati
 from powercontext_eval.codex import CodexOutcome
 from powercontext_eval.errors import CommandFailed
 from powercontext_eval.models import Arm
-from powercontext_eval.process import CommandResult
+from powercontext_eval.powercontext_sut import SutConfig
+from powercontext_eval.process import CommandResult, ProcessRunner
 from powercontext_eval.report import ReportBundle
 from powercontext_eval.runner import (
     MinimalRunResult,
@@ -28,6 +29,8 @@ from powercontext_eval.runner import (
 
 INSTANCE_ID = "instance_owner__repo-b"
 IMAGE_ID = "sha256:" + "d" * 64
+ProcessCall = tuple[tuple[str, ...], dict[str, object]]
+EvaluatorCall = dict[str, object]
 
 
 def _instance() -> SweBenchProInstance:
@@ -85,7 +88,7 @@ def test_task_image_uses_an_existing_local_image_without_registry_access(tmp_pat
             return SimpleNamespace(returncode=0, stdout=IMAGE_ID + "\n")
 
     image_id = _resolve_task_image(
-        Process(),  # type: ignore[arg-type]
+        cast(ProcessRunner, Process()),
         "owner/image:tag",
         cwd=tmp_path,
         registry_binary=tmp_path / "regctl",
@@ -115,7 +118,7 @@ def test_missing_task_image_is_exported_through_proxy_loaded_and_verified(tmp_pa
             return SimpleNamespace(returncode=0, stdout="")
 
     image_id = _resolve_task_image(
-        Process(),  # type: ignore[arg-type]
+        cast(ProcessRunner, Process()),
         "owner/image:tag",
         cwd=tmp_path,
         registry_binary=tmp_path / "regctl",
@@ -157,7 +160,7 @@ def test_failed_task_image_export_removes_the_partial_archive(tmp_path: Path) ->
 
     with pytest.raises(RuntimeError, match="registry failed"):
         _resolve_task_image(
-            Process(),  # type: ignore[arg-type]
+            cast(ProcessRunner, Process()),
             "owner/image:tag",
             cwd=tmp_path,
             registry_binary=tmp_path / "regctl",
@@ -203,14 +206,16 @@ def _run_with_fakes(
     materialized.mkdir()
     resolved = SimpleNamespace(sha="a" * 40)
     observed = observed if observed is not None else {}
-    observed.update({"process_calls": [], "evaluator_calls": []})
+    process_calls: list[ProcessCall] = []
+    evaluator_calls: list[EvaluatorCall] = []
+    observed.update({"process_calls": process_calls, "evaluator_calls": evaluator_calls})
     image_loaded = image_present
     image_cleanup_attempts = 0
 
     class FakeProcess:
         def run(self, argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
             nonlocal image_cleanup_attempts, image_loaded
-            observed["process_calls"].append((argv, kwargs))  # type: ignore[union-attr]
+            process_calls.append((argv, kwargs))
             if argv[:3] == ("docker", "image", "inspect"):
                 return (
                     SimpleNamespace(returncode=0, stdout=IMAGE_ID + "\n")
@@ -264,7 +269,7 @@ def _run_with_fakes(
             raw_sample_path = kwargs["raw_sample_path"]
             assert isinstance(prediction_path, Path)
             assert isinstance(raw_sample_path, Path)
-            observed["evaluator_calls"].append(kwargs)  # type: ignore[union-attr]
+            evaluator_calls.append(kwargs)
             retained = json.loads(raw_sample_path.read_text())
             assert raw_sample_path.name == "evaluator-instance.jsonl"
             assert retained["instance_id"] == instance.instance_id
@@ -321,19 +326,19 @@ def test_runner_uses_arbitrary_instance_prompt_image_and_base_commit(
     assert retained == instance.official_row()
     assert "fail_to_pass" not in retained
     assert "pass_to_pass" not in retained
-    sut_config = observed["sut_config"]
+    sut_config = cast(SutConfig, observed["sut_config"])
     assert sut_config.task_image == IMAGE_ID
-    prompts = observed["prompts"]
+    prompts = cast(dict[Arm, bytes], observed["prompts"])
     assert isinstance(prompts, dict)
     assert prompts[Arm.OFF] == prompts[Arm.ON]
     assert instance.problem_statement.encode() in prompts[Arm.OFF]
-    calls = observed["process_calls"]
+    calls = cast(list[ProcessCall], observed["process_calls"])
     assert isinstance(calls, list)
     assert calls[0][0] == ("docker", "image", "inspect", "--format={{.Id}}", instance.task_image)
     patch_checks = [call for call in calls if call[0][:2] == ("docker", "run")]
     assert len(patch_checks) == 3
     assert patch_checks[0][1]["input_bytes"] == instance.patch.encode()
-    evaluator_calls = observed["evaluator_calls"]
+    evaluator_calls = cast(list[EvaluatorCall], observed["evaluator_calls"])
     assert isinstance(evaluator_calls, list)
     assert [call["patch_applied"] for call in evaluator_calls] == [True, True, True]
     assert {call["required_fail_to_pass"] for call in evaluator_calls} == {instance.fail_to_pass}

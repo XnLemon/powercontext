@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import fcntl
 import hashlib
 import math
 import os
@@ -13,6 +14,9 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
@@ -34,6 +38,62 @@ _LINUX_RENAMEAT2_SYSCALLS = {
     "arm64": 276,
     "x86_64": 316,
 }
+_MIRROR_LOCK_DIRECTORY = ".powercontext-eval-locks"
+_RESOLVE_LOCKS_GUARD = threading.Lock()
+_RESOLVE_LOCKS: dict[Path, threading.Lock] = {}
+
+
+def _resolve_lock(cache_path: Path) -> threading.Lock:
+    """Return the process-wide lock for one mutable bare mirror."""
+
+    with _RESOLVE_LOCKS_GUARD:
+        return _RESOLVE_LOCKS.setdefault(cache_path, threading.Lock())
+
+
+def _mirror_lock_path(cache_root: Path, cache_path: Path) -> Path:
+    """Return one canonical lock file for a physical mirror bucket."""
+
+    canonical_root = cache_root.resolve(strict=True)
+    if cache_path.parent.resolve(strict=True) != canonical_root:
+        raise GitSourceError("Git cache bucket must be a direct child of cache root")
+    if re.fullmatch(r"[0-9a-f]{64}", cache_path.name) is None:
+        raise GitSourceError("Git cache bucket must use its canonical SHA-256 name")
+    return canonical_root / _MIRROR_LOCK_DIRECTORY / f"{cache_path.name}.lock"
+
+
+@contextmanager
+def _mirror_write_lock(cache_root: Path, cache_path: Path) -> Iterator[None]:
+    """Serialize mirror mutation across GitSource instances and service processes."""
+
+    lock_path = _mirror_lock_path(cache_root, cache_path)
+    with _resolve_lock(lock_path):
+        lock_directory = lock_path.parent
+        try:
+            lock_directory.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        lock_status = os.lstat(lock_directory)
+        if stat.S_ISLNK(lock_status.st_mode) or not stat.S_ISDIR(lock_status.st_mode):
+            raise GitSourceError("Git mirror lock directory was unsafe")
+        if lock_directory.resolve(strict=True).parent != cache_root.resolve(strict=True):
+            raise GitSourceError("Git mirror lock directory escaped cache root")
+
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(lock_path, flags, 0o600)
+        except OSError:
+            raise GitSourceError("Git mirror lock was unsafe or unavailable") from None
+        try:
+            descriptor_status = os.fstat(descriptor)
+            if not stat.S_ISREG(descriptor_status.st_mode) or descriptor_status.st_nlink != 1:
+                raise GitSourceError("Git mirror lock was unsafe or unavailable")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
 
 @dataclass(frozen=True)
@@ -114,19 +174,21 @@ class GitSource:
             raise GitSourceError("Embedded Git credentials are not allowed; configure a credential helper")
         cache_path = self._cache_path_for_normalized(details.normalized)
         self._validate_cache_location(cache_path)
+        with _mirror_write_lock(self._cache_root, cache_path):
+            self._validate_cache_location(cache_path)
 
-        local_head: str | None = None
-        if requested.kind == "latest" and details.local_path is not None:
-            local_head = self._clean_local_head(details)
+            local_head: str | None = None
+            if requested.kind == "latest" and details.local_path is not None:
+                local_head = self._clean_local_head(details)
 
-        self._ensure_mirror(details, cache_path)
-        ref = self._ref_to_resolve(details, requested, cache_path, local_head)
-        if requested.kind in {"branch", "tag"}:
-            self._verify_exact_ref(cache_path, ref)
-        sha = self._resolve_commit(cache_path, ref)
-        self._pin_commit(cache_path, sha)
-        canonical_cache_root = self._cache_root.resolve(strict=True)
-        canonical_cache_path = cache_path.resolve(strict=True)
+            self._ensure_mirror(details, cache_path)
+            ref = self._ref_to_resolve(details, requested, cache_path, local_head)
+            if requested.kind in {"branch", "tag"}:
+                self._verify_exact_ref(cache_path, ref)
+            sha = self._resolve_commit(cache_path, ref)
+            self._pin_commit(cache_path, sha)
+            canonical_cache_root = self._cache_root.resolve(strict=True)
+            canonical_cache_path = cache_path.resolve(strict=True)
         return ResolvedGitSource(
             source=details.normalized,
             requested=requested,

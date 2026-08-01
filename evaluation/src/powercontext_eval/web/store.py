@@ -63,6 +63,8 @@ class TaskOwnershipError(TaskStoreError):
 
 class HealthSnapshot(TypedDict):
     worker_lease_active: bool
+    active_task_pairs: int
+    task_parallelism: int
     queued_tasks: int
     running_tasks: int
 
@@ -104,7 +106,8 @@ class TaskStore:
         """Create the queue schema and indexes if they do not exist."""
         self._database.parent.mkdir(parents=True, exist_ok=True)
         with self._write() as connection:
-            connection.executescript(
+            _execute_transactional_script(
+                connection,
                 """
                 CREATE TABLE IF NOT EXISTS batches (
                     batch_seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,11 +160,15 @@ class TaskStore:
                     result_json TEXT,
                     UNIQUE(task_id, attempt_number)
                 );
-                CREATE TABLE IF NOT EXISTS worker_lease (
-                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                    worker_id TEXT NOT NULL,
-                    attempt_id TEXT NOT NULL UNIQUE REFERENCES task_attempts(attempt_id),
+                CREATE TABLE IF NOT EXISTS worker_leases (
+                    attempt_id TEXT PRIMARY KEY REFERENCES task_attempts(attempt_id),
+                    worker_id TEXT NOT NULL UNIQUE,
                     expires_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS worker_runtime (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    task_parallelism INTEGER NOT NULL CHECK (task_parallelism BETWEEN 1 AND 4),
+                    observed_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS usage_snapshots (
                     snapshot_seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -176,7 +183,7 @@ class TaskStore:
                     details_json TEXT NOT NULL,
                     occurred_at TEXT NOT NULL
                 );
-                """
+                """,
             )
             task_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(tasks)").fetchall()}
             if "batch_id" not in task_columns:
@@ -241,33 +248,38 @@ class TaskStore:
                 )
                 """
             )
-            lease_columns = {
-                str(row["name"]) for row in connection.execute("PRAGMA table_info(worker_lease)").fetchall()
-            }
-            if "attempt_id" not in lease_columns:
-                connection.executescript(
-                    """
-                    ALTER TABLE worker_lease RENAME TO worker_lease_legacy;
-                    CREATE TABLE worker_lease (
-                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                        worker_id TEXT NOT NULL,
-                        attempt_id TEXT NOT NULL UNIQUE REFERENCES task_attempts(attempt_id),
-                        expires_at TEXT NOT NULL
-                    );
-                    INSERT INTO worker_lease(singleton, worker_id, attempt_id, expires_at)
-                    SELECT legacy.singleton, legacy.worker_id, attempts.attempt_id, legacy.expires_at
-                    FROM worker_lease_legacy AS legacy
-                    JOIN task_attempts AS attempts
-                      ON attempts.task_id = legacy.task_id
-                     AND attempts.attempt_number = (
-                         SELECT MAX(newest.attempt_number)
-                         FROM task_attempts AS newest
-                         WHERE newest.task_id = legacy.task_id
-                     );
-                    DROP TABLE worker_lease_legacy;
-                    """
-                )
-            connection.executescript(
+            singular_lease = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_lease'"
+            ).fetchone()
+            if singular_lease is not None:
+                lease_columns = {
+                    str(row["name"]) for row in connection.execute("PRAGMA table_info(worker_lease)").fetchall()
+                }
+                if "attempt_id" in lease_columns:
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO worker_leases(attempt_id, worker_id, expires_at)
+                        SELECT attempt_id, worker_id, expires_at FROM worker_lease
+                        """
+                    )
+                else:
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO worker_leases(attempt_id, worker_id, expires_at)
+                        SELECT attempts.attempt_id, legacy.worker_id, legacy.expires_at
+                        FROM worker_lease AS legacy
+                        JOIN task_attempts AS attempts
+                          ON attempts.task_id = legacy.task_id
+                         AND attempts.attempt_number = (
+                             SELECT MAX(newest.attempt_number)
+                             FROM task_attempts AS newest
+                             WHERE newest.task_id = legacy.task_id
+                         )
+                        """
+                    )
+                connection.execute("DROP TABLE worker_lease")
+            _execute_transactional_script(
+                connection,
                 """
                 CREATE INDEX IF NOT EXISTS tasks_status_queue
                     ON tasks(status, queue_seq);
@@ -285,7 +297,9 @@ class TaskStore:
                     ON task_attempts(task_id, attempt_number);
                 CREATE INDEX IF NOT EXISTS task_attempts_status_sequence
                     ON task_attempts(status, attempt_seq);
-                """
+                CREATE INDEX IF NOT EXISTS worker_leases_expiry
+                    ON worker_leases(expires_at);
+                """,
             )
 
     def create_batch(
@@ -854,15 +868,41 @@ class TaskStore:
                 str(row["status"]): int(row["count"])
                 for row in connection.execute("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status").fetchall()
             }
-            lease = connection.execute(
-                "SELECT 1 FROM worker_lease WHERE singleton = ? AND expires_at > ?",
-                (1, now_text),
+            active_task_pairs = connection.execute(
+                "SELECT COUNT(*) FROM worker_leases WHERE expires_at > ?",
+                (now_text,),
+            ).fetchone()[0]
+            runtime = connection.execute(
+                "SELECT task_parallelism FROM worker_runtime WHERE singleton = ?",
+                (1,),
             ).fetchone()
+        if not isinstance(active_task_pairs, int):
+            raise TypeError("SQLite active lease count is not an integer")
+        task_parallelism = 1 if runtime is None else _stored_int(runtime["task_parallelism"], name="task parallelism")
         return {
-            "worker_lease_active": lease is not None,
+            "worker_lease_active": active_task_pairs > 0,
+            "active_task_pairs": active_task_pairs,
+            "task_parallelism": task_parallelism,
             "queued_tasks": counts.get(TaskStatus.QUEUED.value, 0),
             "running_tasks": counts.get(TaskStatus.RUNNING.value, 0),
         }
+
+    def record_worker_capacity(self, task_parallelism: int, *, now: datetime) -> None:
+        """Publish the capacity owned by the active Worker supervisor."""
+
+        _validate_task_parallelism(task_parallelism)
+        observed_at = _timestamp(now)
+        with self._write() as connection:
+            connection.execute(
+                """
+                INSERT INTO worker_runtime(singleton, task_parallelism, observed_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    task_parallelism = excluded.task_parallelism,
+                    observed_at = excluded.observed_at
+                """,
+                (1, task_parallelism, observed_at),
+            )
 
     def cancel_queued(self, task_id: str, *, now: datetime) -> TaskRecord:
         """Cancel a queued task."""
@@ -895,13 +935,26 @@ class TaskStore:
             )
             return self._record(connection, self._select_task(connection, task_id))
 
-    def claim_next(self, worker_id: str, *, now: datetime) -> TaskRecord | None:
-        """Atomically acquire the global lease and claim the oldest queued task."""
+    def claim_next(
+        self,
+        worker_id: str,
+        *,
+        now: datetime,
+        max_concurrency: int = 1,
+    ) -> TaskRecord | None:
+        """Atomically claim the oldest task when capacity is available."""
         if not worker_id:
             raise ValueError("worker_id must not be empty")
+        _validate_task_parallelism(max_concurrency)
         _timestamp(now)
         with self._write() as connection:
-            return self._claim_next(connection, worker_id, now=now, allow_standalone=True)
+            return self._claim_next(
+                connection,
+                worker_id,
+                now=now,
+                allow_standalone=True,
+                max_concurrency=max_concurrency,
+            )
 
     def claim_next_with_usage(
         self,
@@ -909,6 +962,7 @@ class TaskStore:
         *,
         snapshot: UsageSnapshot,
         default_threshold: int,
+        max_concurrency: int = 1,
         now: datetime,
     ) -> TaskRecord | None:
         """Persist one snapshot, pause protected batches, and claim atomically."""
@@ -916,6 +970,7 @@ class TaskStore:
         if not worker_id:
             raise ValueError("worker_id must not be empty")
         _validate_percentage(default_threshold)
+        _validate_task_parallelism(max_concurrency)
         _timestamp(now)
         with self._write() as connection:
             self._save_usage_snapshot(connection, snapshot)
@@ -926,6 +981,7 @@ class TaskStore:
                 worker_id,
                 now=now,
                 allow_standalone=allow_standalone,
+                max_concurrency=max_concurrency,
             )
 
     def apply_usage_snapshot(self, snapshot: UsageSnapshot, *, now: datetime) -> None:
@@ -952,16 +1008,23 @@ class TaskStore:
         *,
         now: datetime,
         allow_standalone: bool,
+        max_concurrency: int,
     ) -> TaskRecord | None:
         now_text = _timestamp(now)
-        running = connection.execute(
-            "SELECT 1 FROM tasks WHERE status = ? LIMIT 1",
-            (TaskStatus.RUNNING.value,),
+        self._recover_expired_leases(connection, now=now)
+        owned = connection.execute(
+            "SELECT 1 FROM worker_leases WHERE worker_id = ? AND expires_at > ?",
+            (worker_id, now_text),
         ).fetchone()
-        if running is not None:
+        if owned is not None:
             return None
-        lease = connection.execute("SELECT * FROM worker_lease WHERE singleton = ?", (1,)).fetchone()
-        if lease is not None and lease["expires_at"] > now_text and lease["worker_id"] != worker_id:
+        active = connection.execute(
+            "SELECT COUNT(*) FROM worker_leases WHERE expires_at > ?",
+            (now_text,),
+        ).fetchone()[0]
+        if not isinstance(active, int):
+            raise TypeError("SQLite active lease count is not an integer")
+        if active >= max_concurrency:
             return None
 
         row = connection.execute(
@@ -984,8 +1047,6 @@ class TaskStore:
             ),
         ).fetchone()
         if row is None:
-            if lease is not None and lease["expires_at"] <= now_text:
-                connection.execute("DELETE FROM worker_lease WHERE singleton = ?", (1,))
             return None
 
         task_id = str(row["task_id"])
@@ -995,14 +1056,10 @@ class TaskStore:
         expires_at = _timestamp(effective_claim_time + self._lease_duration)
         connection.execute(
             """
-            INSERT INTO worker_lease(singleton, worker_id, attempt_id, expires_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(singleton) DO UPDATE SET
-                worker_id = excluded.worker_id,
-                attempt_id = excluded.attempt_id,
-                expires_at = excluded.expires_at
+            INSERT INTO worker_leases(attempt_id, worker_id, expires_at)
+            VALUES (?, ?, ?)
             """,
-            (1, worker_id, attempt["attempt_id"], expires_at),
+            (attempt["attempt_id"], worker_id, expires_at),
         )
         connection.execute(
             """
@@ -1133,7 +1190,10 @@ class TaskStore:
             started_at = _parse_optional_timestamp(attempt["started_at"])
             if started_at is None:
                 raise TaskConflict("Running task has no start time")
-            lease = connection.execute("SELECT expires_at FROM worker_lease WHERE singleton = ?", (1,)).fetchone()
+            lease = connection.execute(
+                "SELECT expires_at FROM worker_leases WHERE attempt_id = ? AND worker_id = ?",
+                (attempt["attempt_id"], worker_id),
+            ).fetchone()
             if lease is None:
                 raise TaskOwnershipError("Worker lease is not active")
             expires_at = _timestamp(
@@ -1143,8 +1203,8 @@ class TaskStore:
                 )
             )
             connection.execute(
-                "UPDATE worker_lease SET expires_at = ? WHERE singleton = ?",
-                (expires_at, 1),
+                "UPDATE worker_leases SET expires_at = ? WHERE attempt_id = ? AND worker_id = ?",
+                (expires_at, attempt["attempt_id"], worker_id),
             )
             connection.execute(
                 "UPDATE tasks SET version = version + 1 WHERE task_id = ?",
@@ -1212,7 +1272,10 @@ class TaskStore:
                     attempt["attempt_id"],
                 ),
             )
-            connection.execute("DELETE FROM worker_lease WHERE singleton = ?", (1,))
+            connection.execute(
+                "DELETE FROM worker_leases WHERE attempt_id = ? AND worker_id = ?",
+                (attempt["attempt_id"], worker_id),
+            )
             return self._record(connection, self._select_task(connection, task_id))
 
     def fail(
@@ -1263,16 +1326,33 @@ class TaskStore:
                     attempt["attempt_id"],
                 ),
             )
-            connection.execute("DELETE FROM worker_lease WHERE singleton = ?", (1,))
+            connection.execute(
+                "DELETE FROM worker_leases WHERE attempt_id = ? AND worker_id = ?",
+                (attempt["attempt_id"], worker_id),
+            )
+            self._pause_batch_for_infrastructure_failure(
+                connection,
+                task_row=self._select_task(connection, task_id),
+                attempt_id=str(attempt["attempt_id"]),
+                failure_category=failure.category,
+                now=now,
+            )
             return self._record(connection, self._select_task(connection, task_id))
 
     def recover_expired(self, *, now: datetime) -> list[str]:
-        """Interrupt the running task whose singleton lease has expired."""
-        now_text = _timestamp(now)
+        """Interrupt running tasks whose independent leases have expired."""
+        _timestamp(now)
         with self._write() as connection:
-            lease = connection.execute("SELECT * FROM worker_lease WHERE singleton = ?", (1,)).fetchone()
-            if lease is None or lease["expires_at"] > now_text:
-                return []
+            return self._recover_expired_leases(connection, now=now)
+
+    def _recover_expired_leases(self, connection: sqlite3.Connection, *, now: datetime) -> list[str]:
+        now_text = _timestamp(now)
+        leases = connection.execute(
+            "SELECT * FROM worker_leases WHERE expires_at <= ? ORDER BY expires_at, attempt_id",
+            (now_text,),
+        ).fetchall()
+        recovered: list[str] = []
+        for lease in leases:
             attempt = connection.execute(
                 "SELECT * FROM task_attempts WHERE attempt_id = ?",
                 (lease["attempt_id"],),
@@ -1281,7 +1361,6 @@ class TaskStore:
                 raise TaskStoreError("Worker lease references a missing attempt")
             task_id = str(attempt["task_id"])
             row = self._select_task(connection, task_id)
-            recovered: list[str] = []
             if TaskStatus(row["status"]) is TaskStatus.RUNNING:
                 connection.execute(
                     """
@@ -1314,8 +1393,59 @@ class TaskStore:
                     ),
                 )
                 recovered.append(task_id)
-            connection.execute("DELETE FROM worker_lease WHERE singleton = ?", (1,))
-            return recovered
+                self._pause_batch_for_infrastructure_failure(
+                    connection,
+                    task_row=self._select_task(connection, task_id),
+                    attempt_id=str(attempt["attempt_id"]),
+                    failure_category=FailureCategory.WORKER_INTERRUPTION,
+                    now=now,
+                )
+            connection.execute("DELETE FROM worker_leases WHERE attempt_id = ?", (lease["attempt_id"],))
+        return recovered
+
+    def _pause_batch_for_infrastructure_failure(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task_row: sqlite3.Row,
+        attempt_id: str,
+        failure_category: FailureCategory,
+        now: datetime,
+    ) -> None:
+        batch_id_value = task_row["batch_id"]
+        if batch_id_value is None:
+            return
+        batch_id = str(batch_id_value)
+        batch = self._select_batch(connection, batch_id)
+        if BatchControlIntent(batch["control_intent"]) is BatchControlIntent.RUN:
+            connection.execute(
+                """
+                UPDATE batches
+                SET control_intent = ?, pause_reason = ?, control_updated_at = ?,
+                    control_version = control_version + 1
+                WHERE batch_id = ? AND control_intent = ?
+                """,
+                (
+                    BatchControlIntent.PAUSE.value,
+                    BatchPauseReason.INFRASTRUCTURE_FAILURE.value,
+                    _timestamp(now),
+                    batch_id,
+                    BatchControlIntent.RUN.value,
+                ),
+            )
+        self._append_control_event(
+            connection,
+            batch_id,
+            BatchControlEventType.INFRASTRUCTURE_FAILURE,
+            "system",
+            {
+                "attempt_id": attempt_id,
+                "failure_category": failure_category.value,
+                "task_id": str(task_row["task_id"]),
+            },
+            now,
+        )
+        self._finalize_batch_intent(connection, batch_id, now=now)
 
     def _finalize_batch_intent(
         self,
@@ -1473,13 +1603,11 @@ class TaskStore:
         attempt = self._select_latest_attempt(connection, task_id)
         if TaskStatus(attempt["status"]) is not TaskStatus.RUNNING:
             raise TaskConflict("Task is not running")
-        lease = connection.execute("SELECT * FROM worker_lease WHERE singleton = ?", (1,)).fetchone()
-        if (
-            lease is None
-            or lease["attempt_id"] != attempt["attempt_id"]
-            or lease["worker_id"] != worker_id
-            or lease["expires_at"] <= _timestamp(now)
-        ):
+        lease = connection.execute(
+            "SELECT * FROM worker_leases WHERE attempt_id = ?",
+            (attempt["attempt_id"],),
+        ).fetchone()
+        if lease is None or lease["worker_id"] != worker_id or lease["expires_at"] <= _timestamp(now):
             raise TaskOwnershipError("Worker does not own an active lease for this task")
 
     @staticmethod
@@ -1748,6 +1876,24 @@ def _validate_percentage(value: int) -> None:
         raise ValueError("percent must be an integer between 1 and 100")
 
 
+def _validate_task_parallelism(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
+        raise ValueError("task parallelism must be an integer between 1 and 4")
+
+
+def _execute_transactional_script(connection: sqlite3.Connection, script: str) -> None:
+    """Execute complete SQL statements without SQLite's implicit script commit."""
+
+    pending = ""
+    for line in script.splitlines():
+        pending += f"{line}\n"
+        if sqlite3.complete_statement(pending):
+            connection.execute(pending)
+            pending = ""
+    if pending.strip():
+        raise TaskStoreError("Schema script ended with an incomplete SQL statement")
+
+
 def _pause_event(
     reason: BatchPauseReason,
 ) -> tuple[BatchControlEventType, Literal["user", "system"]]:
@@ -1757,7 +1903,11 @@ def _pause_event(
         return BatchControlEventType.USAGE_THRESHOLD_REACHED, "system"
     if reason is BatchPauseReason.USAGE_UNAVAILABLE:
         return BatchControlEventType.USAGE_UNAVAILABLE, "system"
-    return BatchControlEventType.QUOTA_LIMIT_REACHED, "system"
+    if reason is BatchPauseReason.QUOTA_LIMIT:
+        return BatchControlEventType.QUOTA_LIMIT_REACHED, "system"
+    if reason is BatchPauseReason.INFRASTRUCTURE_FAILURE:
+        return BatchControlEventType.INFRASTRUCTURE_FAILURE, "system"
+    raise ValueError("Unsupported batch pause reason")
 
 
 def _task_id(now: datetime, sequence: int) -> str:

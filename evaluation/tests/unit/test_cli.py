@@ -76,7 +76,7 @@ def test_cli_module_is_directly_executable() -> None:
 
 
 def test_swebench_pro_run_exposes_the_minimal_m0_command(monkeypatch) -> None:
-    calls: list[object] = []
+    calls: list[tuple[object, object]] = []
     instance = object()
 
     def fake_run(config: object, *, instance: object) -> MinimalRunResult:

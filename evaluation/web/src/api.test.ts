@@ -105,7 +105,14 @@ describe("EvaluationApi HTTP", () => {
       reasoning_efforts: ["medium"],
       treatment_modes: ["off_on"],
     };
-    const health = { service: "ok", worker_lease_active: false, queued_tasks: 1, running_tasks: 0 };
+    const health = {
+      service: "ok",
+      worker_lease_active: false,
+      queued_tasks: 1,
+      running_tasks: 0,
+      active_task_pairs: 3,
+      task_parallelism: 4,
+    };
     const summary = {
       task_id: "task-1",
       attempt_id: "task-1.attempt-0001",
@@ -313,7 +320,63 @@ describe("EvaluationApi HTTP", () => {
     {
       name: "negative health count",
       method: "getHealth" as const,
-      payload: { service: "ok", worker_lease_active: true, queued_tasks: -1, running_tasks: 0 },
+      payload: {
+        service: "ok",
+        worker_lease_active: true,
+        queued_tasks: -1,
+        running_tasks: 0,
+        active_task_pairs: 0,
+        task_parallelism: 1,
+      },
+    },
+    {
+      name: "negative active task pairs",
+      method: "getHealth" as const,
+      payload: {
+        service: "ok",
+        worker_lease_active: true,
+        queued_tasks: 0,
+        running_tasks: 0,
+        active_task_pairs: -1,
+        task_parallelism: 1,
+      },
+    },
+    {
+      name: "zero task parallelism",
+      method: "getHealth" as const,
+      payload: {
+        service: "ok",
+        worker_lease_active: true,
+        queued_tasks: 0,
+        running_tasks: 0,
+        active_task_pairs: 0,
+        task_parallelism: 0,
+      },
+    },
+    {
+      name: "task parallelism above maximum",
+      method: "getHealth" as const,
+      payload: {
+        service: "ok",
+        worker_lease_active: true,
+        queued_tasks: 0,
+        running_tasks: 0,
+        active_task_pairs: 0,
+        task_parallelism: 5,
+      },
+    },
+    {
+      name: "unknown health field",
+      method: "getHealth" as const,
+      payload: {
+        service: "ok",
+        worker_lease_active: true,
+        queued_tasks: 0,
+        running_tasks: 0,
+        active_task_pairs: 0,
+        task_parallelism: 1,
+        secret: "must not be accepted",
+      },
     },
   ])("rejects malformed $name with a safe fixed error", async ({ method, payload }) => {
     const { api } = apiWithResponse(jsonResponse(payload));

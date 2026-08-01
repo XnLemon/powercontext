@@ -19,6 +19,14 @@ class _EnvironmentNumbers(BaseModel):
     usage_probe_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
     usage_probe_timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 15
     usage_snapshot_max_age_seconds: Annotated[int, Field(ge=10, le=7200)] = 120
+    task_parallelism: Annotated[int, Field(ge=1, le=4)] = 1
+
+    @field_validator("task_parallelism", mode="before")
+    @classmethod
+    def require_integer_task_parallelism(cls, value: object) -> object:
+        if not isinstance(value, str) or not value.isascii() or not value.isdecimal():
+            raise ValueError("Task parallelism must be an integer")
+        return value
 
 
 class WebConfig(BaseModel):
@@ -47,6 +55,7 @@ class WebConfig(BaseModel):
     usage_probe_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
     usage_probe_timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 15
     usage_snapshot_max_age_seconds: Annotated[int, Field(ge=10, le=7200)] = 120
+    task_parallelism: Annotated[int, Field(ge=1, le=4)] = 1
 
     @field_validator(
         "root",
@@ -100,6 +109,7 @@ class WebConfig(BaseModel):
         usage_probe_seconds: int = 60,
         usage_probe_timeout_seconds: int = 15,
         usage_snapshot_max_age_seconds: int = 120,
+        task_parallelism: int = 1,
     ) -> Self:
         return cls(
             root=root,
@@ -125,6 +135,7 @@ class WebConfig(BaseModel):
             usage_probe_seconds=usage_probe_seconds,
             usage_probe_timeout_seconds=usage_probe_timeout_seconds,
             usage_snapshot_max_age_seconds=usage_snapshot_max_age_seconds,
+            task_parallelism=task_parallelism,
         )
 
     @classmethod
@@ -145,6 +156,7 @@ class WebConfig(BaseModel):
                 "usage_probe_seconds": environ.get(f"{prefix}USAGE_PROBE_SECONDS", "60"),
                 "usage_probe_timeout_seconds": environ.get(f"{prefix}USAGE_PROBE_TIMEOUT_SECONDS", "15"),
                 "usage_snapshot_max_age_seconds": environ.get(f"{prefix}USAGE_SNAPSHOT_MAX_AGE_SECONDS", "120"),
+                "task_parallelism": environ.get(f"{prefix}TASK_PARALLELISM", "1"),
             }
         )
 
@@ -170,6 +182,7 @@ class WebConfig(BaseModel):
             usage_probe_seconds=numbers.usage_probe_seconds,
             usage_probe_timeout_seconds=numbers.usage_probe_timeout_seconds,
             usage_snapshot_max_age_seconds=numbers.usage_snapshot_max_age_seconds,
+            task_parallelism=numbers.task_parallelism,
         )
 
     @property

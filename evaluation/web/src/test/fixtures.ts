@@ -47,6 +47,8 @@ export const health: HealthResponse = {
   worker_lease_active: true,
   queued_tasks: 1,
   running_tasks: 1,
+  active_task_pairs: 3,
+  task_parallelism: 4,
 };
 
 export const report: ReportResponse = {

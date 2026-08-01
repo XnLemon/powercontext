@@ -233,6 +233,8 @@ const healthSchema = z.strictObject({
   worker_lease_active: z.boolean(),
   queued_tasks: nonnegativeIntegerSchema,
   running_tasks: nonnegativeIntegerSchema,
+  active_task_pairs: nonnegativeIntegerSchema,
+  task_parallelism: z.number().int().min(1).max(4),
 });
 
 function armSchema<Arm extends "off" | "on">(arm: Arm) {

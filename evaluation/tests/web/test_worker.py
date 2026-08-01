@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,19 +11,19 @@ from typing import Any
 import pytest
 
 from powercontext_eval.benchmarks.base import GoldCheckFailed
-from powercontext_eval.benchmarks.swebench_pro.adapter import DatasetSchemaError
+from powercontext_eval.benchmarks.swebench_pro.adapter import DatasetSchemaError, SweBenchProInstance
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialResultError
 from powercontext_eval.codex import CodexInfrastructureError
 from powercontext_eval.errors import GitSourceError
 from powercontext_eval.powercontext_sut import InvalidTreatment, UnsafeSutConfiguration
-from powercontext_eval.runner import MinimalRunResult, RunPhase
+from powercontext_eval.runner import MinimalRunConfig, MinimalRunResult, RunConfig, RunPhase
 from powercontext_eval.web.batches import BatchCreate, BatchStatus
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.controls import BatchControlIntent, BatchPauseReason
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskCreate, TaskPhase, TaskStatus
 from powercontext_eval.web.store import TaskStore
 from powercontext_eval.web.usage import CodexUsageProbe, UsageSnapshot, UsageUnavailable
-from powercontext_eval.web.worker import EvaluationWorker
+from powercontext_eval.web.worker import EvaluationWorker, TaskPairWorker
 
 NOW = datetime(2026, 7, 29, 1, 2, 3, tzinfo=UTC)
 
@@ -68,6 +69,7 @@ def _config(
     lease_seconds: int = 2,
     poll_seconds: float = 0.01,
     usage_probe_seconds: int = 60,
+    task_parallelism: int = 1,
 ) -> WebConfig:
     return WebConfig.for_root(
         root,
@@ -83,6 +85,7 @@ def _config(
         lease_seconds=lease_seconds,
         poll_seconds=poll_seconds,
         usage_probe_seconds=usage_probe_seconds,
+        task_parallelism=task_parallelism,
     )
 
 
@@ -130,9 +133,9 @@ def _create_batch(
 
 class FakeCatalog:
     def __init__(self, instance_ids: tuple[str, ...]) -> None:
-        self.instances = {instance_id: object() for instance_id in instance_ids}
+        self.instances = {instance_id: _fake_instance(instance_id) for instance_id in instance_ids}
 
-    def require(self, instance_id: str) -> object:
+    def require(self, instance_id: str) -> SweBenchProInstance:
         return self.instances[instance_id]
 
 
@@ -148,15 +151,47 @@ class FakeSource:
 
 def _successful_batch_runner(
     config: WebConfig,
-    calls: list[tuple[object, object]],
-) -> Any:
-    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+    calls: list[tuple[RunConfig, SweBenchProInstance]],
+) -> Callable[..., MinimalRunResult]:
+    def runner(
+        run_config: RunConfig,
+        *,
+        instance: SweBenchProInstance,
+        on_phase: Any,
+    ) -> MinimalRunResult:
+        del on_phase
         calls.append((run_config, instance))
         run_dir = config.run_root / "runs" / run_config.run_id
         run_dir.mkdir(parents=True)
         report_path = run_dir / "report.md"
         report_path.write_text("safe")
         return MinimalRunResult(run_config.run_id, report_path, True, False)
+
+    return runner
+
+
+def _fake_instance(instance_id: str) -> SweBenchProInstance:
+    return SweBenchProInstance(
+        repo="owner/repo",
+        instance_id=instance_id,
+        base_commit="a" * 40,
+        patch="",
+        test_patch="",
+        problem_statement="problem",
+        fail_to_pass=(),
+        pass_to_pass=(),
+        before_repo_set_cmd="",
+        selected_test_files_to_run="",
+        task_image="docker.io/example/task:latest",
+        raw_row={},
+    )
+
+
+def _unexpected_runner(calls: list[str]) -> Callable[..., MinimalRunResult]:
+    def runner(run_config: MinimalRunConfig | RunConfig, **_kwargs: Any) -> MinimalRunResult:
+        assert run_config.run_id is not None
+        calls.append(run_config.run_id)
+        pytest.fail("runner should not run")
 
     return runner
 
@@ -170,7 +205,7 @@ def test_worker_pauses_before_claim_when_usage_reaches_configured_threshold(tmp_
         config,
         store,
         usage_probe=FakeUsageProbe([_usage(80)]),
-        runner=lambda run_config, **_kwargs: calls.append(run_config.run_id),
+        runner=_unexpected_runner(calls),
         source=FakeSource(),
         catalog=FakeCatalog(("instance_owner__repo-a",)),
         clock=lambda: NOW,
@@ -326,7 +361,7 @@ def test_worker_fails_closed_when_usage_is_unavailable(tmp_path: Path) -> None:
         config,
         store,
         usage_probe=FakeUsageProbe([UsageUnavailable("private failure")]),
-        runner=lambda run_config, **_kwargs: calls.append(run_config.run_id),
+        runner=_unexpected_runner(calls),
         source=FakeSource(),
         catalog=FakeCatalog(("instance_owner__repo-a",)),
         clock=lambda: NOW,
@@ -364,6 +399,7 @@ def test_worker_executes_only_the_new_attempt_when_a_failed_task_is_retried(tmp_
         now=NOW,
     )
     assert created is True
+    store.request_resume(batch.batch_id, snapshot=_usage(9), now=NOW)
     calls: list[str] = []
 
     def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
@@ -399,7 +435,7 @@ def test_latest_is_pinned_once_and_every_child_uses_catalog_instance(
     batch = _create_batch(store, instance_ids=instance_ids)
     source = FakeSource()
     catalog = FakeCatalog(instance_ids)
-    calls: list[tuple[object, object]] = []
+    calls: list[tuple[RunConfig, SweBenchProInstance]] = []
     monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
     worker = EvaluationWorker(
         config,
@@ -472,7 +508,7 @@ def test_only_one_child_runs_physically_across_multiple_batches(tmp_path: Path) 
     assert calls == [store.list_batch_tasks(first_batch.batch_id)[0].task_id]
 
 
-def test_failed_batch_child_does_not_prevent_later_child(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_failed_batch_child_pauses_later_children(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
     store = _store(config)
     instance_ids = ("instance_owner__repo-a", "instance_owner__repo-b")
@@ -501,11 +537,14 @@ def test_failed_batch_child_does_not_prevent_later_child(monkeypatch: pytest.Mon
     )
 
     assert worker.run_once() is True
-    assert worker.run_once() is True
+    assert worker.run_once() is False
 
     children = store.list_batch_tasks(batch.batch_id)
-    assert [child.status for child in children] == [TaskStatus.FAILED, TaskStatus.SUCCEEDED]
-    assert store.get_batch(batch.batch_id).status is BatchStatus.COMPLETED
+    assert [child.status for child in children] == [TaskStatus.FAILED, TaskStatus.QUEUED]
+    current = store.get_batch(batch.batch_id)
+    assert current.status is BatchStatus.PAUSED
+    assert current.control.intent is BatchControlIntent.PAUSE
+    assert current.control.pause_reason is BatchPauseReason.INFRASTRUCTURE_FAILURE
 
 
 def test_restart_reuses_persisted_batch_sha_and_completed_children(
@@ -516,7 +555,7 @@ def test_restart_reuses_persisted_batch_sha_and_completed_children(
     instance_ids = ("instance_owner__repo-a", "instance_owner__repo-b")
     batch = _create_batch(store, instance_ids=instance_ids)
     catalog = FakeCatalog(instance_ids)
-    calls: list[tuple[object, object]] = []
+    calls: list[tuple[RunConfig, SweBenchProInstance]] = []
     monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
     first_source = FakeSource()
     first = EvaluationWorker(
@@ -995,3 +1034,259 @@ def test_run_forever_recovers_once_and_waits_only_when_idle(
 
     assert recoveries == [NOW]
     assert waits == [config.poll_seconds]
+
+
+def test_supervisor_runs_four_isolated_task_pairs_and_stop_prevents_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, task_parallelism=4)
+    store = _store(config)
+    batch = _create_batch(
+        store,
+        key="parallel-supervisor",
+        instance_ids=tuple(f"instance_owner__repo-{index}" for index in range(5)),
+    )
+    catalog = FakeCatalog(tuple(f"instance_owner__repo-{index}" for index in range(5)))
+    entered = threading.Event()
+    release = threading.Event()
+    calls_lock = threading.Lock()
+    run_ids: list[str] = []
+
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        del instance, on_phase
+        with calls_lock:
+            run_ids.append(run_config.run_id)
+            if len(run_ids) == 4:
+                entered.set()
+        release.wait(timeout=5)
+        report = config.run_root / "runs" / run_config.run_id / "report.md"
+        report.parent.mkdir(parents=True)
+        report.write_text("safe")
+        return MinimalRunResult(run_config.run_id, report, True, True)
+
+    monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
+    worker = EvaluationWorker(
+        config,
+        store,
+        runner=runner,
+        source=FakeSource(),
+        catalog=catalog,
+        clock=lambda: NOW,
+    )
+    supervisor = threading.Thread(target=worker.run_forever)
+    supervisor.start()
+    try:
+        assert entered.wait(timeout=3)
+        health = store.health_snapshot(now=NOW)
+        assert health["task_parallelism"] == 4
+        assert health["active_task_pairs"] == 4
+        assert len(store.list_tasks(status=TaskStatus.QUEUED, limit=10, offset=0)) == 1
+        assert len(set(run_ids)) == 4
+    finally:
+        worker.stop()
+        release.set()
+        supervisor.join(timeout=5)
+
+    assert not supervisor.is_alive()
+    children = store.list_batch_tasks(batch.batch_id)
+    assert [child.status for child in children].count(TaskStatus.SUCCEEDED) == 4
+    assert [child.status for child in children].count(TaskStatus.QUEUED) == 1
+
+
+def test_task_pair_worker_directly_preserves_phase_order_and_report_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    task = _create(store, key="direct-task-pair")
+    phases: list[RunPhase] = []
+
+    def runner(run_config: Any, *, on_phase: Any) -> MinimalRunResult:
+        for phase in (RunPhase.RUNNING_OFF, RunPhase.RUNNING_ON, RunPhase.OFFICIAL_EVALUATION):
+            phases.append(phase)
+            on_phase(phase)
+        report = config.run_root / "runs" / run_config.run_id / "report.md"
+        report.parent.mkdir(parents=True)
+        report.write_text("safe")
+        return MinimalRunResult(run_config.run_id, report, True, True)
+
+    monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
+    slot = TaskPairWorker(config, store, runner=runner, worker_id="direct-slot", clock=lambda: NOW)
+
+    assert slot.run_once() is True
+    assert phases == [RunPhase.RUNNING_OFF, RunPhase.RUNNING_ON, RunPhase.OFFICIAL_EVALUATION]
+    completed = store.get(task.task_id)
+    assert completed.status is TaskStatus.SUCCEEDED
+    assert completed.phase is TaskPhase.OFFICIAL_EVALUATION
+
+
+def test_second_full_supervisor_cannot_start_slots_while_process_lock_is_owned(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    first_task = _create(store, key="full-supervisor-first")
+    _create(store, key="full-supervisor-second")
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[tuple[str, str]] = []
+
+    def first_runner(run_config: Any, *, on_phase: Any) -> MinimalRunResult:
+        del on_phase
+        calls.append(("first", run_config.run_id))
+        entered.set()
+        release.wait(timeout=3)
+        raise RuntimeError("finish first supervisor")
+
+    def second_runner(run_config: Any, *, on_phase: Any) -> MinimalRunResult:
+        del on_phase
+        calls.append(("second", run_config.run_id))
+        raise RuntimeError("second supervisor should not start")
+
+    first = EvaluationWorker(config, store, runner=first_runner, worker_id="full-first", clock=lambda: NOW)
+    second = EvaluationWorker(config, store, runner=second_runner, worker_id="full-second", clock=lambda: NOW)
+    first_thread = threading.Thread(target=first.run_forever)
+    first_thread.start()
+    try:
+        assert entered.wait(timeout=2)
+        second.run_forever()
+        assert calls == [("first", first_task.task_id)]
+    finally:
+        first.stop()
+        release.set()
+        first_thread.join(timeout=3)
+    assert not first_thread.is_alive()
+
+
+def test_supervisor_surfaces_slot_failure_and_pauses_runnable_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    batch = _create_batch(store, key="slot-failure", instance_ids=("instance_owner__repo-a",))
+
+    def fail_recovery(*, now: datetime) -> list[str]:
+        del now
+        raise RuntimeError("private slot failure")
+
+    monkeypatch.setattr(store, "recover_expired", fail_recovery)
+    worker = EvaluationWorker(config, store, clock=lambda: NOW)
+
+    with pytest.raises(RuntimeError, match="Evaluation worker slot failed"):
+        worker.run_forever()
+
+    paused = store.get_batch(batch.batch_id)
+    assert paused.status is BatchStatus.PAUSED
+    assert paused.control.pause_reason is BatchPauseReason.INFRASTRUCTURE_FAILURE
+
+
+def test_supervisor_slot_failure_stops_replacements_joins_active_slots_and_raises_safely(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, task_parallelism=4)
+    store = _store(config)
+    for index in range(5):
+        _create(store, key=f"slot-failure-cleanup-{index}")
+    entered = threading.Event()
+    release = threading.Event()
+    injected_failure = threading.Event()
+    supervisor_done = threading.Event()
+    calls_lock = threading.Lock()
+    run_ids: list[str] = []
+    errors: list[BaseException] = []
+
+    def runner(run_config: Any, *, on_phase: Any) -> MinimalRunResult:
+        del on_phase
+        with calls_lock:
+            run_ids.append(run_config.run_id)
+            if len(run_ids) == 3:
+                entered.set()
+        assert release.wait(timeout=5)
+        report = config.run_root / "runs" / run_config.run_id / "report.md"
+        report.parent.mkdir(parents=True)
+        report.write_text("safe")
+        return MinimalRunResult(run_config.run_id, report, True, True)
+
+    monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
+    worker = EvaluationWorker(config, store, runner=runner, worker_id="failing-supervisor", clock=lambda: NOW)
+    failing_slot = worker._slots[0]
+
+    def fail_after_other_slots_enter(_stop: threading.Event | None = None) -> None:
+        assert entered.wait(timeout=3)
+        injected_failure.set()
+        raise RuntimeError("private slot detail")
+
+    monkeypatch.setattr(failing_slot, "run_forever", fail_after_other_slots_enter)
+
+    def supervise() -> None:
+        try:
+            worker.run_forever()
+        except BaseException as error:  # noqa: BLE001 - the test asserts the supervisor boundary
+            errors.append(error)
+        finally:
+            supervisor_done.set()
+
+    supervisor = threading.Thread(target=supervise)
+    supervisor.start()
+    try:
+        assert injected_failure.wait(timeout=3)
+        assert worker._stop.is_set()
+        assert not supervisor_done.wait(timeout=0.1)
+        assert len(run_ids) == 3
+    finally:
+        worker.stop()
+        release.set()
+        supervisor.join(timeout=5)
+
+    assert not supervisor.is_alive()
+    assert supervisor_done.is_set()
+    assert len(errors) == 1
+    assert type(errors[0]) is RuntimeError
+    assert str(errors[0]) == "Evaluation worker slot failed"
+    assert "private slot detail" not in str(errors[0])
+    assert len(run_ids) == 3
+    assert len(store.list_tasks(status=TaskStatus.SUCCEEDED, limit=10, offset=0)) == 3
+    assert len(store.list_tasks(status=TaskStatus.QUEUED, limit=10, offset=0)) == 2
+
+
+def test_supervisor_partial_thread_start_failure_stops_and_joins_started_slots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, task_parallelism=4)
+    store = _store(config)
+    worker = EvaluationWorker(config, store, worker_id="partial-start", clock=lambda: NOW)
+    real_thread = threading.Thread
+    started: list[int] = []
+    joined: list[int] = []
+    wrappers: list[ControlledThread] = []
+
+    class ControlledThread:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.index = len(wrappers) + 1
+            self.inner = real_thread(*args, **kwargs)
+            wrappers.append(self)
+
+        def start(self) -> None:
+            started.append(self.index)
+            if self.index == 2:
+                raise OSError("private thread-start detail")
+            self.inner.start()
+
+        def join(self) -> None:
+            joined.append(self.index)
+            self.inner.join()
+
+    monkeypatch.setattr("powercontext_eval.web.worker.threading.Thread", ControlledThread)
+
+    with pytest.raises(RuntimeError, match="^Evaluation worker slot failed$") as raised:
+        worker.run_forever()
+
+    assert "private thread-start detail" not in str(raised.value)
+    assert worker._stop.is_set()
+    assert len(wrappers) == 4
+    assert started == [1, 2]
+    assert joined == [1]
+    assert not wrappers[0].inner.is_alive()

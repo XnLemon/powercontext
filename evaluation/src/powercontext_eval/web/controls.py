@@ -34,6 +34,7 @@ class BatchPauseReason(StrEnum):
     USAGE_THRESHOLD = "usage_threshold"
     USAGE_UNAVAILABLE = "usage_unavailable"
     QUOTA_LIMIT = "quota_limit"
+    INFRASTRUCTURE_FAILURE = "infrastructure_failure"
 
 
 class BatchPreviewRequest(_FrozenModel):

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from base64 import b64encode, urlsafe_b64encode
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import BinaryIO, cast
 from urllib.parse import quote, quote_plus
@@ -284,7 +285,7 @@ class TranscriptDocker:
             return command_result("a" * 40 + "\n")
         if argv[:2] == ("git", "status"):
             return command_result("")
-        if argv[-3:] == ("network", "inspect", "powercontext-eval-run-1"):
+        if argv[-3:-1] == ("network", "inspect"):
             return command_result('[{"IPAM":{"Config":[{"Gateway":"172.29.0.1"}]}}]')
         if "plugin" in argv and "list" in argv:
             return command_result(
@@ -453,6 +454,36 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
         assert chown[-4:] == ("--recursive", "2950:100", "/workspace", "/runtime")
     else:
         assert all((path.stat().st_uid, path.stat().st_gid) == (2950, 100) for path in (paths.workspace, paths.runtime))
+
+
+def test_distinct_run_ids_derive_distinct_runtime_network_and_scope(tmp_path: Path) -> None:
+    runtimes: list[Path] = []
+    networks: list[str] = []
+    scopes: list[str] = []
+
+    for run_id in ("parallel-run-a", "parallel-run-b"):
+        root = tmp_path / run_id
+        paths = make_paths(root)
+        config = replace(sut_config(root), run_id=run_id)
+        config.codex_binary.write_text("binary")
+        config.uv_binary.write_text("binary")
+        docker = TranscriptDocker()
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            config,
+            Arm.ON,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root),
+        )
+        run = next(command for command in docker.commands if command[:3] == ("docker", "run", "-d"))
+        evidence_command = next(command for command in docker.commands if "evidence" in command)
+        runtimes.append(paths.runtime)
+        networks.append(run[run.index("--network") + 1])
+        scopes.append(evidence_command[evidence_command.index("evidence") - 1])
+
+    assert runtimes[0] != runtimes[1]
+    assert networks == ["powercontext-eval-parallel-run-a", "powercontext-eval-parallel-run-b"]
+    assert scopes == ["eval:parallel-run-a:on", "eval:parallel-run-b:on"]
 
 
 def test_sut_uses_timestamp_recorder_and_retains_private_context_traces(tmp_path: Path) -> None:
