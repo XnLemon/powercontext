@@ -33,6 +33,21 @@ If representative measurements do not yet exist, state that the estimate is unav
 is subscription-controlled here, so the console does not display currency or pretend that it has an account balance.
 A real batch requires explicit final approval after the non-mutating preview shows these facts.
 
+## Deferred TODO: configurable task-pair parallelism
+
+Keep the first complete 731-task OFF/ON run strictly serial so that it produces a stable baseline before scheduler
+parallelism changes. Do not change the concurrency of an in-progress baseline batch.
+
+After the serial baseline and its aggregate report have been accepted, add configurable parallelism across independent
+SWE-bench tasks. Preserve the following constraints:
+
+- one task remains an ordered OFF-then-ON comparison pair;
+- each concurrent task keeps its own workspace, runtime, Codex home, PowerContext home, Docker network, and scope;
+- pause and usage thresholds stop new claims without killing active task pairs;
+- Codex subscription usage and rate limits remain account-wide rather than per worker;
+- start validation at four concurrent task pairs, then consider a higher value only after checking isolation, Docker
+  cleanup, official evaluation, host load, and subscription throttling.
+
 ## Subscription usage and batch controls
 
 The launcher first creates a preview. Preview reads the current sanitized account usage and fixed 731-task contract,
