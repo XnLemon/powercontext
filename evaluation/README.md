@@ -170,7 +170,7 @@ row.
 The pinned Open Library instance ending in `v29f82c9cf21d57b242f8d8b0e541525d259e2d63` contains two
 `PASS_TO_PASS` node IDs parameterized from `datetime.now().year`. Its derived evaluator input advances only those
 two year values to the evaluation year and following year so they still identify the tests collected in the task
-container. The retained `instance.jsonl` remains byte-for-byte equivalent to the verified catalog row.
+container. The retained `instance.jsonl` remains value-equivalent to the verified catalog row.
 
 ## Install configuration and units
 
