@@ -15,7 +15,7 @@ from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluati
 from powercontext_eval.codex import CodexOutcome
 from powercontext_eval.errors import CommandFailed
 from powercontext_eval.models import Arm
-from powercontext_eval.powercontext_sut import SutConfig
+from powercontext_eval.powercontext_sut import ProxyRelayConfig, SutConfig
 from powercontext_eval.process import CommandResult, ProcessRunner
 from powercontext_eval.report import ReportBundle
 from powercontext_eval.runner import (
@@ -208,7 +208,14 @@ def _run_with_fakes(
     observed = observed if observed is not None else {}
     process_calls: list[ProcessCall] = []
     evaluator_calls: list[EvaluatorCall] = []
-    observed.update({"process_calls": process_calls, "evaluator_calls": evaluator_calls})
+    evaluator_initializations: list[dict[str, object]] = []
+    observed.update(
+        {
+            "process_calls": process_calls,
+            "evaluator_calls": evaluator_calls,
+            "evaluator_initializations": evaluator_initializations,
+        }
+    )
     image_loaded = image_present
     image_cleanup_attempts = 0
 
@@ -262,6 +269,9 @@ def _run_with_fakes(
             return materialized
 
     class FakeEvaluator:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            evaluator_initializations.append({"args": args, "kwargs": kwargs})
+
         def evaluate(self, **kwargs: object) -> OfficialEvaluation:
             if evaluator_failure is not None:
                 raise evaluator_failure
@@ -305,11 +315,26 @@ def _run_with_fakes(
 
     monkeypatch.setattr("powercontext_eval.runner.ProcessRunner", FakeProcess)
     monkeypatch.setattr("powercontext_eval.runner.GitSource", lambda **kwargs: FakeSource())
-    monkeypatch.setattr("powercontext_eval.runner.OfficialEvaluator", lambda *args, **kwargs: FakeEvaluator())
+    monkeypatch.setattr("powercontext_eval.runner.OfficialEvaluator", FakeEvaluator)
     monkeypatch.setattr("powercontext_eval.runner.DockerSut", lambda *args, **kwargs: FakeSut())
     callback = on_phase if on_phase is not None else lambda phase: events.append(phase)
     result = run_swebench_pro_instance(config, instance=instance, on_phase=callback)
     return config, result, observed
+
+
+def test_runner_reuses_one_proxy_configured_official_evaluator_for_gold_off_and_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _result, observed = _run_with_fakes(tmp_path, monkeypatch, [])
+
+    initializations = cast(list[dict[str, object]], observed["evaluator_initializations"])
+    calls = cast(list[EvaluatorCall], observed["evaluator_calls"])
+    assert len(initializations) == 1
+    assert initializations[0]["kwargs"] == {
+        "python_executable": str(config.harness_python),
+        "proxy": ProxyRelayConfig(config.proxy_url),
+    }
+    assert len(calls) == 3
 
 
 def test_runner_uses_arbitrary_instance_prompt_image_and_base_commit(

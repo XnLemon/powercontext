@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import stat
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
+from typing import BinaryIO, cast
 
 import pytest
 
+import powercontext_eval.powercontext_sut as sut_module
 from powercontext_eval.benchmarks.base import GoldCheckFailed, GoldResult, run_after_gold
 from powercontext_eval.benchmarks.swebench_pro.adapter import (
     DATASET_REVISION,
@@ -19,7 +24,8 @@ from powercontext_eval.benchmarks.swebench_pro.evaluator import (
     TestGroupResult,
 )
 from powercontext_eval.benchmarks.swebench_pro.prediction import BinaryPatchError, encode_predictions
-from powercontext_eval.process import ProcessRunner
+from powercontext_eval.powercontext_sut import LOOPBACK_NO_PROXY, ProxyRelayConfig
+from powercontext_eval.process import CommandResult, ProcessRunner
 
 INSTANCE_ID = "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"
 DATASET_FIELDS = {
@@ -40,6 +46,8 @@ DATASET_FIELDS = {
     "selected_test_files_to_run",
     "dockerhub_tag",
 }
+UPSTREAM_PROXY_URL = "http://127.0.0.1:7890"
+RELAY_URL = "http://172.17.0.1:45678"
 
 
 def raw_instance() -> dict[str, object]:
@@ -159,6 +167,193 @@ def test_official_evaluator_uses_exact_cli_and_retains_raw_output(tmp_path: Path
         "redo": True,
         "block_network": False,
     }
+
+
+def _official_evaluator_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    fake = Path(__file__).parent / "fixtures" / "fake_evaluator.py"
+    (harness / "swe_bench_pro_eval.py").write_bytes(fake.read_bytes())
+    (harness / "run_scripts").mkdir()
+    raw_path = tmp_path / "instance.jsonl"
+    raw_path.write_text(json.dumps(raw_instance(), separators=(",", ":")) + "\n")
+    prediction_path = tmp_path / "predictions.json"
+    prediction_path.write_text(encode_predictions(INSTANCE_ID, "diff --git a/a b/a\n", "codex-0.145.0"))
+    return harness, raw_path, prediction_path, tmp_path / "output"
+
+
+class _InspectingProcess(ProcessRunner):
+    def __init__(self, *, failure: Exception | None = None) -> None:
+        self.failure = failure
+        self.argv: tuple[str, ...] | None = None
+        self.environment: dict[str, str] | None = None
+        self.docker_config: dict[str, object] | None = None
+        self.docker_config_dir: Path | None = None
+        self.directory_mode: int | None = None
+        self.file_mode: int | None = None
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: str | Path,
+        timeout: float | None = None,
+        env: Mapping[str, str] | None = None,
+        check: bool = True,
+        secrets: Sequence[str] = (),
+        input_bytes: bytes | None = None,
+        stdout_sink: BinaryIO | None = None,
+    ) -> CommandResult:
+        self.argv = tuple(argv)
+        assert env is not None
+        environment = dict(env)
+        self.environment = dict(environment)
+        if docker_config := environment.get("DOCKER_CONFIG"):
+            config_dir = Path(docker_config)
+            config_path = config_dir / "config.json"
+            self.docker_config_dir = config_dir
+            self.docker_config = json.loads(config_path.read_text())
+            self.directory_mode = stat.S_IMODE(config_dir.stat().st_mode)
+            self.file_mode = stat.S_IMODE(config_path.stat().st_mode)
+        if self.failure is not None:
+            raise self.failure
+        return super().run(
+            argv,
+            cwd=cwd,
+            timeout=timeout,
+            env=env,
+            check=check,
+            secrets=secrets,
+            input_bytes=input_bytes,
+            stdout_sink=stdout_sink,
+        )
+
+
+class _FakeRelay:
+    def __init__(self) -> None:
+        self.starts: list[tuple[str, ProxyRelayConfig]] = []
+        self.stop_count = 0
+
+    def start(self, gateway: str, upstream: ProxyRelayConfig) -> str:
+        self.starts.append((gateway, upstream))
+        return RELAY_URL
+
+    def stop(self) -> None:
+        self.stop_count += 1
+
+
+def test_official_evaluator_uses_private_container_reachable_proxy_config_and_cleans_up(tmp_path: Path) -> None:
+    harness, raw_path, prediction_path, output_dir = _official_evaluator_inputs(tmp_path)
+    process = _InspectingProcess()
+    relay = _FakeRelay()
+
+    result = OfficialEvaluator(
+        process,
+        python_executable=sys.executable,
+        proxy=ProxyRelayConfig(UPSTREAM_PROXY_URL),
+        relay_factory=lambda: relay,
+        gateway_resolver=lambda _process, _cwd: "172.17.0.1",
+    ).evaluate(
+        harness_root=harness,
+        raw_sample_path=raw_path,
+        prediction_path=prediction_path,
+        output_dir=output_dir,
+        instance_id=INSTANCE_ID,
+    )
+
+    assert result.resolved is True
+    assert process.docker_config == {
+        "proxies": {
+            "default": {
+                "httpProxy": RELAY_URL,
+                "httpsProxy": RELAY_URL,
+                "noProxy": LOOPBACK_NO_PROXY,
+            }
+        }
+    }
+    assert process.directory_mode == 0o700
+    assert process.file_mode == 0o600
+    assert process.environment is not None
+    assert set(process.environment) == {"DOCKER_CONFIG"}
+    assert process.argv is not None
+    assert all(UPSTREAM_PROXY_URL not in argument for argument in process.argv)
+    assert process.docker_config_dir is not None
+    assert not process.docker_config_dir.exists()
+    assert relay.starts == [("172.17.0.1", ProxyRelayConfig(UPSTREAM_PROXY_URL))]
+    assert relay.stop_count == 1
+    retained = "\n".join(path.read_text(errors="replace") for path in output_dir.rglob("*") if path.is_file())
+    assert UPSTREAM_PROXY_URL not in retained
+
+
+def test_official_evaluator_cleans_proxy_config_and_relay_after_process_failure(tmp_path: Path) -> None:
+    harness, raw_path, prediction_path, output_dir = _official_evaluator_inputs(tmp_path)
+    process = _InspectingProcess(failure=RuntimeError("official process failed"))
+    relay = _FakeRelay()
+
+    with pytest.raises(RuntimeError, match="official process failed"):
+        OfficialEvaluator(
+            process,
+            python_executable=sys.executable,
+            proxy=ProxyRelayConfig(UPSTREAM_PROXY_URL),
+            relay_factory=lambda: relay,
+            gateway_resolver=lambda _process, _cwd: "172.17.0.1",
+        ).evaluate(
+            harness_root=harness,
+            raw_sample_path=raw_path,
+            prediction_path=prediction_path,
+            output_dir=output_dir,
+            instance_id=INSTANCE_ID,
+        )
+
+    assert process.docker_config_dir is not None
+    assert not process.docker_config_dir.exists()
+    assert relay.stop_count == 1
+    retained = "\n".join(path.read_text(errors="replace") for path in output_dir.rglob("*") if path.is_file())
+    assert UPSTREAM_PROXY_URL not in retained
+
+
+def test_official_evaluator_without_proxy_preserves_existing_environment_and_skips_relay(tmp_path: Path) -> None:
+    harness, raw_path, prediction_path, output_dir = _official_evaluator_inputs(tmp_path)
+    process = _InspectingProcess()
+    relay = _FakeRelay()
+
+    result = OfficialEvaluator(
+        process,
+        python_executable=sys.executable,
+        relay_factory=lambda: relay,
+        gateway_resolver=lambda _process, _cwd: pytest.fail("gateway must not be resolved"),
+    ).evaluate(
+        harness_root=harness,
+        raw_sample_path=raw_path,
+        prediction_path=prediction_path,
+        output_dir=output_dir,
+        instance_id=INSTANCE_ID,
+    )
+
+    assert result.resolved is True
+    assert process.environment == {}
+    assert process.docker_config_dir is None
+    assert relay.starts == []
+    assert relay.stop_count == 0
+
+
+def test_default_docker_bridge_gateway_uses_read_only_inspect_and_validates_result(tmp_path: Path) -> None:
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    class Process:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+            calls.append((argv, kwargs))
+            return SimpleNamespace(stdout="172.17.0.1\n")
+
+    gateway = sut_module.default_docker_bridge_gateway(cast(ProcessRunner, Process()), tmp_path)
+
+    assert gateway == "172.17.0.1"
+    assert calls == [
+        (
+            ("docker", "network", "inspect", "bridge", "--format={{(index .IPAM.Config 0).Gateway}}"),
+            {"cwd": tmp_path, "timeout": 30},
+        )
+    ]
 
 
 def test_official_evaluator_retains_required_test_details_and_bounded_log(

@@ -184,7 +184,11 @@ def _run_swebench_pro_instance(
         json.dumps(evaluator_row, ensure_ascii=False, separators=(",", ":")) + "\n",
     )
 
-    evaluator = OfficialEvaluator(process, python_executable=os.fspath(config.harness_python))
+    evaluator = OfficialEvaluator(
+        process,
+        python_executable=os.fspath(config.harness_python),
+        proxy=ProxyRelayConfig(config.proxy_url),
+    )
     gold_prediction = run_store.create_text(
         "gold/predictions.json",
         encode_predictions(instance.instance_id, instance.patch, "gold"),

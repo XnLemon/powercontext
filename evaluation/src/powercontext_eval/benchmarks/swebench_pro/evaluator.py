@@ -5,11 +5,20 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from powercontext_eval.errors import PowerContextEvalError
-from powercontext_eval.process import ProcessRunner
+from powercontext_eval.powercontext_sut import (
+    LOOPBACK_NO_PROXY,
+    ProxyRelay,
+    ProxyRelayConfig,
+    SocatProxyRelay,
+    default_docker_bridge_gateway,
+)
+from powercontext_eval.process import CommandResult, ProcessRunner
 
 _SAFE_PREFIX = re.compile(r"[A-Za-z0-9._-]+")
 _TEST_STATUSES = frozenset({"PASSED", "FAILED", "SKIPPED", "ERROR"})
@@ -54,9 +63,20 @@ class OfficialEvaluation:
 class OfficialEvaluator:
     """Invoke, but never reimplement, the official evaluator."""
 
-    def __init__(self, runner: ProcessRunner, *, python_executable: str) -> None:
+    def __init__(
+        self,
+        runner: ProcessRunner,
+        *,
+        python_executable: str,
+        proxy: ProxyRelayConfig | None = None,
+        relay_factory: Callable[[], ProxyRelay] = SocatProxyRelay,
+        gateway_resolver: Callable[[ProcessRunner, Path], str] = default_docker_bridge_gateway,
+    ) -> None:
         self._runner = runner
         self._python = python_executable
+        self._proxy = proxy
+        self._relay_factory = relay_factory
+        self._gateway_resolver = gateway_resolver
 
     def evaluate(
         self,
@@ -101,12 +121,21 @@ class OfficialEvaluator:
             )
             if key in os.environ
         }
-        result = self._runner.run(
-            argv,
-            cwd=harness_root,
-            timeout=4_200,
-            env=environment,
-        )
+        if self._proxy is None:
+            result = self._run_harness(argv, harness_root, environment)
+        else:
+            relay = self._relay_factory()
+            try:
+                gateway = self._gateway_resolver(self._runner, output_dir.parent)
+                relay_url = relay.start(gateway, self._proxy)
+                with tempfile.TemporaryDirectory(prefix=".official-docker-", dir=output_dir.parent) as temporary:
+                    docker_config = Path(temporary)
+                    os.chmod(docker_config, 0o700)
+                    _write_docker_proxy_config(docker_config / "config.json", relay_url)
+                    environment["DOCKER_CONFIG"] = temporary
+                    result = self._run_harness(argv, harness_root, environment)
+            finally:
+                relay.stop()
         (output_dir / "evaluator.stdout.log").write_text(result.stdout)
         (output_dir / "evaluator.stderr.log").write_text(result.stderr)
         result_path = output_dir / "eval_results.json"
@@ -147,6 +176,36 @@ class OfficialEvaluator:
             pass_to_pass=pass_result,
             log_excerpt=excerpt,
         )
+
+    def _run_harness(
+        self,
+        argv: tuple[str, ...],
+        harness_root: Path,
+        environment: dict[str, str],
+    ) -> CommandResult:
+        return self._runner.run(
+            argv,
+            cwd=harness_root,
+            timeout=4_200,
+            env=environment,
+        )
+
+
+def _write_docker_proxy_config(path: Path, relay_url: str) -> None:
+    payload = {
+        "proxies": {
+            "default": {
+                "httpProxy": relay_url,
+                "httpsProxy": relay_url,
+                "noProxy": LOOPBACK_NO_PROXY,
+            }
+        }
+    }
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, separators=(",", ":"))
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def _required_names(names: tuple[str, ...], group: str) -> tuple[str, ...]:

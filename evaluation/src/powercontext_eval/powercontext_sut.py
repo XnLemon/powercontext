@@ -80,6 +80,17 @@ def loopback_proxy_environment(relay_url: str) -> dict[str, str]:
     }
 
 
+def default_docker_bridge_gateway(process: ProcessRunner, cwd: Path) -> str:
+    """Inspect and validate Docker's existing default bridge gateway."""
+
+    result = process.run(
+        ("docker", "network", "inspect", "bridge", "--format={{(index .IPAM.Config 0).Gateway}}"),
+        cwd=cwd,
+        timeout=30,
+    )
+    return _validated_gateway(result.stdout.strip())
+
+
 def auth_secret_variants(auth_json: Path) -> tuple[str, ...]:
     """Extract nested scalar credentials and conservative encoded derivatives without logging them."""
 
