@@ -966,6 +966,36 @@ def test_transient_plugin_install_failure_is_retried_after_partial_codex_config_
     assert len(plugin_installs) == 2
 
 
+def test_transient_readiness_probe_timeout_is_retried(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class SlowFirstReadinessProbeDocker(TranscriptDocker):
+        timed_out = False
+
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if not self.timed_out and "doctor" in argv:
+                self.commands.append(argv)
+                self.timed_out = True
+                raise CommandTimedOut("injected readiness timeout", command_result("", returncode=124))
+            return super().run(argv, **kwargs)
+
+    docker = SlowFirstReadinessProbeDocker()
+
+    DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config,
+        Arm.ON,
+        paths,
+        b"prompt",
+        ArtifactStore(paths.result_root),
+    )
+
+    readiness_probes = [command for command in docker.commands if "doctor" in command]
+    assert len(readiness_probes) == 2
+
+
 def test_managed_python_is_kept_in_the_writable_arm_runtime(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     config = sut_config(tmp_path)

@@ -28,7 +28,7 @@ from powercontext_eval.codex import (
     CodexOutcome,
     CodexRunner,
 )
-from powercontext_eval.errors import CommandError, PowerContextEvalError
+from powercontext_eval.errors import CommandError, CommandTimedOut, PowerContextEvalError
 from powercontext_eval.models import Arm
 from powercontext_eval.process import CommandResult, ProcessRunner
 
@@ -1093,7 +1093,10 @@ class DockerSut:
         )
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
-            result = self._docker.run(command, cwd=paths.runtime, timeout=10, check=False)
+            try:
+                result = self._docker.run(command, cwd=paths.runtime, timeout=10, check=False)
+            except CommandTimedOut:
+                continue
             if result.returncode == 0:
                 return
             time.sleep(0.5)
