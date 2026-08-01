@@ -366,6 +366,44 @@ def sut_config(tmp_path: Path) -> SutConfig:
     )
 
 
+def test_workspace_initialization_recovers_from_docker_cp_rejecting_an_escaping_symlink(
+    tmp_path: Path,
+) -> None:
+    class InvalidSymlinkCopyDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if argv[:2] == ("docker", "cp"):
+                self.commands.append(argv)
+                cwd = os.fspath(kwargs["cwd"])
+                result = CommandResult(
+                    argv,
+                    cwd,
+                    1,
+                    "",
+                    'invalid symlink "/app/node_modules/example" -> "../../../.cache/example"',
+                )
+                raise CommandFailed("injected invalid symlink", result)
+            return super().run(argv, **kwargs)
+
+    paths = make_paths(tmp_path)
+    paths.prepare()
+    docker = InvalidSymlinkCopyDocker()
+
+    DockerSut(docker)._initialize_workspace(sut_config(tmp_path), Arm.OFF, paths)
+
+    fallback = next(
+        command
+        for command in docker.commands
+        if command[:2] == ("docker", "run") and command[-2:] == ("/app/.", "/workspace")
+    )
+    assert "--network" in fallback
+    assert fallback[fallback.index("--network") + 1] == "none"
+    assert ("--cap-drop", "ALL") == fallback[fallback.index("--cap-drop") : fallback.index("--cap-drop") + 2]
+    assert "no-new-privileges" in " ".join(fallback)
+    assert fallback[fallback.index("--user") + 1] == "2950:100"
+    assert fallback[fallback.index("--entrypoint") + 1] == "/bin/cp"
+    assert fallback[-4:] == ("--archive", "--no-preserve=ownership", "/app/.", "/workspace")
+
+
 def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     docker = TranscriptDocker()

@@ -28,13 +28,14 @@ from powercontext_eval.codex import (
     CodexOutcome,
     CodexRunner,
 )
-from powercontext_eval.errors import CommandError, CommandTimedOut, PowerContextEvalError
+from powercontext_eval.errors import CommandError, CommandFailed, CommandTimedOut, PowerContextEvalError
 from powercontext_eval.models import Arm
 from powercontext_eval.process import CommandResult, ProcessRunner
 
 PLUGIN_ID = "powercontext@powercontext"
 _SAFE_RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 _SHA = re.compile(r"[0-9a-f]{40}")
+_INVALID_DOCKER_COPY_SYMLINK = re.compile(r'invalid symlink "[^"\r\n]+" -> "[^"\r\n]+"')
 _CONTAINER_UID_GID = "2950:100"
 _CONTAINER_CODEX = "/tools/codex-dir/codex"
 _CONTAINER_UV = "/tools/uv-dir/uv"
@@ -767,11 +768,48 @@ class DockerSut:
                 timeout=60,
             )
             created = True
-            self._docker.run(
-                ("docker", "cp", f"{name}:/app/.", os.fspath(paths.workspace)),
-                cwd=paths.runtime,
-                timeout=300,
-            )
+            try:
+                self._docker.run(
+                    ("docker", "cp", f"{name}:/app/.", os.fspath(paths.workspace)),
+                    cwd=paths.runtime,
+                    timeout=300,
+                )
+            except CommandFailed as error:
+                if _INVALID_DOCKER_COPY_SYMLINK.fullmatch(error.result.stderr.strip()) is None:
+                    raise
+                self._docker.run(
+                    (
+                        "docker",
+                        "run",
+                        "--rm",
+                        "--network",
+                        "none",
+                        "--read-only",
+                        "--cap-drop",
+                        "ALL",
+                        "--security-opt",
+                        "no-new-privileges",
+                        "--user",
+                        _CONTAINER_UID_GID,
+                        "--cpus",
+                        config.limits.cpus,
+                        "--memory",
+                        config.limits.memory,
+                        "--pids-limit",
+                        str(config.limits.pids),
+                        "--mount",
+                        f"type=bind,src={paths.workspace},dst=/workspace",
+                        "--entrypoint",
+                        "/bin/cp",
+                        config.task_image,
+                        "--archive",
+                        "--no-preserve=ownership",
+                        "/app/.",
+                        "/workspace",
+                    ),
+                    cwd=paths.runtime,
+                    timeout=300,
+                )
         finally:
             if created:
                 self._docker.run(("docker", "rm", "-f", name), cwd=paths.runtime, timeout=30, check=False)
