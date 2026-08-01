@@ -49,6 +49,14 @@ _TRANSIENT_IMAGE_REMOVAL_ERRORS = (
     "is using its referenced image",
     "is being used by stopped container",
 )
+_OPENLIBRARY_DYNAMIC_YEAR_INSTANCE_ID = (
+    "instance_internetarchive__openlibrary-1351c59fd43689753de1fca32c78d539a116ffc1-"
+    "v29f82c9cf21d57b242f8d8b0e541525d259e2d63"
+)
+_OPENLIBRARY_DYNAMIC_YEAR_PREFIX = (
+    "openlibrary/catalog/add_book/tests/test_add_book.py::TestNormalizeImportRecord::"
+    "test_future_publication_dates_are_deleted"
+)
 
 
 class RunPhase(StrEnum):
@@ -176,9 +184,15 @@ def _run_swebench_pro_instance(
         "instance.jsonl",
         json.dumps(instance.official_row(), ensure_ascii=False, separators=(",", ":")) + "\n",
     )
+    required_fail_to_pass, required_pass_to_pass = _evaluator_test_requirements(
+        instance,
+        evaluation_year=datetime.now(UTC).year,
+    )
     evaluator_row = instance.official_row()
-    evaluator_row["fail_to_pass"] = json.dumps(instance.fail_to_pass, ensure_ascii=False, separators=(",", ":"))
-    evaluator_row["pass_to_pass"] = json.dumps(instance.pass_to_pass, ensure_ascii=False, separators=(",", ":"))
+    evaluator_row["FAIL_TO_PASS"] = list(required_fail_to_pass)
+    evaluator_row["PASS_TO_PASS"] = list(required_pass_to_pass)
+    evaluator_row["fail_to_pass"] = json.dumps(required_fail_to_pass, ensure_ascii=False, separators=(",", ":"))
+    evaluator_row["pass_to_pass"] = json.dumps(required_pass_to_pass, ensure_ascii=False, separators=(",", ":"))
     evaluator_copy = run_store.create_text(
         "evaluator-instance.jsonl",
         json.dumps(evaluator_row, ensure_ascii=False, separators=(",", ":")) + "\n",
@@ -207,8 +221,8 @@ def _run_swebench_pro_instance(
         prediction_path=gold_prediction,
         output_dir=layout.run_artifacts / "gold" / "official",
         instance_id=instance.instance_id,
-        required_fail_to_pass=instance.fail_to_pass,
-        required_pass_to_pass=instance.pass_to_pass,
+        required_fail_to_pass=required_fail_to_pass,
+        required_pass_to_pass=required_pass_to_pass,
         patch_applied=gold_patch_applied,
     )
 
@@ -272,8 +286,8 @@ def _run_swebench_pro_instance(
                 prediction_path=prediction,
                 output_dir=layout.arm_artifacts(arm) / "official",
                 instance_id=instance.instance_id,
-                required_fail_to_pass=instance.fail_to_pass,
-                required_pass_to_pass=instance.pass_to_pass,
+                required_fail_to_pass=required_fail_to_pass,
+                required_pass_to_pass=required_pass_to_pass,
                 patch_applied=patch_applied,
             )
             write_context_trace(
@@ -316,6 +330,27 @@ def _run_swebench_pro_instance(
     report_path = run_store.create_text("report.md", rendered)
     run_store.create_json("report.json", report.model_dump(mode="json"))
     return RunResult(run_id, report_path, off_eval.resolved, on_eval.resolved)
+
+
+def _evaluator_test_requirements(
+    instance: SweBenchProInstance,
+    *,
+    evaluation_year: int,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if instance.instance_id != _OPENLIBRARY_DYNAMIC_YEAR_INSTANCE_ID:
+        return instance.fail_to_pass, instance.pass_to_pass
+
+    # This pinned test parameterizes two cases from datetime.now().year, so the collected node IDs advance yearly.
+    replacements = {
+        f"{_OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[2025-True]": (
+            f"{_OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[{evaluation_year}-True]"
+        ),
+        f"{_OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[2026-False]": (
+            f"{_OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[{evaluation_year + 1}-False]"
+        ),
+    }
+    remapped_pass_to_pass = tuple(replacements.get(name, name) for name in instance.pass_to_pass)
+    return instance.fail_to_pass, remapped_pass_to_pass
 
 
 @dataclass(frozen=True)

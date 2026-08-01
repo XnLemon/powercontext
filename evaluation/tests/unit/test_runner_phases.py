@@ -28,6 +28,14 @@ from powercontext_eval.runner import (
 )
 
 INSTANCE_ID = "instance_owner__repo-b"
+OPENLIBRARY_DYNAMIC_YEAR_INSTANCE_ID = (
+    "instance_internetarchive__openlibrary-1351c59fd43689753de1fca32c78d539a116ffc1-"
+    "v29f82c9cf21d57b242f8d8b0e541525d259e2d63"
+)
+OPENLIBRARY_DYNAMIC_YEAR_PREFIX = (
+    "openlibrary/catalog/add_book/tests/test_add_book.py::TestNormalizeImportRecord::"
+    "test_future_publication_dates_are_deleted"
+)
 IMAGE_ID = "sha256:" + "d" * 64
 ProcessCall = tuple[tuple[str, ...], dict[str, object]]
 EvaluatorCall = dict[str, object]
@@ -58,6 +66,17 @@ def _instance() -> SweBenchProInstance:
             "version": "v2",
         }
     )
+
+
+def _openlibrary_dynamic_year_instance() -> SweBenchProInstance:
+    raw = _instance().official_row()
+    raw["instance_id"] = OPENLIBRARY_DYNAMIC_YEAR_INSTANCE_ID
+    raw["PASS_TO_PASS"] = [
+        "test_regression",
+        f"{OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[2025-True]",
+        f"{OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[2026-False]",
+    ]
+    return SweBenchProInstance.from_public_raw(raw)
 
 
 def test_run_phases_have_stable_order_and_values() -> None:
@@ -199,9 +218,10 @@ def _run_with_fakes(
     image_cleanup_conflicts: int = 0,
     image_cleanup_failure: Exception | None = None,
     observed: dict[str, object] | None = None,
+    instance: SweBenchProInstance | None = None,
 ) -> tuple[RunConfig, MinimalRunResult, dict[str, object]]:
     config = _config(tmp_path)
-    instance = _instance()
+    instance = _instance() if instance is None else instance
     materialized = tmp_path / "materialized"
     materialized.mkdir()
     resolved = SimpleNamespace(sha="a" * 40)
@@ -283,8 +303,8 @@ def _run_with_fakes(
             retained = json.loads(raw_sample_path.read_text())
             assert raw_sample_path.name == "evaluator-instance.jsonl"
             assert retained["instance_id"] == instance.instance_id
-            assert json.loads(retained["fail_to_pass"]) == list(instance.fail_to_pass)
-            assert json.loads(retained["pass_to_pass"]) == list(instance.pass_to_pass)
+            assert json.loads(retained["fail_to_pass"]) == list(cast(tuple[str, ...], kwargs["required_fail_to_pass"]))
+            assert json.loads(retained["pass_to_pass"]) == list(cast(tuple[str, ...], kwargs["required_pass_to_pass"]))
             events.append("gold" if prediction_path.parent.name == "gold" else "official")
             return OfficialEvaluation(instance.instance_id, True, "", "")
 
@@ -381,6 +401,27 @@ def test_runner_uses_arbitrary_instance_prompt_image_and_base_commit(
             "official_evaluator",
         ]
     assert not any(call[0][:3] == ("docker", "image", "rm") for call in calls)
+
+
+def test_runner_reconciles_the_pinned_openlibrary_dynamic_year_test_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance = _openlibrary_dynamic_year_instance()
+    current_year = datetime.now(UTC).year
+    _config, _result, observed = _run_with_fakes(tmp_path, monkeypatch, [], instance=instance)
+
+    calls = cast(list[EvaluatorCall], observed["evaluator_calls"])
+    expected_pass_to_pass = (
+        "test_regression",
+        f"{OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[{current_year}-True]",
+        f"{OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[{current_year + 1}-False]",
+    )
+    assert {call["required_pass_to_pass"] for call in calls} == {expected_pass_to_pass}
+    retained = json.loads(cast(Path, calls[0]["raw_sample_path"]).read_text())
+    assert retained["PASS_TO_PASS"] == list(expected_pass_to_pass)
+    assert json.loads(retained["pass_to_pass"]) == list(expected_pass_to_pass)
+    original = json.loads((_config.root / "runs" / _result.run_id / "instance.jsonl").read_text())
+    assert original == instance.official_row()
 
 
 def test_runner_removes_a_task_image_imported_for_a_completed_run(
