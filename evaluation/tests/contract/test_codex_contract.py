@@ -612,6 +612,16 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
     assert "CODEX_HOME=/runtime/codex-home" in daemon
     assert "evaluation-daemon.pid" in " ".join(daemon)
     assert "evaluation-daemon.log" in " ".join(daemon)
+    readiness = next(
+        command
+        for command in docker.commands
+        if command[:3] == ("docker", "exec", "powercontext-eval-run-1-on")
+        and any("evaluation-daemon.pid" in part for part in command)
+    )
+    readiness_script = readiness[-1]
+    assert 'readlink "/proc/$pid/exe"' in readiness_script
+    assert 'tr "\\000" "\\n" < "/proc/$pid/cmdline" | grep -Fqx daemon' in readiness_script
+    assert "kill -0" not in readiness_script
 
     tokensflow = outcome.tokensflow
     assert tokensflow.host_version == "1.0.16"
@@ -629,6 +639,53 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
     assert raw_host_identity not in retained
     assert raw_container_identity not in retained
     assert raw_version not in retained
+
+
+def test_tokensflow_commands_redact_only_credentials_and_allow_normal_provenance(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    secret = "tokensflow-command-redaction-secret"
+    (paths.tokensflow_home / ".tokensflow/credentials.json").write_text(
+        json.dumps(
+            {
+                "access_token": secret,
+                "enabled": True,
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            }
+        )
+    )
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class CapturingSecretsDocker(TranscriptDocker):
+        tokensflow_secrets: list[tuple[str, ...]]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.tokensflow_secrets = []
+
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if any(part.endswith("/tokensflow") for part in argv) or any(
+                "evaluation-daemon.pid" in part for part in argv
+            ):
+                self.tokensflow_secrets.append(tuple(cast(Sequence[str], kwargs.get("secrets", ()))))
+            return super().run(argv, **kwargs)
+
+    docker = CapturingSecretsDocker()
+    outcome = DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config,
+        Arm.ON,
+        paths,
+        b"prompt",
+        ArtifactStore(paths.result_root),
+    )
+
+    assert outcome.tokensflow.identity_match is True
+    assert len(docker.tokensflow_secrets) == 6
+    assert all(secret in variants for variants in docker.tokensflow_secrets)
+    provenance = (paths.result_root / "tokensflow/provenance.json").read_text()
+    assert '"identity_match": true' in provenance
 
 
 @pytest.mark.parametrize(
@@ -822,27 +879,41 @@ def test_tokensflow_arm_home_path_validation_is_a_sanitized_infrastructure_error
         replace(paths, tokensflow_home=tokensflow_home)
 
 
-@pytest.mark.parametrize("phase", ["detached-exec", "readiness"])
-def test_tokensflow_daemon_failures_are_sanitized_block_codex_and_cleanup(
+@pytest.mark.parametrize("phase", ["capture", "detached-exec", "readiness"])
+def test_tokensflow_command_failures_are_sanitized_block_codex_and_cleanup(
     tmp_path: Path,
     phase: str,
 ) -> None:
-    leaked_identity = "leaked-daemon-person"
-    leaked_version = "tokensflow RAW 9.9.9"
+    secret = "tokensflow-command-failure-secret"
     paths = make_paths(tmp_path)
+    (paths.tokensflow_home / ".tokensflow/credentials.json").write_text(json.dumps({"access_token": secret}))
     config = sut_config(tmp_path)
     config.codex_binary.write_text("binary")
     config.uv_binary.write_text("binary")
 
     class AdversarialDocker(TranscriptDocker):
+        tokensflow_secrets: list[tuple[str, ...]]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.tokensflow_secrets = []
+
         def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
             detached = argv[:3] == ("docker", "exec", "-d") and _is_tokensflow(argv, "daemon")
-            readiness = any("kill -0" in part for part in argv)
-            if (phase == "detached-exec" and detached) or (phase == "readiness" and readiness):
+            readiness = not detached and any("evaluation-daemon.pid" in part for part in argv)
+            capture = argv == (os.fspath(config.tokensflow_binary), "whoami")
+            related = any(part.endswith("/tokensflow") for part in argv) or readiness
+            if related:
+                self.tokensflow_secrets.append(tuple(cast(Sequence[str], kwargs.get("secrets", ()))))
+            if (
+                (phase == "capture" and capture)
+                or (phase == "detached-exec" and detached)
+                or (phase == "readiness" and readiness)
+            ):
                 self.commands.append(argv)
-                result = command_result(leaked_identity, returncode=70, stderr=leaked_version)
-                if detached:
-                    raise CommandFailed(f"{leaked_identity} {leaked_version}", result)
+                result = command_result(secret, returncode=70, stderr=secret)
+                if phase != "readiness":
+                    raise CommandFailed(secret, result)
                 return result
             return super().run(argv, **kwargs)
 
@@ -867,14 +938,54 @@ def test_tokensflow_daemon_failures_are_sanitized_block_codex_and_cleanup(
             ArtifactStore(paths.result_root),
         )
 
-    assert str(captured.value) == "TokensFlow daemon failed to start"
-    assert leaked_identity not in repr(captured.value)
-    assert leaked_version not in repr(captured.value)
+    expected = "TokensFlow command failed" if phase == "capture" else "TokensFlow daemon failed to start"
+    assert str(captured.value) == expected
+    assert captured.value.__context__ is None
+    current: BaseException | None = captured.value
+    while current is not None:
+        assert secret not in repr(current)
+        assert secret not in str(current)
+        assert secret not in repr(getattr(current, "result", None))
+        current = current.__cause__ or current.__context__
+    assert docker.tokensflow_secrets
+    assert all(secret in variants for variants in docker.tokensflow_secrets)
     assert not any(_is_codex_inference(command) for command in docker.commands)
     assert ("docker", "rm", "-f", "powercontext-eval-run-1-on") in docker.commands
     retained = b"".join(path.read_bytes() for path in paths.result_root.rglob("*") if path.is_file())
-    assert leaked_identity.encode() not in retained
-    assert leaked_version.encode() not in retained
+    assert secret.encode() not in retained
+
+
+def test_pre_exec_shell_pid_never_satisfies_tokensflow_daemon_readiness(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class PreExecShellDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            readiness = argv[:3] == ("docker", "exec", "powercontext-eval-run-1-on") and any(
+                "evaluation-daemon.pid" in part for part in argv
+            )
+            if readiness:
+                self.commands.append(argv)
+                is_identity_probe = any("/proc/" in part or "readlink" in part for part in argv)
+                return command_result("", returncode=1 if is_identity_probe else 0)
+            return super().run(argv, **kwargs)
+
+    clock_values = iter((0.0, 6.0, 6.0))
+    docker = PreExecShellDocker()
+    sut = DockerSut(
+        docker,
+        relay_factory=FakeRelay,
+        clock=lambda: next(clock_values),
+        sleeper=lambda _seconds: None,
+    )
+
+    with pytest.raises(TokensFlowInfrastructureError, match="daemon failed to start") as captured:
+        sut.run_arm(config, Arm.ON, paths, b"prompt", ArtifactStore(paths.result_root))
+
+    assert captured.value.__context__ is None
+    assert not any(_is_codex_inference(command) for command in docker.commands)
 
 
 def test_contract_smoke_propagates_dynamic_tokensflow_snapshot_and_secret_boundary(tmp_path: Path) -> None:

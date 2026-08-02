@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -10,6 +12,7 @@ import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote, quote_plus
 
 from powercontext_eval.errors import PowerContextEvalError
 
@@ -74,6 +77,19 @@ _TOKENSFLOW_VERSION = re.compile(rb"(?i:tokensflow)(?:-cli)?\s+v?([0-9]+\.[0-9]+
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 _WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+_SENSITIVE_CREDENTIAL_FIELDS = frozenset(
+    {
+        "access",
+        "access_token",
+        "api_key",
+        "api_token",
+        "client_secret",
+        "password",
+        "refresh_token",
+        "secret",
+        "token",
+    }
+)
 
 
 def normalize_tokensflow_identity(raw: bytes) -> bytes:
@@ -276,8 +292,53 @@ def snapshot_tokensflow_home(source_user_home: Path, destination_user_home: Path
 
 
 def tokensflow_secret_variants(credentials_json: Path) -> tuple[str, ...]:
-    """Return the same conservative nested scalar variants used for Codex credentials."""
+    """Expand only non-empty string values stored under credential-bearing fields."""
 
-    from powercontext_eval.powercontext_sut import auth_secret_variants
+    descriptor = -1
+    try:
+        descriptor = os.open(credentials_json, _READ_FLAGS)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise UnsafeTokensFlowConfiguration("Source is not a safe TokensFlow profile")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            value = json.load(stream)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise UnsafeTokensFlowConfiguration("Source is not a safe TokensFlow profile") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
-    return auth_secret_variants(credentials_json)
+    raw_values: set[str] = set()
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            for key, nested in item.items():
+                if isinstance(key, str) and _is_sensitive_credential_field(key):
+                    if isinstance(nested, str) and nested:
+                        raw_values.add(nested)
+                    continue
+                visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    variants: set[str] = set()
+    for raw in raw_values:
+        encoded = raw.encode("utf-8")
+        variants.update(
+            {
+                raw,
+                quote(raw, safe=""),
+                quote_plus(raw, safe=""),
+                base64.b64encode(encoded).decode("ascii"),
+                base64.urlsafe_b64encode(encoded).decode("ascii"),
+                encoded.hex(),
+            }
+        )
+    return tuple(sorted(variants, key=lambda item: (-len(item), item)))
+
+
+def _is_sensitive_credential_field(field: str) -> bool:
+    normalized = field.casefold().replace("-", "_")
+    return normalized in _SENSITIVE_CREDENTIAL_FIELDS or normalized.endswith(("_token", "_secret", "_password", "_key"))

@@ -147,11 +147,20 @@ def test_snapshot_rejects_preexisting_destination(tmp_path: Path) -> None:
         snapshot_tokensflow_home(_profile(tmp_path), destination)
 
 
-def test_tokensflow_secret_variants_reuse_nested_scalar_protection(tmp_path: Path) -> None:
-    source_home = _profile(tmp_path, '{"nested":{"token":"secret/value"},"account":42}')
+def test_tokensflow_secret_variants_only_expand_sensitive_string_fields(tmp_path: Path) -> None:
+    source_home = _profile(
+        tmp_path,
+        (
+            '{"access_token":"long-access-secret","enabled":true,"expires_in":3600,'
+            '"token_type":"Bearer","nested":{"refresh_token":"secret/value"}}'
+        ),
+    )
 
     variants = tokensflow_secret_variants(source_home / ".tokensflow/credentials.json")
 
+    assert "long-access-secret" in variants
     assert "secret/value" in variants
     assert "secret%2Fvalue" in variants
-    assert "42" in variants
+    assert "true" not in variants
+    assert "3600" not in variants
+    assert "Bearer" not in variants

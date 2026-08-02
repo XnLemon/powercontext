@@ -15,7 +15,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -823,7 +823,10 @@ class DockerSut:
         cwd: Path,
         environment: Mapping[str, str] | None = None,
         timeout: float = 30,
+        secrets: Sequence[str] = (),
     ) -> bytes:
+        result: CommandResult | None = None
+        output = b""
         try:
             with tempfile.TemporaryFile() as sink:
                 result = self._docker.run(
@@ -832,14 +835,14 @@ class DockerSut:
                     timeout=timeout,
                     env=environment,
                     check=False,
+                    secrets=secrets,
                     stdout_sink=sink,
                 )
                 sink.seek(0)
                 output = sink.read()
-        except (CommandError, OSError) as error:
-            del error
-            raise TokensFlowInfrastructureError("TokensFlow command failed") from None
-        if result.returncode != 0:
+        except (CommandError, OSError):
+            pass
+        if result is None or result.returncode != 0:
             raise TokensFlowInfrastructureError("TokensFlow command failed")
         return output
 
@@ -851,6 +854,7 @@ class DockerSut:
         relay_url: str,
     ) -> TokensFlowEvidence:
         tokensflow_binary, tokensflow_home = self._validate_tokensflow_inputs(config, paths)
+        credential_variants = tokensflow_secret_variants(tokensflow_home / ".tokensflow/credentials.json")
         host_environment = {"HOME": os.fspath(tokensflow_home)}
         container_environment = {
             **loopback_proxy_environment(relay_url),
@@ -862,6 +866,7 @@ class DockerSut:
                 (os.fspath(tokensflow_binary), "--version"),
                 cwd=paths.runtime,
                 environment=host_environment,
+                secrets=credential_variants,
             )
         )
         container_version = parse_tokensflow_version(
@@ -875,12 +880,14 @@ class DockerSut:
                     "--version",
                 ),
                 cwd=paths.runtime,
+                secrets=credential_variants,
             )
         )
         host_identity = self._capture_tokensflow_output(
             (os.fspath(tokensflow_binary), "whoami"),
             cwd=paths.runtime,
             environment=host_environment,
+            secrets=credential_variants,
         )
         container_identity = self._capture_tokensflow_output(
             (
@@ -892,6 +899,7 @@ class DockerSut:
                 "whoami",
             ),
             cwd=paths.runtime,
+            secrets=credential_variants,
         )
         return matched_tokensflow_evidence(
             host_version=host_version,
@@ -908,6 +916,7 @@ class DockerSut:
         relay_url: str,
     ) -> TokensFlowDaemonHandle:
         _, tokensflow_home = self._validate_tokensflow_inputs(config, paths)
+        credential_variants = tokensflow_secret_variants(tokensflow_home / ".tokensflow/credentials.json")
         state = "/runtime/tokensflow-home/.local/share/tokensflow"
         container_pid_file = f"{state}/evaluation-daemon.pid"
         container_log_file = f"{state}/evaluation-daemon.log"
@@ -920,6 +929,7 @@ class DockerSut:
             f'umask 077; echo "$$" > {container_pid_file}; '
             f"exec {_CONTAINER_TOKENSFLOW} daemon >> {container_log_file} 2>&1"
         )
+        start_failed = False
         try:
             self._docker.run(
                 (
@@ -934,17 +944,26 @@ class DockerSut:
                 ),
                 cwd=paths.runtime,
                 timeout=30,
+                secrets=credential_variants,
             )
-        except (CommandError, OSError) as error:
-            del error
-            raise TokensFlowInfrastructureError("TokensFlow daemon failed to start") from None
+        except (CommandError, OSError):
+            start_failed = True
+        if start_failed:
+            raise TokensFlowInfrastructureError("TokensFlow daemon failed to start")
+        readiness_script = (
+            f"test -s {container_pid_file} || exit 1; "
+            f'pid="$(cat {container_pid_file})"; '
+            'case "$pid" in ""|*[!0-9]*) exit 1;; esac; '
+            f'test "$(readlink "/proc/$pid/exe")" = "{_CONTAINER_TOKENSFLOW}" || exit 1; '
+            'tr "\\000" "\\n" < "/proc/$pid/cmdline" | grep -Fqx daemon'
+        )
         readiness_command = (
             "docker",
             "exec",
             container,
             "/bin/sh",
             "-c",
-            f'test -s {container_pid_file} && kill -0 "$(cat {container_pid_file})"',
+            readiness_script,
         )
         deadline = self._clock() + 5
         while True:
@@ -954,6 +973,7 @@ class DockerSut:
                     cwd=paths.runtime,
                     timeout=min(1.0, max(0.1, deadline - self._clock())),
                     check=False,
+                    secrets=credential_variants,
                 )
             except (CommandError, OSError):
                 readiness = None
