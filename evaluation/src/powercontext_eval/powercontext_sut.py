@@ -45,6 +45,7 @@ from powercontext_eval.tokensflow import (
     snapshot_tokensflow_home,
     tokensflow_queue_caught_up,
     tokensflow_queue_negative_detected,
+    tokensflow_runtime_environment,
     tokensflow_secret_variants,
 )
 
@@ -705,9 +706,15 @@ class DockerSut:
         container = f"{network}-{arm.value}"
         container_started = False
         preserve_after_drain_failure = False
-        credential_variants = auth_secret_variants(paths.auth_source) + tokensflow_secret_variants(
-            paths.tokensflow_home / ".tokensflow/credentials.json"
+        tokensflow_environment = tokensflow_runtime_environment()
+        tokensflow_environment_values = tuple(
+            dict.fromkeys(value for value in tokensflow_environment.values() if value)
         )
+        tokensflow_command_secrets = (
+            tokensflow_secret_variants(paths.tokensflow_home / ".tokensflow/credentials.json")
+            + tokensflow_environment_values
+        )
+        credential_variants = auth_secret_variants(paths.auth_source) + tokensflow_command_secrets
         try:
             paths.prepare()
             auth = paths.copy_auth()
@@ -720,8 +727,22 @@ class DockerSut:
             self._verify_codex_version(container, paths, store)
             self._readiness(container, paths)
             plugin = self._plugin_list(container, paths)
-            tokensflow = self._tokensflow_identity_gate(config, container, paths, relay_url)
-            tokensflow_daemon = self._start_tokensflow_daemon(config, container, paths, relay_url)
+            tokensflow = self._tokensflow_identity_gate(
+                config,
+                container,
+                paths,
+                relay_url,
+                tokensflow_environment,
+                tokensflow_command_secrets,
+            )
+            tokensflow_daemon = self._start_tokensflow_daemon(
+                config,
+                container,
+                paths,
+                relay_url,
+                tokensflow_environment,
+                tokensflow_command_secrets,
+            )
             tokensflow = replace(
                 tokensflow,
                 daemon_started=True,
@@ -761,6 +782,8 @@ class DockerSut:
                     relay_url,
                     tokensflow_daemon,
                     tokensflow,
+                    tokensflow_environment,
+                    tokensflow_command_secrets,
                 )
             except TokensFlowInfrastructureError:
                 preserve_after_drain_failure = True
@@ -893,11 +916,13 @@ class DockerSut:
         container: str,
         paths: ArmPaths,
         relay_url: str,
+        runtime_environment: Mapping[str, str],
+        command_secrets: Sequence[str],
     ) -> TokensFlowEvidence:
         tokensflow_binary, tokensflow_home = self._validate_tokensflow_inputs(config, paths)
-        credential_variants = tokensflow_secret_variants(tokensflow_home / ".tokensflow/credentials.json")
-        host_environment = {"HOME": os.fspath(tokensflow_home)}
+        host_environment = {**runtime_environment, "HOME": os.fspath(tokensflow_home)}
         container_environment = {
+            **runtime_environment,
             **loopback_proxy_environment(relay_url),
             "HOME": "/runtime/tokensflow-home",
             "CODEX_HOME": "/runtime/codex-home",
@@ -907,7 +932,7 @@ class DockerSut:
                 (os.fspath(tokensflow_binary), "--version"),
                 cwd=paths.runtime,
                 environment=host_environment,
-                secrets=credential_variants,
+                secrets=command_secrets,
             )
         )
         container_version = parse_tokensflow_version(
@@ -921,14 +946,14 @@ class DockerSut:
                     "--version",
                 ),
                 cwd=paths.runtime,
-                secrets=credential_variants,
+                secrets=command_secrets,
             )
         )
         host_identity = self._capture_tokensflow_output(
             (os.fspath(tokensflow_binary), "whoami"),
             cwd=paths.runtime,
             environment=host_environment,
-            secrets=credential_variants,
+            secrets=command_secrets,
         )
         container_identity = self._capture_tokensflow_output(
             (
@@ -940,7 +965,7 @@ class DockerSut:
                 "whoami",
             ),
             cwd=paths.runtime,
-            secrets=credential_variants,
+            secrets=command_secrets,
         )
         return matched_tokensflow_evidence(
             host_version=host_version,
@@ -955,13 +980,15 @@ class DockerSut:
         container: str,
         paths: ArmPaths,
         relay_url: str,
+        runtime_environment: Mapping[str, str],
+        command_secrets: Sequence[str],
     ) -> TokensFlowDaemonHandle:
         _, tokensflow_home = self._validate_tokensflow_inputs(config, paths)
-        credential_variants = tokensflow_secret_variants(tokensflow_home / ".tokensflow/credentials.json")
         state = "/runtime/tokensflow-home/.local/share/tokensflow"
         container_pid_file = f"{state}/evaluation-daemon.pid"
         container_log_file = f"{state}/evaluation-daemon.log"
         environment = {
+            **runtime_environment,
             **loopback_proxy_environment(relay_url),
             "HOME": "/runtime/tokensflow-home",
             "CODEX_HOME": "/runtime/codex-home",
@@ -985,7 +1012,7 @@ class DockerSut:
                 ),
                 cwd=paths.runtime,
                 timeout=30,
-                secrets=credential_variants,
+                secrets=command_secrets,
             )
         except (CommandError, OSError):
             start_failed = True
@@ -1001,6 +1028,7 @@ class DockerSut:
         readiness_command = (
             "docker",
             "exec",
+            *_docker_env_args(environment),
             container,
             "/bin/sh",
             "-c",
@@ -1014,7 +1042,7 @@ class DockerSut:
                     cwd=paths.runtime,
                     timeout=min(1.0, max(0.1, deadline - self._clock())),
                     check=False,
-                    secrets=credential_variants,
+                    secrets=command_secrets,
                 )
             except (CommandError, OSError):
                 readiness = None
@@ -1038,9 +1066,16 @@ class DockerSut:
         relay_url: str,
         daemon: TokensFlowDaemonHandle,
         evidence: TokensFlowEvidence,
+        runtime_environment: Mapping[str, str],
+        command_secrets: Sequence[str],
     ) -> TokensFlowEvidence:
         deadline = DrainDeadline(clock=self._clock)
-        credential_variants = tokensflow_secret_variants(paths.tokensflow_home / ".tokensflow/credentials.json")
+        environment = {
+            **runtime_environment,
+            **loopback_proxy_environment(relay_url),
+            "HOME": "/runtime/tokensflow-home",
+            "CODEX_HOME": "/runtime/codex-home",
+        }
         stop_script = (
             f"test -s {daemon.container_pid_file} || exit 1; "
             f'pid="$(cat {daemon.container_pid_file})"; '
@@ -1055,16 +1090,11 @@ class DockerSut:
             "done"
         )
         self._capture_tokensflow_output(
-            ("docker", "exec", container, "/bin/sh", "-c", stop_script),
+            ("docker", "exec", *_docker_env_args(environment), container, "/bin/sh", "-c", stop_script),
             cwd=paths.runtime,
             timeout=deadline.remaining(),
-            secrets=credential_variants,
+            secrets=command_secrets,
         )
-        environment = {
-            **loopback_proxy_environment(relay_url),
-            "HOME": "/runtime/tokensflow-home",
-            "CODEX_HOME": "/runtime/codex-home",
-        }
         upload = (
             "docker",
             "exec",
@@ -1078,7 +1108,7 @@ class DockerSut:
             upload,
             cwd=paths.runtime,
             timeout=deadline.remaining(),
-            secrets=credential_variants,
+            secrets=command_secrets,
         )
         status, doctor_rc = self._capture_tokensflow_result(
             (
@@ -1091,7 +1121,7 @@ class DockerSut:
             ),
             cwd=paths.runtime,
             timeout=deadline.remaining(),
-            secrets=credential_variants,
+            secrets=command_secrets,
         )
         negative_detected = tokensflow_queue_negative_detected(status)
         if not tokensflow_queue_caught_up(status):

@@ -625,8 +625,10 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
     readiness = next(
         command
         for command in docker.commands
-        if command[:3] == ("docker", "exec", "powercontext-eval-run-1-on")
-        and any("evaluation-daemon.pid" in part for part in command)
+        if command[:2] == ("docker", "exec")
+        and command[2] != "-d"
+        and "powercontext-eval-run-1-on" in command
+        and any("evaluation-daemon.pid" in part and "kill -TERM" not in part for part in command)
     )
     readiness_script = readiness[-1]
     assert 'readlink "/proc/$pid/exe"' in readiness_script
@@ -649,6 +651,76 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
     assert raw_host_identity not in retained
     assert raw_container_identity not in retained
     assert raw_version not in retained
+
+
+def test_tokensflow_dynamic_environment_reaches_every_lifecycle_command_without_leaking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = "tf-runtime-endpoint-value"
+    profile = "tf-runtime-profile-value"
+    blocked = "tf-runtime-credential-value"
+    monkeypatch.setenv("TOKENSFLOW_API_URL", endpoint)
+    monkeypatch.setenv("TOKENSFLOW_PROFILE", profile)
+    monkeypatch.setenv("TOKENSFLOW_ACCESS_TOKEN", blocked)
+    monkeypatch.setenv("HTTP_PROXY", "http://host-proxy.invalid")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/host/config")
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class EnvironmentCapturingDocker(TranscriptDocker):
+        calls: list[tuple[tuple[str, ...], dict[str, object]]]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = []
+
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            self.calls.append((argv, dict(kwargs)))
+            return super().run(argv, **kwargs)
+
+    docker = EnvironmentCapturingDocker()
+    DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config,
+        Arm.ON,
+        paths,
+        b"prompt",
+        ArtifactStore(paths.result_root),
+    )
+
+    lifecycle_calls = [
+        (argv, kwargs)
+        for argv, kwargs in docker.calls
+        if argv[:1] == (os.fspath(config.tokensflow_binary),)
+        or any(_is_tokensflow(argv, action) for action in ("--version", "whoami", "daemon", "upload", "doctor"))
+        or (argv[:2] == ("docker", "exec") and any("evaluation-daemon.pid" in part for part in argv))
+    ]
+    assert lifecycle_calls
+    for argv, kwargs in lifecycle_calls:
+        if argv[:1] == (os.fspath(config.tokensflow_binary),):
+            environment = cast(dict[str, str], kwargs["env"])
+            assert environment["HOME"] == os.fspath(paths.tokensflow_home)
+            assert environment["TOKENSFLOW_API_URL"] == endpoint
+            assert environment["TOKENSFLOW_PROFILE"] == profile
+            serialized_environment = json.dumps(environment, sort_keys=True)
+        else:
+            assignments = {argv[index + 1] for index, part in enumerate(argv[:-1]) if part == "-e"}
+            assert f"TOKENSFLOW_API_URL={endpoint}" in assignments
+            assert f"TOKENSFLOW_PROFILE={profile}" in assignments
+            serialized_environment = "\n".join(sorted(assignments))
+        assert "TOKENSFLOW_ACCESS_TOKEN" not in serialized_environment
+        assert blocked not in serialized_environment
+        assert "XDG_CONFIG_HOME" not in serialized_environment
+        secrets = cast(Sequence[str], kwargs["secrets"])
+        assert endpoint in secrets
+        assert profile in secrets
+
+    retained = b"".join(path.read_bytes() for path in paths.result_root.rglob("*") if path.is_file())
+    assert endpoint.encode() not in retained
+    assert profile.encode() not in retained
+    assert blocked.encode() not in retained
 
 
 def test_tokensflow_drain_obeys_zero_loss_order_and_accepts_duplicate_replay(tmp_path: Path) -> None:
@@ -1179,8 +1251,11 @@ def test_pre_exec_shell_pid_never_satisfies_tokensflow_daemon_readiness(tmp_path
 
     class PreExecShellDocker(TranscriptDocker):
         def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-            readiness = argv[:3] == ("docker", "exec", "powercontext-eval-run-1-on") and any(
-                "evaluation-daemon.pid" in part for part in argv
+            readiness = (
+                argv[:2] == ("docker", "exec")
+                and argv[2] != "-d"
+                and "powercontext-eval-run-1-on" in argv
+                and any("evaluation-daemon.pid" in part for part in argv)
             )
             if readiness:
                 self.commands.append(argv)

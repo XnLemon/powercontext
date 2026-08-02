@@ -10,7 +10,7 @@ import re
 import shutil
 import stat
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -112,6 +112,15 @@ _TOKENSFLOW_VERSION = re.compile(
 _TOKENSFLOW_CAUGHT_UP = b"caught up (0 pending files)"
 _TOKENSFLOW_NEGATIVE_WORDS = (b"pending", b"rejected", b"failed", b"blocked")
 _TOKENSFLOW_QUEUE_SCOPE = re.compile(rb"\b(?:queue|accounting)\b")
+_TOKENSFLOW_ENVIRONMENT_NAME = re.compile(r"TOKENSFLOW_[A-Z0-9_]+")
+_TOKENSFLOW_ENVIRONMENT_CREDENTIAL_MARKERS = (
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "CREDENTIAL",
+    "AUTH",
+    "KEY",
+)
 
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
@@ -130,6 +139,21 @@ _SENSITIVE_CREDENTIAL_FIELDS = frozenset(
         "token",
     }
 )
+
+
+def tokensflow_runtime_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Snapshot safe dynamic TokensFlow configuration without credentials or host-global settings."""
+
+    environment = os.environ if source is None else source
+    selected: dict[str, str] = {}
+    for name, value in sorted(environment.items()):
+        if _TOKENSFLOW_ENVIRONMENT_NAME.fullmatch(name) is None:
+            continue
+        configuration_name = name.removeprefix("TOKENSFLOW_")
+        if any(marker in configuration_name for marker in _TOKENSFLOW_ENVIRONMENT_CREDENTIAL_MARKERS):
+            continue
+        selected[name] = value
+    return selected
 
 
 def normalize_tokensflow_identity(raw: bytes) -> bytes:

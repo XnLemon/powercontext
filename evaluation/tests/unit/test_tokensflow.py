@@ -16,8 +16,29 @@ from powercontext_eval.tokensflow import (
     snapshot_tokensflow_home,
     tokensflow_queue_caught_up,
     tokensflow_queue_negative_detected,
+    tokensflow_runtime_environment,
     tokensflow_secret_variants,
 )
+
+
+def test_tokensflow_runtime_environment_allows_dynamic_config_but_rejects_credentials() -> None:
+    source = {
+        "TOKENSFLOW_API_URL": "https://current.invalid",
+        "TOKENSFLOW_PROFILE": "current-profile",
+        "TOKENSFLOW_ACCESS_TOKEN": "must-not-cross",
+        "TOKENSFLOW_CLIENT_SECRET": "must-not-cross",
+        "TOKENSFLOW_PASSWORD_FILE": "must-not-cross",
+        "TOKENSFLOW_CREDENTIALS": "must-not-cross",
+        "TOKENSFLOW_AUTH_URL": "must-not-cross",
+        "TOKENSFLOW_SIGNING_KEY": "must-not-cross",
+        "HTTP_PROXY": "http://host-proxy.invalid",
+        "XDG_CONFIG_HOME": "/host/config",
+    }
+
+    assert tokensflow_runtime_environment(source) == {
+        "TOKENSFLOW_API_URL": "https://current.invalid",
+        "TOKENSFLOW_PROFILE": "current-profile",
+    }
 
 
 def test_parse_tokensflow_version_accepts_real_single_line_metadata_shape() -> None:
