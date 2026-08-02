@@ -12,11 +12,39 @@ from powercontext_eval.tokensflow import (
     DrainDeadline,
     TokensFlowInfrastructureError,
     UnsafeTokensFlowConfiguration,
+    parse_tokensflow_version,
     snapshot_tokensflow_home,
     tokensflow_queue_caught_up,
     tokensflow_queue_negative_detected,
     tokensflow_secret_variants,
 )
+
+
+def test_parse_tokensflow_version_accepts_real_single_line_metadata_shape() -> None:
+    metadata_suffix = b"(build:0123456789abcdef01234)"
+    assert len(metadata_suffix) == 29
+
+    assert parse_tokensflow_version(b"TokensFlow 1.0.16 " + metadata_suffix + b"\n") == "1.0.16"
+    assert parse_tokensflow_version(b"tokensflow 1.0.16\n") == "1.0.16"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"prefix TokensFlow 1.0.16",
+        b"TokensFlow 1.0.16 suffix",
+        b"TokensFlow 1.0.16 (valid) trailing",
+        b"TokensFlow 1.0.16 (one) (two)",
+        b"TokensFlow 1.0.16 (metadata;command)",
+        b"TokensFlow 1.0.16 (metadata\x1b)",
+        b"TokensFlow 1.0.16 (" + b"a" * 65 + b")",
+        b"TokensFlow 1.0.16\nmalicious second line",
+        b"TokensFlow 1.0.16\rmetadata second line",
+    ],
+)
+def test_parse_tokensflow_version_rejects_multiline_control_or_surrounding_garbage(raw: bytes) -> None:
+    with pytest.raises(TokensFlowInfrastructureError, match="^TokensFlow version check failed$"):
+        parse_tokensflow_version(raw)
 
 
 def test_drain_deadline_uses_one_fixed_budget_across_steps() -> None:
@@ -43,6 +71,11 @@ def test_drain_deadline_rejects_nonpositive_timeout_without_calling_clock() -> N
         b"[PASS] queue: caught up (0 pending files) (within collection window)\n",
         b"caught up (0 pending files)\nrejected batches: none\n",
         b"caught up (0 pending files)\ncollector circuit: closed\nblocked batches: 0\n",
+        (
+            b"[FAIL] daemon: not running (expected after TERM)\n"
+            b"[PASS] queue: caught up (0 pending files) (within collection window)\n"
+            b"[FAIL] auth: login probe unavailable\n"
+        ),
     ],
 )
 def test_tokensflow_queue_requires_only_exact_caught_up_without_negative_state(status: bytes) -> None:
@@ -53,15 +86,15 @@ def test_tokensflow_queue_requires_only_exact_caught_up_without_negative_state(s
 @pytest.mark.parametrize(
     "negative",
     [
-        b"pending files: 1",
-        b"1 pending file",
-        b"rejected batches: 2",
-        b"record rejected",
-        b"failed checks: 1",
+        b"queue: pending files: 1",
+        b"accounting queue: 1 pending file",
+        b"queue: rejected batches: 2",
+        b"accounting: record rejected",
+        b"queue: failed checks: 1",
         b"[FAIL] queue inspection",
-        b"blocked ingest batches: 1",
-        b"collector circuit: open failures=1",
-        b"circuit-open",
+        b"queue: blocked ingest batches: 1",
+        b"accounting queue: collector circuit: open failures=1",
+        b"queue circuit-open",
     ],
 )
 def test_tokensflow_queue_rejects_explicit_negative_state_even_with_caught_up_marker(negative: bytes) -> None:
@@ -74,6 +107,22 @@ def test_tokensflow_queue_rejects_explicit_negative_state_even_with_caught_up_ma
 def test_tokensflow_queue_fails_closed_without_exact_caught_up_marker() -> None:
     assert tokensflow_queue_caught_up(b"queue idle; pending files: 0\n") is False
     assert tokensflow_queue_negative_detected(b"queue idle; pending files: 0\n") is False
+
+
+def test_tokensflow_queue_ignores_nonqueue_failures_but_rejects_queue_scoped_failures() -> None:
+    real_shape = (
+        b"[FAIL] daemon: not running after graceful TERM\n"
+        b"[PASS] queue: caught up (0 pending files) (within collection window)\n"
+        b"[FAIL] runtime: service manager unavailable\n"
+        b"[FAIL] auth: optional identity refresh failed\n"
+        b"[FAIL] config: optional update metadata failed\n"
+    )
+    assert tokensflow_queue_caught_up(real_shape) is True
+    assert tokensflow_queue_negative_detected(real_shape) is False
+
+    queue_failure = real_shape + b"[FAIL] queue: accounting verification failed\n"
+    assert tokensflow_queue_caught_up(queue_failure) is False
+    assert tokensflow_queue_negative_detected(queue_failure) is True
 
 
 def _profile(tmp_path: Path, credentials: str = '{"access":"first"}') -> Path:

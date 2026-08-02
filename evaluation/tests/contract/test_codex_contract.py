@@ -336,6 +336,7 @@ class TranscriptDocker:
             return self._output(b"uploaded=1 duplicates=0\n", kwargs)
         if _is_tokensflow(argv, "doctor"):
             return self._output(
+                b"[FAIL] daemon: not running after graceful TERM\n"
                 b"[PASS] queue: caught up (0 pending files) (within collection window)\n",
                 kwargs,
                 returncode=1,
@@ -714,11 +715,11 @@ def test_tokensflow_drain_obeys_zero_loss_order_and_accepts_duplicate_replay(tmp
                 id=f"{name}-doctor-rc{returncode}",
             )
             for name, output in (
-                ("pending", b"pending files: 1\n"),
-                ("rejected", b"rejected batches: 1\n"),
-                ("failed", b"[FAIL] queue inspection\n"),
-                ("blocked", b"blocked ingest batches: 1\n"),
-                ("open", b"collector circuit: open failures=1\n"),
+                ("pending", b"queue: pending files: 1\n"),
+                ("rejected", b"queue: rejected batches: 1\n"),
+                ("failed", b"[FAIL] queue: accounting inspection\n"),
+                ("blocked", b"queue: blocked ingest batches: 1\n"),
+                ("open", b"accounting queue: collector circuit: open failures=1\n"),
             )
             for returncode in (0, 1)
         ),
@@ -830,7 +831,7 @@ def test_tokensflow_drain_command_secret_is_not_retained_or_chained(tmp_path: Pa
             if phase == "doctor" and _is_tokensflow(argv, "doctor"):
                 self.commands.append(argv)
                 return self._output(
-                    b"caught up (0 pending files)\nblocked ingest: 1\n" + secret.encode(),
+                    b"caught up (0 pending files)\nqueue: blocked ingest: 1\n" + secret.encode(),
                     kwargs,
                     returncode=1,
                 )

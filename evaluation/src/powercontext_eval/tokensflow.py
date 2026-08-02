@@ -105,9 +105,13 @@ class TokensFlowDaemonHandle:
     container_log_file: str
 
 
-_TOKENSFLOW_VERSION = re.compile(rb"(?i:tokensflow)(?:-cli)?\s+v?([0-9]+\.[0-9]+\.[0-9]+)")
+_TOKENSFLOW_VERSION = re.compile(
+    rb"(?i:tokensflow) ([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})"
+    rb"(?: \([A-Za-z0-9][A-Za-z0-9 .,_:+/@=-]{0,63}\))?"
+)
 _TOKENSFLOW_CAUGHT_UP = b"caught up (0 pending files)"
 _TOKENSFLOW_NEGATIVE_WORDS = (b"pending", b"rejected", b"failed", b"blocked")
+_TOKENSFLOW_QUEUE_SCOPE = re.compile(rb"\b(?:queue|accounting)\b")
 
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
@@ -162,19 +166,21 @@ def tokensflow_queue_negative_detected(raw: bytes) -> bool:
     """Detect explicit nonzero/failed/blocked/open queue evidence without retaining it."""
 
     normalized = raw.lower().replace(b"\r\n", b"\n")
-    if re.search(
-        rb"\[(?:fail|failed)\]|\b(?:collector\s+)?circuit\s*[:=-]?\s*open\b|\bcircuit[- ]open\b",
-        normalized,
-    ):
-        return True
     for line in normalized.splitlines():
+        if _TOKENSFLOW_QUEUE_SCOPE.search(line) is None:
+            continue
+        if re.search(
+            rb"\[(?:fail|failed)\]|\b(?:collector\s+)?circuit\s*[:=-]?\s*open\b|\bcircuit[- ]open\b",
+            line,
+        ):
+            return True
         for word in _TOKENSFLOW_NEGATIVE_WORDS:
             if word not in line:
                 continue
             safe = (
                 re.search(rb"\bno\s+" + word + rb"\b", line)
                 or re.search(rb"\b0\s+" + word + rb"\b", line)
-                or re.search(word + rb"[^:\n]*:\s*(?:0|none|false)\b", line)
+                or re.search(word + rb"[^:=\n]*[:=]\s*(?:0|none|false)\b", line)
             )
             if safe is None:
                 return True
