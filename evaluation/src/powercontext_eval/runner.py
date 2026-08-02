@@ -55,10 +55,6 @@ _TRANSIENT_IMAGE_REMOVAL_ERRORS = (
     "is using its referenced image",
     "is being used by stopped container",
 )
-_OPENLIBRARY_DYNAMIC_YEAR_INSTANCE_ID = (
-    "instance_internetarchive__openlibrary-1351c59fd43689753de1fca32c78d539a116ffc1-"
-    "v29f82c9cf21d57b242f8d8b0e541525d259e2d63"
-)
 _OPENLIBRARY_DYNAMIC_YEAR_PREFIX = (
     "openlibrary/catalog/add_book/tests/test_add_book.py::TestNormalizeImportRecord::"
     "test_future_publication_dates_are_deleted"
@@ -352,10 +348,7 @@ def _evaluator_test_requirements(
     *,
     evaluation_year: int,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    if instance.instance_id != _OPENLIBRARY_DYNAMIC_YEAR_INSTANCE_ID:
-        return instance.fail_to_pass, instance.pass_to_pass
-
-    # This pinned test parameterizes two cases from datetime.now().year, so the collected node IDs advance yearly.
+    # These tests parameterize two cases from datetime.now().year, so the collected node IDs advance yearly.
     replacements = {
         f"{_OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[2025-True]": (
             f"{_OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[{evaluation_year}-True]"
