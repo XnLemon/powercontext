@@ -35,6 +35,7 @@ from powercontext_eval.errors import CommandError, CommandFailed, CommandTimedOu
 from powercontext_eval.models import Arm
 from powercontext_eval.process import CommandResult, ProcessRunner
 from powercontext_eval.tokensflow import (
+    DrainDeadline,
     TokensFlowDaemonHandle,
     TokensFlowEvidence,
     TokensFlowInfrastructureError,
@@ -42,6 +43,7 @@ from powercontext_eval.tokensflow import (
     matched_tokensflow_evidence,
     parse_tokensflow_version,
     snapshot_tokensflow_home,
+    tokensflow_queue_caught_up,
     tokensflow_secret_variants,
 )
 
@@ -701,6 +703,7 @@ class DockerSut:
     ) -> SutOutcome:
         container = f"{network}-{arm.value}"
         container_started = False
+        preserve_after_drain_failure = False
         credential_variants = auth_secret_variants(paths.auth_source) + tokensflow_secret_variants(
             paths.tokensflow_home / ".tokensflow/credentials.json"
         )
@@ -723,7 +726,6 @@ class DockerSut:
                 daemon_started=True,
                 daemon_started_at=datetime.now(UTC).isoformat(),
             )
-            store.write_json("tokensflow/provenance.json", tokensflow.as_dict())
             codex = CodexRunner(_DockerExecRunner(self._docker, container)).run(
                 CodexInvocation(
                     arm,
@@ -750,6 +752,22 @@ class DockerSut:
                 },
                 secrets=credential_variants,
             )
+            tokensflow_drain_failed = False
+            try:
+                tokensflow = self._drain_tokensflow(
+                    container,
+                    paths,
+                    relay_url,
+                    tokensflow_daemon,
+                    tokensflow,
+                )
+            except TokensFlowInfrastructureError:
+                preserve_after_drain_failure = True
+                tokensflow_drain_failed = True
+            if tokensflow_drain_failed:
+                self._write_tokensflow_recovery_marker(paths)
+                raise TokensFlowInfrastructureError("TokensFlow drain failed") from None
+            store.write_json("tokensflow/provenance.json", tokensflow.as_dict())
             _retain_private_trace(
                 paths.pc_home / "codex-observed.jsonl",
                 store,
@@ -793,7 +811,7 @@ class DockerSut:
             store.write_bytes("powercontext/provenance.json", provenance_bytes)
             return SutOutcome(codex, evidence, tokensflow, tokensflow_daemon)
         finally:
-            if container_started:
+            if container_started and not preserve_after_drain_failure:
                 self._docker.run(
                     ("docker", "rm", "-f", container),
                     cwd=paths.runtime,
@@ -989,6 +1007,99 @@ class DockerSut:
             container_pid_file=container_pid_file,
             container_log_file=container_log_file,
         )
+
+    def _drain_tokensflow(
+        self,
+        container: str,
+        paths: ArmPaths,
+        relay_url: str,
+        daemon: TokensFlowDaemonHandle,
+        evidence: TokensFlowEvidence,
+    ) -> TokensFlowEvidence:
+        deadline = DrainDeadline(clock=self._clock)
+        credential_variants = tokensflow_secret_variants(paths.tokensflow_home / ".tokensflow/credentials.json")
+        stop_script = (
+            f"test -s {daemon.container_pid_file} || exit 1; "
+            f'pid="$(cat {daemon.container_pid_file})"; '
+            'case "$pid" in ""|*[!0-9]*) exit 1;; esac; '
+            f'test "$(readlink "/proc/$pid/exe")" = "{_CONTAINER_TOKENSFLOW}" || exit 1; '
+            'tr "\\000" "\\n" < "/proc/$pid/cmdline" | grep -Fqx daemon || exit 1; '
+            'kill -TERM "$pid"; '
+            'while test -e "/proc/$pid"; do '
+            f'test "$(readlink "/proc/$pid/exe")" = "{_CONTAINER_TOKENSFLOW}" || exit 1; '
+            'tr "\\000" "\\n" < "/proc/$pid/cmdline" | grep -Fqx daemon || exit 1; '
+            "sleep 0.05; "
+            "done"
+        )
+        self._capture_tokensflow_output(
+            ("docker", "exec", container, "/bin/sh", "-c", stop_script),
+            cwd=paths.runtime,
+            timeout=deadline.remaining(),
+            secrets=credential_variants,
+        )
+        environment = {
+            **loopback_proxy_environment(relay_url),
+            "HOME": "/runtime/tokensflow-home",
+            "CODEX_HOME": "/runtime/codex-home",
+        }
+        upload = (
+            "docker",
+            "exec",
+            *_docker_env_args(environment),
+            container,
+            _CONTAINER_TOKENSFLOW,
+            "upload",
+            "--all",
+        )
+        self._capture_tokensflow_output(
+            upload,
+            cwd=paths.runtime,
+            timeout=deadline.remaining(),
+            secrets=credential_variants,
+        )
+        status = self._capture_tokensflow_output(
+            (
+                "docker",
+                "exec",
+                *_docker_env_args(environment),
+                container,
+                _CONTAINER_TOKENSFLOW,
+                "doctor",
+            ),
+            cwd=paths.runtime,
+            timeout=deadline.remaining(),
+            secrets=credential_variants,
+        )
+        if not tokensflow_queue_caught_up(status):
+            raise TokensFlowInfrastructureError("TokensFlow queue did not catch up")
+        duration = 60.0 - deadline.remaining()
+        return replace(
+            evidence,
+            daemon_stopped=True,
+            upload_all_succeeded=True,
+            queue_caught_up=True,
+            drain_duration_seconds=round(duration, 6),
+        )
+
+    @staticmethod
+    def _write_tokensflow_recovery_marker(paths: ArmPaths) -> None:
+        marker = paths.runtime / "tokensflow-recovery.json"
+        payload = b'{"reason":"tokensflow_drain_failed","recovery_required":true}\n'
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                marker,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            os.write(descriptor, payload)
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        except OSError:
+            raise TokensFlowInfrastructureError("TokensFlow drain failed") from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
 
     def _initialize_workspace(self, config: SutConfig, arm: Arm, paths: ArmPaths) -> None:
         name = f"powercontext-eval-{config.run_id}-{arm.value}-init"
@@ -1615,5 +1726,9 @@ def run_codex_contract_smoke(
         "status": "passed",
         "off_prompt_sources": outcomes[Arm.OFF].evidence.prompt_sources,
         "on_prompt_sources": outcomes[Arm.ON].evidence.prompt_sources,
+        "tokensflow": {
+            Arm.OFF.value: outcomes[Arm.OFF].tokensflow.as_dict(),
+            Arm.ON.value: outcomes[Arm.ON].tokensflow.as_dict(),
+        },
         "run_root": os.fspath(root),
     }

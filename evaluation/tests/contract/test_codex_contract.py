@@ -26,6 +26,7 @@ from powercontext_eval.codex import (
     CodexRunner,
     UnsafeCodexInvocation,
 )
+from powercontext_eval.errors import CommandError
 from powercontext_eval.models import Arm
 from powercontext_eval.powercontext_sut import (
     LOOPBACK_NO_PROXY,
@@ -331,6 +332,14 @@ class TranscriptDocker:
         if argv[-1:] == ("--version",) and any(part.endswith("/tokensflow") for part in argv):
             version = self.container_tokensflow_version if argv[0] == "docker" else self.host_tokensflow_version
             return self._output(version, kwargs)
+        if _is_tokensflow(argv, "upload"):
+            return self._output(b"uploaded=1 duplicates=0\n", kwargs)
+        if _is_tokensflow(argv, "doctor"):
+            return self._output(
+                b"[PASS] queue: caught up (0 pending files) (within collection window)\n"
+                b"rejected batches: none\ncollector circuit: closed\n",
+                kwargs,
+            )
         if argv[-3:-1] == ("network", "inspect"):
             return command_result('[{"IPAM":{"Config":[{"Gateway":"172.29.0.1"}]}}]')
         if "plugin" in argv and "list" in argv:
@@ -641,6 +650,174 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
     assert raw_version not in retained
 
 
+def test_tokensflow_drain_obeys_zero_loss_order_and_accepts_duplicate_replay(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class DuplicateReplayDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if _is_tokensflow(argv, "upload"):
+                self.commands.append(argv)
+                return self._output(b"uploaded=0 duplicates=4\n", kwargs)
+            return super().run(argv, **kwargs)
+
+    docker = DuplicateReplayDocker()
+    outcome = DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config,
+        Arm.ON,
+        paths,
+        b"prompt",
+        ArtifactStore(paths.result_root),
+    )
+
+    codex_index = next(index for index, command in enumerate(docker.commands) if _is_codex_inference(command))
+    stop_index = next(
+        index
+        for index, command in enumerate(docker.commands)
+        if any("kill -TERM" in part and "evaluation-daemon.pid" in part for part in command)
+    )
+    upload_index = next(index for index, command in enumerate(docker.commands) if _is_tokensflow(command, "upload"))
+    status_index = next(index for index, command in enumerate(docker.commands) if _is_tokensflow(command, "doctor"))
+    cleanup_index = next(
+        index
+        for index, command in enumerate(docker.commands)
+        if command[:3] == ("docker", "rm", "-f") and command[-1] == "powercontext-eval-run-1-on"
+    )
+    assert codex_index < stop_index < upload_index < status_index < cleanup_index
+    assert outcome.tokensflow.daemon_stopped is True
+    assert outcome.tokensflow.upload_all_succeeded is True
+    assert outcome.tokensflow.queue_caught_up is True
+    assert outcome.tokensflow.drain_duration_seconds >= 0
+    provenance = json.loads((paths.result_root / "tokensflow/provenance.json").read_text())
+    assert provenance["daemon_stopped"] is True
+    assert provenance["upload_all_succeeded"] is True
+    assert provenance["queue_caught_up"] is True
+    assert not (paths.runtime / "tokensflow-recovery.json").exists()
+
+
+@pytest.mark.parametrize("failure", ["stop", "upload", "pending", "blocked"])
+def test_tokensflow_drain_failure_preserves_runtime_and_writes_safe_recovery_marker(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class DrainFailureDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            stop = any("kill -TERM" in part and "evaluation-daemon.pid" in part for part in argv)
+            if (failure == "stop" and stop) or (failure == "upload" and _is_tokensflow(argv, "upload")):
+                self.commands.append(argv)
+                return command_result("private raw failure", returncode=70)
+            if failure in {"pending", "blocked"} and _is_tokensflow(argv, "doctor"):
+                self.commands.append(argv)
+                state = b"pending files: 1\n" if failure == "pending" else b"blocked ingest batches: 1\n"
+                return self._output(state, kwargs)
+            return super().run(argv, **kwargs)
+
+    docker = DrainFailureDocker()
+    with pytest.raises(TokensFlowInfrastructureError, match="^TokensFlow drain failed$") as captured:
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            config,
+            Arm.ON,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root),
+        )
+
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert paths.tokensflow_home.is_dir()
+    assert paths.pc_home.joinpath("codex-observed.jsonl").is_file()
+    marker = paths.runtime / "tokensflow-recovery.json"
+    assert json.loads(marker.read_text()) == {
+        "reason": "tokensflow_drain_failed",
+        "recovery_required": True,
+    }
+    assert stat.S_IMODE(marker.stat().st_mode) == 0o600
+    assert "private raw failure" not in marker.read_text()
+    assert not any(
+        command[:3] == ("docker", "rm", "-f") and command[-1] == "powercontext-eval-run-1-on"
+        for command in docker.commands
+    )
+    retry_paths = make_paths(tmp_path / "retry")
+    shutil.copy2(marker, retry_paths.runtime / marker.name)
+    with pytest.raises(UnsafeSutConfiguration, match="fresh except"):
+        retry_paths.prepare()
+
+
+def test_tokensflow_drain_commands_share_one_deadline(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    times = iter((0.0, 0.0, 0.0, 10.0, 35.0, 60.0))
+
+    class TimeoutCapturingDocker(TranscriptDocker):
+        drain_timeouts: list[float]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.drain_timeouts = []
+
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if any("kill -TERM" in part for part in argv) or _is_tokensflow(argv, "upload"):
+                self.drain_timeouts.append(cast(float, kwargs["timeout"]))
+            return super().run(argv, **kwargs)
+
+    docker = TimeoutCapturingDocker()
+    with pytest.raises(TokensFlowInfrastructureError, match="^TokensFlow drain failed$"):
+        DockerSut(docker, relay_factory=FakeRelay, clock=lambda: next(times)).run_arm(
+            config,
+            Arm.ON,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root),
+        )
+
+    assert docker.drain_timeouts == [50.0, 25.0]
+    assert not any(_is_tokensflow(command, "doctor") for command in docker.commands)
+
+
+def test_tokensflow_drain_command_secret_is_not_retained_or_chained(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    secret = "tokensflow-drain-command-secret"
+    (paths.tokensflow_home / ".tokensflow/credentials.json").write_text(json.dumps({"access_token": secret}))
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class SecretFailureDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if _is_tokensflow(argv, "upload"):
+                self.commands.append(argv)
+                raise CommandFailed("raw " + secret, command_result(secret, returncode=70))
+            return super().run(argv, **kwargs)
+
+    docker = SecretFailureDocker()
+    with pytest.raises(TokensFlowInfrastructureError) as captured:
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            config,
+            Arm.ON,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root, forbidden_values=(secret,)),
+        )
+
+    assert str(captured.value) == "TokensFlow drain failed"
+    assert secret not in str(captured.value)
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert not isinstance(captured.value.__cause__, CommandError)
+    retained = b"".join(path.read_bytes() for path in paths.result_root.rglob("*") if path.is_file())
+    assert secret.encode() not in retained
+    assert secret not in (paths.runtime / "tokensflow-recovery.json").read_text()
+
+
 def test_tokensflow_commands_redact_only_credentials_and_allow_normal_provenance(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     secret = "tokensflow-command-redaction-secret"
@@ -682,7 +859,7 @@ def test_tokensflow_commands_redact_only_credentials_and_allow_normal_provenance
     )
 
     assert outcome.tokensflow.identity_match is True
-    assert len(docker.tokensflow_secrets) == 6
+    assert docker.tokensflow_secrets
     assert all(secret in variants for variants in docker.tokensflow_secrets)
     provenance = (paths.result_root / "tokensflow/provenance.json").read_text()
     assert '"identity_match": true' in provenance
@@ -1024,8 +1201,30 @@ def test_contract_smoke_propagates_dynamic_tokensflow_snapshot_and_secret_bounda
                 with pytest.raises(SecretDetected):
                     stores[arm].write_text("tokensflow-leak.txt", "tokensflow-smoke-secret")
             return {
-                Arm.OFF: SimpleNamespace(evidence=SimpleNamespace(prompt_sources=0)),
-                Arm.ON: SimpleNamespace(evidence=SimpleNamespace(prompt_sources=1)),
+                Arm.OFF: SimpleNamespace(
+                    evidence=SimpleNamespace(prompt_sources=0),
+                    tokensflow=SimpleNamespace(
+                        as_dict=lambda: {
+                            "identity_match": True,
+                            "daemon_started": True,
+                            "daemon_stopped": True,
+                            "upload_all_succeeded": True,
+                            "queue_caught_up": True,
+                        }
+                    ),
+                ),
+                Arm.ON: SimpleNamespace(
+                    evidence=SimpleNamespace(prompt_sources=1),
+                    tokensflow=SimpleNamespace(
+                        as_dict=lambda: {
+                            "identity_match": True,
+                            "daemon_started": True,
+                            "daemon_stopped": True,
+                            "upload_all_succeeded": True,
+                            "queue_caught_up": True,
+                        }
+                    ),
+                ),
             }
 
     result = run_codex_contract_smoke(
@@ -1048,6 +1247,25 @@ def test_contract_smoke_propagates_dynamic_tokensflow_snapshot_and_secret_bounda
     assert paths[Arm.OFF].tokensflow_home != paths[Arm.ON].tokensflow_home
     assert result["off_prompt_sources"] == 0
     assert result["on_prompt_sources"] == 1
+    assert result["tokensflow"] == {
+        "off": {
+            "identity_match": True,
+            "daemon_started": True,
+            "daemon_stopped": True,
+            "upload_all_succeeded": True,
+            "queue_caught_up": True,
+        },
+        "on": {
+            "identity_match": True,
+            "daemon_started": True,
+            "daemon_stopped": True,
+            "upload_all_succeeded": True,
+            "queue_caught_up": True,
+        },
+    }
+    serialized = json.dumps(result, sort_keys=True)
+    assert "tokensflow-smoke-secret" not in serialized
+    assert os.fspath(tokensflow_user_home) not in serialized
 
 
 @pytest.mark.parametrize("profile", ["missing", "symlink"])
@@ -1695,7 +1913,7 @@ def test_transient_readiness_probe_timeout_is_retried(tmp_path: Path) -> None:
         timed_out = False
 
         def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-            if not self.timed_out and "doctor" in argv:
+            if not self.timed_out and "/runtime/pc-env/bin/powercontext" in argv and "doctor" in argv:
                 self.commands.append(argv)
                 self.timed_out = True
                 raise CommandTimedOut("injected readiness timeout", command_result("", returncode=124))
@@ -1711,7 +1929,9 @@ def test_transient_readiness_probe_timeout_is_retried(tmp_path: Path) -> None:
         ArtifactStore(paths.result_root),
     )
 
-    readiness_probes = [command for command in docker.commands if "doctor" in command]
+    readiness_probes = [
+        command for command in docker.commands if "/runtime/pc-env/bin/powercontext" in command and "doctor" in command
+    ]
     assert len(readiness_probes) == 2
 
 

@@ -9,10 +9,30 @@ from pathlib import Path
 import pytest
 
 from powercontext_eval.tokensflow import (
+    DrainDeadline,
+    TokensFlowInfrastructureError,
     UnsafeTokensFlowConfiguration,
     snapshot_tokensflow_home,
     tokensflow_secret_variants,
 )
+
+
+def test_drain_deadline_uses_one_fixed_budget_across_steps() -> None:
+    observed = iter((10.0, 22.5, 69.5, 70.0))
+    deadline = DrainDeadline(clock=lambda: next(observed))
+
+    assert deadline.remaining() == 47.5
+    assert deadline.remaining() == 0.5
+    with pytest.raises(TokensFlowInfrastructureError, match="^TokensFlow drain timed out$") as captured:
+        deadline.remaining()
+
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+
+
+def test_drain_deadline_rejects_nonpositive_timeout_without_calling_clock() -> None:
+    with pytest.raises(TokensFlowInfrastructureError, match="^TokensFlow drain timed out$"):
+        DrainDeadline(timeout_seconds=0, clock=lambda: pytest.fail("clock must not be called"))
 
 
 def _profile(tmp_path: Path, credentials: str = '{"access":"first"}') -> Path:

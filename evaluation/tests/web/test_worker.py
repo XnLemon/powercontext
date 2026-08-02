@@ -17,6 +17,7 @@ from powercontext_eval.codex import CodexInfrastructureError
 from powercontext_eval.errors import GitSourceError
 from powercontext_eval.powercontext_sut import InvalidTreatment, UnsafeSutConfiguration
 from powercontext_eval.runner import MinimalRunConfig, MinimalRunResult, RunConfig, RunPhase
+from powercontext_eval.tokensflow import TokensFlowInfrastructureError
 from powercontext_eval.web.batches import BatchCreate, BatchStatus
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.controls import BatchControlIntent, BatchPauseReason
@@ -543,6 +544,38 @@ def test_failed_batch_child_pauses_later_children(monkeypatch: pytest.MonkeyPatc
 
     children = store.list_batch_tasks(batch.batch_id)
     assert [child.status for child in children] == [TaskStatus.FAILED, TaskStatus.QUEUED]
+    current = store.get_batch(batch.batch_id)
+    assert current.status is BatchStatus.PAUSED
+    assert current.control.intent is BatchControlIntent.PAUSE
+    assert current.control.pause_reason is BatchPauseReason.INFRASTRUCTURE_FAILURE
+
+
+def test_tokensflow_drain_failure_is_recorded_and_pauses_batch_atomically(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    instance_ids = ("instance_owner__repo-a", "instance_owner__repo-b")
+    batch = _create_batch(store, instance_ids=instance_ids)
+
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        on_phase(RunPhase.RUNNING_OFF)
+        raise TokensFlowInfrastructureError("private drain detail")
+
+    worker = EvaluationWorker(
+        config,
+        store,
+        runner=runner,
+        source=FakeSource(),
+        catalog=FakeCatalog(instance_ids),
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is True
+
+    failed, queued = store.list_batch_tasks(batch.batch_id)
+    assert failed.status is TaskStatus.FAILED
+    assert failed.failure_category is FailureCategory.CODEX_EXECUTION
+    assert failed.failure_summary == "Codex execution failed."
+    assert queued.status is TaskStatus.QUEUED
     current = store.get_batch(batch.batch_id)
     assert current.status is BatchStatus.PAUSED
     assert current.control.intent is BatchControlIntent.PAUSE

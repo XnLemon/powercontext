@@ -9,7 +9,9 @@ import os
 import re
 import shutil
 import stat
-from dataclasses import dataclass
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, quote_plus
@@ -23,6 +25,26 @@ class UnsafeTokensFlowConfiguration(PowerContextEvalError):
 
 class TokensFlowInfrastructureError(PowerContextEvalError):
     """TokensFlow could not prove a safe pre-inference runtime."""
+
+
+@dataclass(frozen=True)
+class DrainDeadline:
+    """One fixed monotonic budget shared by every TokensFlow drain step."""
+
+    timeout_seconds: float = 60.0
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False)
+    _deadline: float = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds <= 0:
+            raise TokensFlowInfrastructureError("TokensFlow drain timed out")
+        object.__setattr__(self, "_deadline", self.clock() + self.timeout_seconds)
+
+    def remaining(self) -> float:
+        remaining = self._deadline - self.clock()
+        if remaining <= 0:
+            raise TokensFlowInfrastructureError("TokensFlow drain timed out")
+        return remaining
 
 
 @dataclass(frozen=True)
@@ -46,8 +68,12 @@ class TokensFlowEvidence:
     identity_checked_at: str
     daemon_started: bool
     daemon_started_at: str
+    daemon_stopped: bool = False
+    upload_all_succeeded: bool = False
+    queue_caught_up: bool = False
+    drain_duration_seconds: float = 0.0
 
-    def as_dict(self) -> dict[str, str | int | bool]:
+    def as_dict(self) -> dict[str, str | int | float | bool]:
         return {
             "host_version": self.host_version,
             "container_version": self.container_version,
@@ -58,6 +84,10 @@ class TokensFlowEvidence:
             "identity_checked_at": self.identity_checked_at,
             "daemon_started": self.daemon_started,
             "daemon_started_at": self.daemon_started_at,
+            "daemon_stopped": self.daemon_stopped,
+            "upload_all_succeeded": self.upload_all_succeeded,
+            "queue_caught_up": self.queue_caught_up,
+            "drain_duration_seconds": self.drain_duration_seconds,
         }
 
 
@@ -72,6 +102,9 @@ class TokensFlowDaemonHandle:
 
 
 _TOKENSFLOW_VERSION = re.compile(rb"(?i:tokensflow)(?:-cli)?\s+v?([0-9]+\.[0-9]+\.[0-9]+)")
+_TOKENSFLOW_CAUGHT_UP = b"caught up (0 pending files)"
+_TOKENSFLOW_NO_REJECTED_BATCHES = b"rejected batches: none"
+_TOKENSFLOW_CLOSED_CIRCUIT = b"collector circuit: closed"
 
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
@@ -113,6 +146,20 @@ def parse_tokensflow_version(raw: bytes) -> str:
     if match is None:
         raise TokensFlowInfrastructureError("TokensFlow version check failed")
     return match.group(1).decode("ascii")
+
+
+def tokensflow_queue_caught_up(raw: bytes) -> bool:
+    """Recognize only the stable TokensFlow 1.0.16 healthy queue evidence."""
+
+    normalized = raw.lower().replace(b"\r\n", b"\n")
+    return all(
+        marker in normalized
+        for marker in (
+            _TOKENSFLOW_CAUGHT_UP,
+            _TOKENSFLOW_NO_REJECTED_BATCHES,
+            _TOKENSFLOW_CLOSED_CIRCUIT,
+        )
+    )
 
 
 def matched_tokensflow_evidence(
