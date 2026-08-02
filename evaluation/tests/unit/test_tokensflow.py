@@ -13,6 +13,8 @@ from powercontext_eval.tokensflow import (
     TokensFlowInfrastructureError,
     UnsafeTokensFlowConfiguration,
     snapshot_tokensflow_home,
+    tokensflow_queue_caught_up,
+    tokensflow_queue_negative_detected,
     tokensflow_secret_variants,
 )
 
@@ -33,6 +35,45 @@ def test_drain_deadline_uses_one_fixed_budget_across_steps() -> None:
 def test_drain_deadline_rejects_nonpositive_timeout_without_calling_clock() -> None:
     with pytest.raises(TokensFlowInfrastructureError, match="^TokensFlow drain timed out$"):
         DrainDeadline(timeout_seconds=0, clock=lambda: pytest.fail("clock must not be called"))
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        b"[PASS] queue: caught up (0 pending files) (within collection window)\n",
+        b"caught up (0 pending files)\nrejected batches: none\n",
+        b"caught up (0 pending files)\ncollector circuit: closed\nblocked batches: 0\n",
+    ],
+)
+def test_tokensflow_queue_requires_only_exact_caught_up_without_negative_state(status: bytes) -> None:
+    assert tokensflow_queue_caught_up(status) is True
+    assert tokensflow_queue_negative_detected(status) is False
+
+
+@pytest.mark.parametrize(
+    "negative",
+    [
+        b"pending files: 1",
+        b"1 pending file",
+        b"rejected batches: 2",
+        b"record rejected",
+        b"failed checks: 1",
+        b"[FAIL] queue inspection",
+        b"blocked ingest batches: 1",
+        b"collector circuit: open failures=1",
+        b"circuit-open",
+    ],
+)
+def test_tokensflow_queue_rejects_explicit_negative_state_even_with_caught_up_marker(negative: bytes) -> None:
+    status = b"caught up (0 pending files)\n" + negative + b"\n"
+
+    assert tokensflow_queue_caught_up(status) is False
+    assert tokensflow_queue_negative_detected(status) is True
+
+
+def test_tokensflow_queue_fails_closed_without_exact_caught_up_marker() -> None:
+    assert tokensflow_queue_caught_up(b"queue idle; pending files: 0\n") is False
+    assert tokensflow_queue_negative_detected(b"queue idle; pending files: 0\n") is False
 
 
 def _profile(tmp_path: Path, credentials: str = '{"access":"first"}') -> Path:

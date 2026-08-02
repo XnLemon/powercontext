@@ -44,6 +44,7 @@ from powercontext_eval.tokensflow import (
     parse_tokensflow_version,
     snapshot_tokensflow_home,
     tokensflow_queue_caught_up,
+    tokensflow_queue_negative_detected,
     tokensflow_secret_variants,
 )
 
@@ -843,6 +844,26 @@ class DockerSut:
         timeout: float = 30,
         secrets: Sequence[str] = (),
     ) -> bytes:
+        output, returncode = self._capture_tokensflow_result(
+            argv,
+            cwd=cwd,
+            environment=environment,
+            timeout=timeout,
+            secrets=secrets,
+        )
+        if returncode != 0:
+            raise TokensFlowInfrastructureError("TokensFlow command failed")
+        return output
+
+    def _capture_tokensflow_result(
+        self,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str] | None = None,
+        timeout: float = 30,
+        secrets: Sequence[str] = (),
+    ) -> tuple[bytes, int]:
         result: CommandResult | None = None
         output = b""
         try:
@@ -858,11 +879,13 @@ class DockerSut:
                 )
                 sink.seek(0)
                 output = sink.read()
+                if result.stderr:
+                    output += result.stderr.encode("utf-8")
         except (CommandError, OSError):
             pass
-        if result is None or result.returncode != 0:
+        if result is None:
             raise TokensFlowInfrastructureError("TokensFlow command failed")
-        return output
+        return output, result.returncode
 
     def _tokensflow_identity_gate(
         self,
@@ -1057,7 +1080,7 @@ class DockerSut:
             timeout=deadline.remaining(),
             secrets=credential_variants,
         )
-        status = self._capture_tokensflow_output(
+        status, doctor_rc = self._capture_tokensflow_result(
             (
                 "docker",
                 "exec",
@@ -1070,6 +1093,7 @@ class DockerSut:
             timeout=deadline.remaining(),
             secrets=credential_variants,
         )
+        negative_detected = tokensflow_queue_negative_detected(status)
         if not tokensflow_queue_caught_up(status):
             raise TokensFlowInfrastructureError("TokensFlow queue did not catch up")
         duration = 60.0 - deadline.remaining()
@@ -1078,6 +1102,8 @@ class DockerSut:
             daemon_stopped=True,
             upload_all_succeeded=True,
             queue_caught_up=True,
+            doctor_rc=doctor_rc,
+            negative_detected=negative_detected,
             drain_duration_seconds=round(duration, 6),
         )
 

@@ -310,12 +310,12 @@ class TranscriptDocker:
         )
 
     @staticmethod
-    def _output(payload: bytes, kwargs: dict[str, object]) -> CommandResult:
+    def _output(payload: bytes, kwargs: dict[str, object], *, returncode: int = 0) -> CommandResult:
         sink = kwargs.get("stdout_sink")
         if sink is not None:
             cast(BinaryIO, sink).write(payload)
-            return command_result("")
-        return command_result(payload.decode("utf-8"))
+            return command_result("", returncode=returncode)
+        return command_result(payload.decode("utf-8"), returncode=returncode)
 
     def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
         cwd = Path(cast(str | Path, kwargs.get("cwd", "/workspace")))
@@ -336,9 +336,9 @@ class TranscriptDocker:
             return self._output(b"uploaded=1 duplicates=0\n", kwargs)
         if _is_tokensflow(argv, "doctor"):
             return self._output(
-                b"[PASS] queue: caught up (0 pending files) (within collection window)\n"
-                b"rejected batches: none\ncollector circuit: closed\n",
+                b"[PASS] queue: caught up (0 pending files) (within collection window)\n",
                 kwargs,
+                returncode=1,
             )
         if argv[-3:-1] == ("network", "inspect"):
             return command_result('[{"IPAM":{"Config":[{"Gateway":"172.29.0.1"}]}}]')
@@ -689,18 +689,47 @@ def test_tokensflow_drain_obeys_zero_loss_order_and_accepts_duplicate_replay(tmp
     assert outcome.tokensflow.daemon_stopped is True
     assert outcome.tokensflow.upload_all_succeeded is True
     assert outcome.tokensflow.queue_caught_up is True
+    assert outcome.tokensflow.doctor_rc == 1
+    assert outcome.tokensflow.negative_detected is False
     assert outcome.tokensflow.drain_duration_seconds >= 0
     provenance = json.loads((paths.result_root / "tokensflow/provenance.json").read_text())
     assert provenance["daemon_stopped"] is True
     assert provenance["upload_all_succeeded"] is True
     assert provenance["queue_caught_up"] is True
+    assert provenance["doctor_rc"] == 1
+    assert provenance["negative_detected"] is False
     assert not (paths.runtime / "tokensflow-recovery.json").exists()
 
 
-@pytest.mark.parametrize("failure", ["stop", "upload", "pending", "blocked"])
+@pytest.mark.parametrize(
+    ("failure", "doctor_rc", "doctor_output"),
+    [
+        pytest.param("stop", 1, b"", id="stop-nonzero"),
+        pytest.param("upload", 1, b"", id="upload-nonzero"),
+        *(
+            pytest.param(
+                name,
+                returncode,
+                b"caught up (0 pending files)\n" + output,
+                id=f"{name}-doctor-rc{returncode}",
+            )
+            for name, output in (
+                ("pending", b"pending files: 1\n"),
+                ("rejected", b"rejected batches: 1\n"),
+                ("failed", b"[FAIL] queue inspection\n"),
+                ("blocked", b"blocked ingest batches: 1\n"),
+                ("open", b"collector circuit: open failures=1\n"),
+            )
+            for returncode in (0, 1)
+        ),
+        pytest.param("missing-caught-up", 1, b"queue inspection unavailable\n", id="rc1-without-caught-up"),
+    ],
+)
 def test_tokensflow_drain_failure_preserves_runtime_and_writes_safe_recovery_marker(
     tmp_path: Path,
     failure: str,
+    doctor_rc: int,
+    doctor_output: bytes,
 ) -> None:
     paths = make_paths(tmp_path)
     config = sut_config(tmp_path)
@@ -713,10 +742,9 @@ def test_tokensflow_drain_failure_preserves_runtime_and_writes_safe_recovery_mar
             if (failure == "stop" and stop) or (failure == "upload" and _is_tokensflow(argv, "upload")):
                 self.commands.append(argv)
                 return command_result("private raw failure", returncode=70)
-            if failure in {"pending", "blocked"} and _is_tokensflow(argv, "doctor"):
+            if doctor_output and _is_tokensflow(argv, "doctor"):
                 self.commands.append(argv)
-                state = b"pending files: 1\n" if failure == "pending" else b"blocked ingest batches: 1\n"
-                return self._output(state, kwargs)
+                return self._output(doctor_output, kwargs, returncode=doctor_rc)
             return super().run(argv, **kwargs)
 
     docker = DrainFailureDocker()
@@ -740,6 +768,8 @@ def test_tokensflow_drain_failure_preserves_runtime_and_writes_safe_recovery_mar
     }
     assert stat.S_IMODE(marker.stat().st_mode) == 0o600
     assert "private raw failure" not in marker.read_text()
+    if failure == "upload":
+        assert not any(_is_tokensflow(command, "doctor") for command in docker.commands)
     assert not any(
         command[:3] == ("docker", "rm", "-f") and command[-1] == "powercontext-eval-run-1-on"
         for command in docker.commands
@@ -783,7 +813,8 @@ def test_tokensflow_drain_commands_share_one_deadline(tmp_path: Path) -> None:
     assert not any(_is_tokensflow(command, "doctor") for command in docker.commands)
 
 
-def test_tokensflow_drain_command_secret_is_not_retained_or_chained(tmp_path: Path) -> None:
+@pytest.mark.parametrize("phase", ["upload", "doctor"])
+def test_tokensflow_drain_command_secret_is_not_retained_or_chained(tmp_path: Path, phase: str) -> None:
     paths = make_paths(tmp_path)
     secret = "tokensflow-drain-command-secret"
     (paths.tokensflow_home / ".tokensflow/credentials.json").write_text(json.dumps({"access_token": secret}))
@@ -793,9 +824,16 @@ def test_tokensflow_drain_command_secret_is_not_retained_or_chained(tmp_path: Pa
 
     class SecretFailureDocker(TranscriptDocker):
         def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-            if _is_tokensflow(argv, "upload"):
+            if phase == "upload" and _is_tokensflow(argv, "upload"):
                 self.commands.append(argv)
                 raise CommandFailed("raw " + secret, command_result(secret, returncode=70))
+            if phase == "doctor" and _is_tokensflow(argv, "doctor"):
+                self.commands.append(argv)
+                return self._output(
+                    b"caught up (0 pending files)\nblocked ingest: 1\n" + secret.encode(),
+                    kwargs,
+                    returncode=1,
+                )
             return super().run(argv, **kwargs)
 
     docker = SecretFailureDocker()

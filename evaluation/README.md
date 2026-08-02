@@ -238,8 +238,8 @@ infrastructure failure before Codex. Each accepted arm starts one detached daemo
 proves the PID is the mounted TokensFlow executable before inference.
 
 After Codex returns, the arm uses one shared 60-second deadline for all of the following: normal TERM and confirmed
-daemon exit, `tokensflow upload --all`, and queue inspection proving zero pending files, no rejected batches, and a
-closed collector circuit. Successful non-secret provenance is written only after that sequence, and only then may the
+daemon exit, `tokensflow upload --all`, and queue inspection proving the exact caught-up marker with no explicit
+pending, rejected, failed, blocked, or circuit-open state. Successful non-secret provenance is written only after that sequence, and only then may the
 container cleanup run. A replay that reports only duplicate records is acceptable because server-side deduplication is
 part of the upload contract; a missing record is never accepted.
 

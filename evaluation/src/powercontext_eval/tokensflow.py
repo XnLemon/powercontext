@@ -71,9 +71,11 @@ class TokensFlowEvidence:
     daemon_stopped: bool = False
     upload_all_succeeded: bool = False
     queue_caught_up: bool = False
+    doctor_rc: int | None = None
+    negative_detected: bool = False
     drain_duration_seconds: float = 0.0
 
-    def as_dict(self) -> dict[str, str | int | float | bool]:
+    def as_dict(self) -> dict[str, str | int | float | bool | None]:
         return {
             "host_version": self.host_version,
             "container_version": self.container_version,
@@ -87,6 +89,8 @@ class TokensFlowEvidence:
             "daemon_stopped": self.daemon_stopped,
             "upload_all_succeeded": self.upload_all_succeeded,
             "queue_caught_up": self.queue_caught_up,
+            "doctor_rc": self.doctor_rc,
+            "negative_detected": self.negative_detected,
             "drain_duration_seconds": self.drain_duration_seconds,
         }
 
@@ -103,8 +107,7 @@ class TokensFlowDaemonHandle:
 
 _TOKENSFLOW_VERSION = re.compile(rb"(?i:tokensflow)(?:-cli)?\s+v?([0-9]+\.[0-9]+\.[0-9]+)")
 _TOKENSFLOW_CAUGHT_UP = b"caught up (0 pending files)"
-_TOKENSFLOW_NO_REJECTED_BATCHES = b"rejected batches: none"
-_TOKENSFLOW_CLOSED_CIRCUIT = b"collector circuit: closed"
+_TOKENSFLOW_NEGATIVE_WORDS = (b"pending", b"rejected", b"failed", b"blocked")
 
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
@@ -149,17 +152,33 @@ def parse_tokensflow_version(raw: bytes) -> str:
 
 
 def tokensflow_queue_caught_up(raw: bytes) -> bool:
-    """Recognize only the stable TokensFlow 1.0.16 healthy queue evidence."""
+    """Require the exact 1.0.16 caught-up marker and reject explicit negative state."""
 
     normalized = raw.lower().replace(b"\r\n", b"\n")
-    return all(
-        marker in normalized
-        for marker in (
-            _TOKENSFLOW_CAUGHT_UP,
-            _TOKENSFLOW_NO_REJECTED_BATCHES,
-            _TOKENSFLOW_CLOSED_CIRCUIT,
-        )
-    )
+    return _TOKENSFLOW_CAUGHT_UP in normalized and not tokensflow_queue_negative_detected(normalized)
+
+
+def tokensflow_queue_negative_detected(raw: bytes) -> bool:
+    """Detect explicit nonzero/failed/blocked/open queue evidence without retaining it."""
+
+    normalized = raw.lower().replace(b"\r\n", b"\n")
+    if re.search(
+        rb"\[(?:fail|failed)\]|\b(?:collector\s+)?circuit\s*[:=-]?\s*open\b|\bcircuit[- ]open\b",
+        normalized,
+    ):
+        return True
+    for line in normalized.splitlines():
+        for word in _TOKENSFLOW_NEGATIVE_WORDS:
+            if word not in line:
+                continue
+            safe = (
+                re.search(rb"\bno\s+" + word + rb"\b", line)
+                or re.search(rb"\b0\s+" + word + rb"\b", line)
+                or re.search(word + rb"[^:\n]*:\s*(?:0|none|false)\b", line)
+            )
+            if safe is None:
+                return True
+    return False
 
 
 def matched_tokensflow_evidence(
