@@ -1140,24 +1140,13 @@ class DockerSut:
             "HOME": "/runtime/tokensflow-home",
             "CODEX_HOME": "/runtime/codex-home",
         }
-        stop_script = (
-            f"test -s {daemon.container_pid_file} || exit 1; "
-            f'pid="$(cat {daemon.container_pid_file})"; '
-            'case "$pid" in ""|*[!0-9]*) exit 1;; esac; '
-            f'test "$(readlink "/proc/$pid/exe")" = "{_CONTAINER_TOKENSFLOW}" || exit 1; '
-            'tr "\\000" "\\n" < "/proc/$pid/cmdline" | grep -Fqx daemon || exit 1; '
-            'kill -TERM "$pid"; '
-            'while test -e "/proc/$pid"; do '
-            f'test "$(readlink "/proc/$pid/exe")" = "{_CONTAINER_TOKENSFLOW}" || exit 1; '
-            'tr "\\000" "\\n" < "/proc/$pid/cmdline" | grep -Fqx daemon || exit 1; '
-            "sleep 0.05; "
-            "done"
-        )
-        self._capture_tokensflow_output(
-            ("docker", "exec", *_docker_env_args(environment), container, "/bin/sh", "-c", stop_script),
-            cwd=paths.runtime,
-            timeout=deadline.remaining(),
-            secrets=command_secrets,
+        self._stop_tokensflow_daemon(
+            container,
+            paths,
+            daemon,
+            environment,
+            command_secrets,
+            deadline,
         )
         upload = (
             "docker",
@@ -1200,6 +1189,143 @@ class DockerSut:
             negative_detected=negative_detected,
             drain_duration_seconds=round(duration, 6),
         )
+
+    def _stop_tokensflow_daemon(
+        self,
+        container: str,
+        paths: ArmPaths,
+        daemon: TokensFlowDaemonHandle,
+        environment: Mapping[str, str],
+        command_secrets: Sequence[str],
+        deadline: DrainDeadline,
+    ) -> None:
+        initial_probe = (
+            f"# tokensflow-stop-initial-probe\n"
+            f"test -s {daemon.container_pid_file} || exit 10\n"
+            f'pid="$(cat {daemon.container_pid_file})" || exit 10\n'
+            'case "$pid" in ""|0|*[!0-9]*) exit 10;; esac\n'
+            'test -e "/proc/$pid" || exit 10\n'
+            'exe="$(readlink "/proc/$pid/exe" 2>/dev/null)" || '
+            '{ test ! -e "/proc/$pid" && exit 20; exit 10; }\n'
+            f'test "$exe" = "{_CONTAINER_TOKENSFLOW}" || exit 10\n'
+            'cmdline="$(tr "\\000" "\\n" 2>/dev/null < "/proc/$pid/cmdline")" || '
+            '{ test ! -e "/proc/$pid" && exit 20; exit 10; }\n'
+            'printf "%s\\n" "$cmdline" | grep -Fqx daemon || exit 10\n'
+            'printf "%s\\n" "$pid"'
+        )
+        initial = self._run_tokensflow_stop_command(
+            (
+                "docker",
+                "exec",
+                *_docker_env_args(environment),
+                container,
+                "/bin/sh",
+                "-c",
+                initial_probe,
+            ),
+            paths=paths,
+            command_secrets=command_secrets,
+            deadline=deadline,
+        )
+        if initial.returncode == 20:
+            return
+        pid = initial.stdout.strip()
+        if initial.returncode != 0 or re.fullmatch(r"[1-9][0-9]*", pid) is None:
+            raise TokensFlowInfrastructureError("TokensFlow daemon failed to stop")
+
+        term_script = f'# tokensflow-stop-term {daemon.container_pid_file}\nkill -TERM "$1"'
+        terminated = self._run_tokensflow_stop_command(
+            (
+                "docker",
+                "exec",
+                *_docker_env_args(environment),
+                container,
+                "/bin/sh",
+                "-c",
+                term_script,
+                "tokensflow-stop-term",
+                pid,
+            ),
+            paths=paths,
+            command_secrets=command_secrets,
+            deadline=deadline,
+        )
+        if terminated.returncode != 0:
+            absent = self._run_tokensflow_stop_command(
+                (
+                    "docker",
+                    "exec",
+                    *_docker_env_args(environment),
+                    container,
+                    "/bin/sh",
+                    "-c",
+                    '# tokensflow-stop-absent\ntest ! -e "/proc/$1"',
+                    "tokensflow-stop-absent",
+                    pid,
+                ),
+                paths=paths,
+                command_secrets=command_secrets,
+                deadline=deadline,
+            )
+            if absent.returncode == 0:
+                return
+            raise TokensFlowInfrastructureError("TokensFlow daemon failed to stop")
+
+        poll_script = (
+            "# tokensflow-stop-poll\n"
+            'test -e "/proc/$1" || exit 0\n'
+            'exe="$(readlink "/proc/$1/exe" 2>/dev/null)" || exit 0\n'
+            f'test "$exe" = "{_CONTAINER_TOKENSFLOW}" || exit 0\n'
+            'cmdline="$(tr "\\000" "\\n" 2>/dev/null < "/proc/$1/cmdline")" || exit 0\n'
+            'printf "%s\\n" "$cmdline" | grep -Fqx daemon || exit 0\n'
+            "exit 11"
+        )
+        while True:
+            polled = self._run_tokensflow_stop_command(
+                (
+                    "docker",
+                    "exec",
+                    *_docker_env_args(environment),
+                    container,
+                    "/bin/sh",
+                    "-c",
+                    poll_script,
+                    "tokensflow-stop-poll",
+                    pid,
+                ),
+                paths=paths,
+                command_secrets=command_secrets,
+                deadline=deadline,
+                timeout_cap=1.0,
+            )
+            if polled.returncode == 0:
+                return
+            if polled.returncode != 11:
+                raise TokensFlowInfrastructureError("TokensFlow daemon failed to stop")
+            self._sleeper(min(0.05, deadline.remaining()))
+
+    def _run_tokensflow_stop_command(
+        self,
+        argv: tuple[str, ...],
+        *,
+        paths: ArmPaths,
+        command_secrets: Sequence[str],
+        deadline: DrainDeadline,
+        timeout_cap: float | None = None,
+    ) -> CommandResult:
+        timeout = deadline.remaining()
+        if timeout_cap is not None:
+            timeout = min(timeout_cap, timeout)
+        try:
+            return self._docker.run(
+                argv,
+                cwd=paths.runtime,
+                timeout=timeout,
+                check=False,
+                secrets=command_secrets,
+            )
+        except (CommandError, OSError):
+            raise TokensFlowInfrastructureError("TokensFlow daemon failed to stop") from None
 
     @staticmethod
     def _write_tokensflow_recovery_marker(paths: ArmPaths) -> None:

@@ -45,7 +45,7 @@ from powercontext_eval.powercontext_sut import (
     validate_treatment,
 )
 from powercontext_eval.process import CommandFailed, CommandResult, CommandTimedOut, ProcessRunner
-from powercontext_eval.tokensflow import TokensFlowInfrastructureError
+from powercontext_eval.tokensflow import DrainDeadline, TokensFlowDaemonHandle, TokensFlowInfrastructureError
 
 EXPECTED_COMMON = (
     "codex",
@@ -333,6 +333,15 @@ class TranscriptDocker:
         if argv[-1:] == ("--version",) and any(part.endswith("/tokensflow") for part in argv):
             version = self.container_tokensflow_version if argv[0] == "docker" else self.host_tokensflow_version
             return self._output(version, kwargs)
+        script = " ".join(argv)
+        if "tokensflow-stop-initial-probe" in script:
+            return command_result("123\n")
+        if "tokensflow-stop-term" in script:
+            return command_result("")
+        if "tokensflow-stop-absent" in script:
+            return command_result("", returncode=1)
+        if "tokensflow-stop-poll" in script:
+            return command_result("")
         if _is_tokensflow(argv, "upload"):
             return self._output(b"uploaded=1 duplicates=0\n", kwargs)
         if _is_tokensflow(argv, "doctor"):
@@ -850,6 +859,9 @@ def test_tokensflow_drain_failure_preserves_runtime_and_writes_safe_recovery_mar
             if (failure == "stop" and stop) or (failure == "upload" and _is_tokensflow(argv, "upload")):
                 self.commands.append(argv)
                 return command_result("private raw failure", returncode=70)
+            if failure == "stop" and "tokensflow-stop-absent" in " ".join(argv):
+                self.commands.append(argv)
+                return command_result("", returncode=1)
             if doctor_output and _is_tokensflow(argv, "doctor"):
                 self.commands.append(argv)
                 return self._output(doctor_output, kwargs, returncode=doctor_rc)
@@ -894,7 +906,7 @@ def test_tokensflow_drain_commands_share_one_deadline(tmp_path: Path) -> None:
     config = sut_config(tmp_path)
     config.codex_binary.write_text("binary")
     config.uv_binary.write_text("binary")
-    times = iter((0.0, 0.0, 0.0, 10.0, 35.0, 60.0))
+    times = iter((0.0, 0.0, 0.0, 10.0, 10.0, 10.0, 35.0, 60.0))
 
     class TimeoutCapturingDocker(TranscriptDocker):
         drain_timeouts: list[float]
@@ -920,6 +932,121 @@ def test_tokensflow_drain_commands_share_one_deadline(tmp_path: Path) -> None:
 
     assert docker.drain_timeouts == [50.0, 25.0]
     assert not any(_is_tokensflow(command, "doctor") for command in docker.commands)
+
+
+@pytest.mark.parametrize("exit_stage", ["initial-read-race", "post-term-read-race"])
+def test_tokensflow_stop_accepts_only_verified_daemon_exit_races(tmp_path: Path, exit_stage: str) -> None:
+    paths = make_paths(tmp_path)
+
+    class ExitRaceDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            self.commands.append(argv)
+            script = " ".join(argv)
+            if "tokensflow-stop-initial-probe" in script:
+                return (
+                    command_result("", returncode=20) if exit_stage == "initial-read-race" else command_result("123\n")
+                )
+            if "tokensflow-stop-term" in script:
+                return command_result("")
+            if "tokensflow-stop-poll" in script:
+                return command_result("")
+            return TranscriptDocker.run(self, argv, **kwargs)
+
+    docker = ExitRaceDocker()
+    daemon = TokensFlowDaemonHandle(
+        pid_file=paths.tokensflow_home / "daemon.pid",
+        log_file=paths.tokensflow_home / "daemon.log",
+        container_pid_file="/runtime/tokensflow-home/daemon.pid",
+        container_log_file="/runtime/tokensflow-home/daemon.log",
+    )
+
+    DockerSut(docker, sleeper=lambda _seconds: None)._stop_tokensflow_daemon(
+        "fixture-container",
+        paths,
+        daemon,
+        {},
+        (),
+        DrainDeadline(timeout_seconds=1),
+    )
+
+    term_commands = [command for command in docker.commands if "tokensflow-stop-term" in " ".join(command)]
+    assert bool(term_commands) is (exit_stage == "post-term-read-race")
+
+
+@pytest.mark.parametrize("failure", ["wrong-pid", "kill-permission"])
+def test_tokensflow_stop_rejects_wrong_pid_and_kill_permission_failure(tmp_path: Path, failure: str) -> None:
+    paths = make_paths(tmp_path)
+
+    class StopFailureDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            self.commands.append(argv)
+            script = " ".join(argv)
+            if "tokensflow-stop-initial-probe" in script:
+                return command_result("", returncode=10) if failure == "wrong-pid" else command_result("123\n")
+            if "tokensflow-stop-term" in script:
+                return command_result("", returncode=1)
+            if "tokensflow-stop-absent" in script:
+                return command_result("", returncode=1)
+            return TranscriptDocker.run(self, argv, **kwargs)
+
+    docker = StopFailureDocker()
+    daemon = TokensFlowDaemonHandle(
+        pid_file=paths.tokensflow_home / "daemon.pid",
+        log_file=paths.tokensflow_home / "daemon.log",
+        container_pid_file="/runtime/tokensflow-home/daemon.pid",
+        container_log_file="/runtime/tokensflow-home/daemon.log",
+    )
+
+    with pytest.raises(TokensFlowInfrastructureError, match="daemon failed to stop"):
+        DockerSut(docker, sleeper=lambda _seconds: None)._stop_tokensflow_daemon(
+            "fixture-container",
+            paths,
+            daemon,
+            {},
+            (),
+            DrainDeadline(timeout_seconds=1),
+        )
+
+
+def test_tokensflow_stop_uses_shared_deadline_while_exact_daemon_remains_alive(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    now = 0.0
+
+    def clock() -> float:
+        nonlocal now
+        now += 0.4
+        return now
+
+    class AliveDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            self.commands.append(argv)
+            script = " ".join(argv)
+            if "tokensflow-stop-initial-probe" in script:
+                return command_result("123\n")
+            if "tokensflow-stop-term" in script:
+                return command_result("")
+            if "tokensflow-stop-poll" in script:
+                return command_result("", returncode=11)
+            return TranscriptDocker.run(self, argv, **kwargs)
+
+    docker = AliveDocker()
+    daemon = TokensFlowDaemonHandle(
+        pid_file=paths.tokensflow_home / "daemon.pid",
+        log_file=paths.tokensflow_home / "daemon.log",
+        container_pid_file="/runtime/tokensflow-home/daemon.pid",
+        container_log_file="/runtime/tokensflow-home/daemon.log",
+    )
+    deadline = DrainDeadline(timeout_seconds=1, clock=clock)
+
+    with pytest.raises(TokensFlowInfrastructureError, match="drain timed out"):
+        DockerSut(docker, clock=clock, sleeper=lambda _seconds: None)._stop_tokensflow_daemon(
+            "fixture-container",
+            paths,
+            daemon,
+            {},
+            (),
+            deadline,
+        )
 
 
 @pytest.mark.parametrize("phase", ["upload", "doctor"])
