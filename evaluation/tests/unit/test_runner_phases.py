@@ -27,6 +27,7 @@ from powercontext_eval.runner import (
     _resolve_task_image,
     run_swebench_pro_instance,
 )
+from powercontext_eval.tokensflow import TokensFlowInfrastructureError
 
 INSTANCE_ID = "instance_owner__repo-b"
 OPENLIBRARY_DYNAMIC_YEAR_INSTANCE_ID = (
@@ -225,8 +226,11 @@ def _run_with_fakes(
     image_cleanup_failure: Exception | None = None,
     observed: dict[str, object] | None = None,
     instance: SweBenchProInstance | None = None,
+    config_mutator: Callable[[RunConfig], None] | None = None,
 ) -> tuple[RunConfig, MinimalRunResult, dict[str, object]]:
     config = _config(tmp_path)
+    if config_mutator is not None:
+        config_mutator(config)
     instance = _instance() if instance is None else instance
     materialized = tmp_path / "materialized"
     materialized.mkdir()
@@ -368,6 +372,29 @@ def test_runner_snapshots_tokensflow_per_arm_and_blocks_both_credential_sets(
     retained = (config.root / "runs" / result.run_id / "manifest.json").read_text()
     assert os.fspath(config.auth_json) not in retained
     assert os.fspath(config.tokensflow_user_home) not in retained
+
+
+@pytest.mark.parametrize("profile", ["missing", "symlink"])
+def test_runner_translates_unsafe_tokensflow_profile_to_sanitized_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+) -> None:
+    def break_profile(config: RunConfig) -> None:
+        credentials = config.tokensflow_user_home / ".tokensflow/credentials.json"
+        credentials.unlink()
+        if profile == "symlink":
+            external = tmp_path / "external-credentials.json"
+            external.write_text('{"access_token":"do-not-retain"}')
+            credentials.symlink_to(external)
+
+    with pytest.raises(TokensFlowInfrastructureError) as captured:
+        _run_with_fakes(tmp_path, monkeypatch, [], config_mutator=break_profile)
+
+    assert str(captured.value) == "TokensFlow profile snapshot failed"
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is not None
+    assert os.fspath(tmp_path) not in str(captured.value)
 
 
 def test_runner_reuses_one_proxy_configured_official_evaluator_for_gold_off_and_on(

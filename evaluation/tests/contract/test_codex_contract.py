@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -42,7 +43,7 @@ from powercontext_eval.powercontext_sut import (
     run_codex_contract_smoke,
     validate_treatment,
 )
-from powercontext_eval.process import CommandFailed, CommandResult, CommandTimedOut
+from powercontext_eval.process import CommandFailed, CommandResult, CommandTimedOut, ProcessRunner
 from powercontext_eval.tokensflow import TokensFlowInfrastructureError
 
 EXPECTED_COMMON = (
@@ -273,6 +274,9 @@ def make_paths(tmp_path: Path) -> ArmPaths:
         path.mkdir(parents=True, exist_ok=True)
     auth.write_text('{"token":"fixture-secret"}')
     os.chmod(auth, 0o600)
+    tokensflow_config = tokensflow_home / ".tokensflow"
+    tokensflow_config.mkdir(parents=True)
+    (tokensflow_config / "credentials.json").write_text('{"token":"fixture-tokensflow-secret"}')
     return ArmPaths(
         source=source,
         auth_source=auth,
@@ -935,6 +939,45 @@ def test_contract_smoke_propagates_dynamic_tokensflow_snapshot_and_secret_bounda
     assert result["on_prompt_sources"] == 1
 
 
+@pytest.mark.parametrize("profile", ["missing", "symlink"])
+def test_contract_smoke_translates_unsafe_tokensflow_profile_to_sanitized_error(
+    tmp_path: Path,
+    profile: str,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    auth = tmp_path / "auth.json"
+    auth.write_text('{"token":"codex-smoke-secret"}')
+    tokensflow_user_home = tmp_path / "tokensflow-profile"
+    tokensflow_config = tokensflow_user_home / ".tokensflow"
+    tokensflow_config.mkdir(parents=True)
+    credentials = tokensflow_config / "credentials.json"
+    if profile == "symlink":
+        external = tmp_path / "external-credentials.json"
+        external.write_text('{"token":"do-not-retain"}')
+        credentials.symlink_to(external)
+
+    with pytest.raises(TokensFlowInfrastructureError) as captured:
+        run_codex_contract_smoke(
+            run_root=os.fspath(tmp_path / "run"),
+            task_image="fixture:image",
+            codex_bin=os.fspath(tmp_path / "tools/codex"),
+            tokensflow_bin=os.fspath(tmp_path / "tools/tokensflow"),
+            tokensflow_user_home=os.fspath(tokensflow_user_home),
+            uv_bin=os.fspath(tmp_path / "tools/uv"),
+            powercontext_source=os.fspath(source),
+            powercontext_sha="a" * 40,
+            auth_json=os.fspath(auth),
+            proxy_url="http://127.0.0.1:7890",
+            sut_factory=lambda _process: pytest.fail("SUT must not run"),
+        )
+
+    assert str(captured.value) == "TokensFlow profile snapshot failed"
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is not None
+    assert os.fspath(tokensflow_user_home) not in str(captured.value)
+
+
 def test_distinct_run_ids_derive_distinct_runtime_network_and_scope(tmp_path: Path) -> None:
     runtimes: list[Path] = []
     networks: list[str] = []
@@ -1296,6 +1339,58 @@ def test_fake_codex_echo_of_auth_secrets_or_encodings_is_never_published(tmp_pat
     assert list(store.root.rglob("*")) == []
 
 
+def test_codex_failure_filters_tokensflow_secret_from_process_and_retained_artifacts(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    secret = "tokensflow-codex-stderr-secret"
+    credentials = paths.tokensflow_home / ".tokensflow/credentials.json"
+    credentials.write_text(json.dumps({"access_token": secret}))
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class LeakingCodexDocker(TranscriptDocker):
+        codex_secrets: tuple[str, ...] = ()
+
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if _is_codex_inference(argv):
+                self.commands.append(argv)
+                self.codex_secrets = tuple(cast(Sequence[str], kwargs.get("secrets", ())))
+                return ProcessRunner().run(
+                    (
+                        sys.executable,
+                        "-c",
+                        "import sys; sys.stderr.write(sys.argv[1]); raise SystemExit(70)",
+                        secret,
+                    ),
+                    cwd=cast(Path, kwargs["cwd"]),
+                    timeout=cast(float, kwargs["timeout"]),
+                    secrets=self.codex_secrets,
+                    input_bytes=cast(bytes, kwargs["input_bytes"]),
+                    stdout_sink=cast(BinaryIO, kwargs["stdout_sink"]),
+                )
+            return super().run(argv, **kwargs)
+
+    docker = LeakingCodexDocker()
+    with pytest.raises(CodexInfrastructureError) as captured:
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            config,
+            Arm.ON,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root),
+        )
+
+    assert secret in docker.codex_secrets
+    errors: list[BaseException] = []
+    current: BaseException | None = captured.value
+    while current is not None:
+        errors.append(current)
+        current = current.__cause__ or current.__context__
+    assert all(secret not in repr(error) and secret not in str(error) for error in errors)
+    assert all(secret not in repr(getattr(error, "result", None)) for error in errors)
+    assert all(secret.encode() not in path.read_bytes() for path in paths.result_root.rglob("*") if path.is_file())
+
+
 def test_server_log_echo_of_auth_encoding_is_rejected_before_publication(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     secret = "server/log secret"
@@ -1329,12 +1424,14 @@ def test_arm_paths_reject_stale_or_symlink_roots(tmp_path: Path, target: str, ki
     paths = make_paths(tmp_path)
     selected = getattr(paths, target)
     if kind == "stale":
-        selected.mkdir(parents=True)
+        selected.mkdir(parents=True, exist_ok=target == "runtime")
         (selected / "old").write_text("stale")
     else:
         destination = tmp_path / f"{target}-elsewhere"
         destination.mkdir()
         selected.parent.mkdir(parents=True, exist_ok=True)
+        if target == "runtime":
+            shutil.rmtree(selected)
         selected.symlink_to(destination, target_is_directory=True)
 
     with pytest.raises(UnsafeSutConfiguration, match="fresh"):

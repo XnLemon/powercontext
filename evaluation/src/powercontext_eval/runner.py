@@ -39,7 +39,12 @@ from powercontext_eval.powercontext_sut import (
 )
 from powercontext_eval.process import ProcessRunner
 from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, TestGroupReport, render_report
-from powercontext_eval.tokensflow import snapshot_tokensflow_home, tokensflow_secret_variants
+from powercontext_eval.tokensflow import (
+    TokensFlowInfrastructureError,
+    UnsafeTokensFlowConfiguration,
+    snapshot_tokensflow_home,
+    tokensflow_secret_variants,
+)
 
 # Compatibility identifier for the legacy single-task web contract. The generic runner never consults it.
 INSTANCE_ID = "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"
@@ -236,7 +241,10 @@ def _run_swebench_pro_instance(
         for arm in (Arm.OFF, Arm.ON):
             arm_work = layout.arm_work(arm)
             runtime = arm_work / "runtime"
-            tokensflow = snapshot_tokensflow_home(config.tokensflow_user_home, runtime / "tokensflow-home")
+            try:
+                tokensflow = snapshot_tokensflow_home(config.tokensflow_user_home, runtime / "tokensflow-home")
+            except UnsafeTokensFlowConfiguration:
+                raise TokensFlowInfrastructureError("TokensFlow profile snapshot failed") from None
             arm_paths[arm] = ArmPaths(
                 source=materialized,
                 auth_source=config.auth_json,

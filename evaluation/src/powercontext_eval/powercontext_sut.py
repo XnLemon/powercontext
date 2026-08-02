@@ -38,6 +38,7 @@ from powercontext_eval.tokensflow import (
     TokensFlowDaemonHandle,
     TokensFlowEvidence,
     TokensFlowInfrastructureError,
+    UnsafeTokensFlowConfiguration,
     matched_tokensflow_evidence,
     parse_tokensflow_version,
     snapshot_tokensflow_home,
@@ -700,7 +701,9 @@ class DockerSut:
     ) -> SutOutcome:
         container = f"{network}-{arm.value}"
         container_started = False
-        credential_variants = auth_secret_variants(paths.auth_source)
+        credential_variants = auth_secret_variants(paths.auth_source) + tokensflow_secret_variants(
+            paths.tokensflow_home / ".tokensflow/credentials.json"
+        )
         try:
             paths.prepare()
             auth = paths.copy_auth()
@@ -1561,10 +1564,13 @@ def run_codex_contract_smoke(
         arm_root = root / arm.value
         arm_root.mkdir(mode=0o700)
         runtime = arm_root / "ephemeral/runtime"
-        tokensflow = snapshot_tokensflow_home(
-            Path(tokensflow_user_home).absolute(),
-            runtime / "tokensflow-home",
-        )
+        try:
+            tokensflow = snapshot_tokensflow_home(
+                Path(tokensflow_user_home).absolute(),
+                runtime / "tokensflow-home",
+            )
+        except UnsafeTokensFlowConfiguration:
+            raise TokensFlowInfrastructureError("TokensFlow profile snapshot failed") from None
         paths[arm] = ArmPaths(
             source=source,
             auth_source=auth,
