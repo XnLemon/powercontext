@@ -356,6 +356,7 @@ def main() -> None:
     shutil.copytree(repository / "evaluation" / "web" / "dist", frontend)
     config = WebConfig.for_root(
         temporary_root,
+        tokensflow_egress_network="bridge",
         database_path=temporary_root / "web" / "tasks.sqlite3",
         run_root=temporary_root,
         frontend_dist=frontend,

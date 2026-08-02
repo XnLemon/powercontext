@@ -74,6 +74,7 @@ def _config(
 ) -> WebConfig:
     return WebConfig.for_root(
         root,
+        tokensflow_egress_network="bridge",
         run_root=root / "artifacts",
         powercontext_source=root / "source",
         harness_root=root / "harness",

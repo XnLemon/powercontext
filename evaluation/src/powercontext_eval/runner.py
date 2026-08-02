@@ -87,6 +87,7 @@ class RunConfig:
     codex_binary: Path
     tokensflow_binary: Path
     tokensflow_user_home: Path
+    tokensflow_egress_network: str
     uv_binary: Path
     registry_binary: Path
     auth_json: Path
@@ -264,6 +265,7 @@ def _run_swebench_pro_instance(
                 plugin_checkout_sha=resolved.sha,
                 proxy=ProxyRelayConfig(config.proxy_url),
                 tokensflow_binary=config.tokensflow_binary,
+                tokensflow_egress_network=config.tokensflow_egress_network,
             ),
             paths=arm_paths,
             prompts={Arm.OFF: prompt, Arm.ON: prompt},
@@ -374,6 +376,7 @@ class MinimalRunConfig:
     codex_binary: Path
     tokensflow_binary: Path
     tokensflow_user_home: Path
+    tokensflow_egress_network: str
     uv_binary: Path
     registry_binary: Path
     auth_json: Path
@@ -404,6 +407,7 @@ def run_minimal_swebench_pro(
             codex_binary=config.codex_binary,
             tokensflow_binary=config.tokensflow_binary,
             tokensflow_user_home=config.tokensflow_user_home,
+            tokensflow_egress_network=config.tokensflow_egress_network,
             uv_binary=config.uv_binary,
             registry_binary=config.registry_binary,
             auth_json=config.auth_json,

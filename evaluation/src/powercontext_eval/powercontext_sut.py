@@ -51,6 +51,7 @@ from powercontext_eval.tokensflow import (
 
 PLUGIN_ID = "powercontext@powercontext"
 _SAFE_RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+_SAFE_DOCKER_NETWORK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _INVALID_DOCKER_COPY_SYMLINK = re.compile(r'invalid symlink "[^"\r\n]+" -> "[^"\r\n]+"')
 _CONTAINER_UID_GID = "2950:100"
@@ -96,6 +97,21 @@ def loopback_proxy_environment(relay_url: str) -> dict[str, str]:
         "http_proxy": relay_url,
         "NO_PROXY": LOOPBACK_NO_PROXY,
         "no_proxy": LOOPBACK_NO_PROXY,
+    }
+
+
+def direct_egress_environment() -> dict[str, str]:
+    """Override inherited proxy variables for a runtime attached to its configured egress network."""
+
+    return {
+        "ALL_PROXY": "",
+        "HTTPS_PROXY": "",
+        "HTTP_PROXY": "",
+        "all_proxy": "",
+        "https_proxy": "",
+        "http_proxy": "",
+        "NO_PROXY": "",
+        "no_proxy": "",
     }
 
 
@@ -308,6 +324,7 @@ class SutConfig:
     task_image: str
     codex_binary: Path
     tokensflow_binary: Path
+    tokensflow_egress_network: str
     uv_binary: Path
     source_checkout: Path
     plugin_checkout_sha: str
@@ -333,6 +350,8 @@ class SutConfig:
                 raise UnsafeSutConfiguration("SUT paths must be absolute")
         if not self.tokensflow_binary.is_absolute() or "\0" in os.fspath(self.tokensflow_binary):
             raise TokensFlowInfrastructureError("TokensFlow binary path is unsafe")
+        if _SAFE_DOCKER_NETWORK.fullmatch(self.tokensflow_egress_network) is None:
+            raise TokensFlowInfrastructureError("TokensFlow egress network is unsafe")
         try:
             recorder_metadata = self.recorder_script.stat(follow_symlinks=False)
         except OSError as error:
@@ -705,6 +724,7 @@ class DockerSut:
     ) -> SutOutcome:
         container = f"{network}-{arm.value}"
         container_started = False
+        tokensflow_egress_attached = False
         preserve_after_drain_failure = False
         tokensflow_environment = tokensflow_runtime_environment()
         tokensflow_environment_values = tuple(
@@ -727,11 +747,12 @@ class DockerSut:
             self._verify_codex_version(container, paths, store)
             self._readiness(container, paths)
             plugin = self._plugin_list(container, paths)
+            self._attach_tokensflow_egress(config, container, paths)
+            tokensflow_egress_attached = True
             tokensflow = self._tokensflow_identity_gate(
                 config,
                 container,
                 paths,
-                relay_url,
                 tokensflow_environment,
                 tokensflow_command_secrets,
             )
@@ -739,7 +760,6 @@ class DockerSut:
                 config,
                 container,
                 paths,
-                relay_url,
                 tokensflow_environment,
                 tokensflow_command_secrets,
             )
@@ -779,7 +799,6 @@ class DockerSut:
                 tokensflow = self._drain_tokensflow(
                     container,
                     paths,
-                    relay_url,
                     tokensflow_daemon,
                     tokensflow,
                     tokensflow_environment,
@@ -835,6 +854,8 @@ class DockerSut:
             store.write_bytes("powercontext/provenance.json", provenance_bytes)
             return SutOutcome(codex, evidence, tokensflow, tokensflow_daemon)
         finally:
+            if tokensflow_egress_attached:
+                self._detach_tokensflow_egress(config, container, paths)
             if container_started and not preserve_after_drain_failure:
                 self._docker.run(
                     ("docker", "rm", "-f", container),
@@ -857,6 +878,48 @@ class DockerSut:
         except UnsafeSutConfiguration:
             raise TokensFlowInfrastructureError("TokensFlow binary validation failed") from None
         return config.tokensflow_binary, paths.tokensflow_home
+
+    def _tokensflow_egress_is_attached(self, config: SutConfig, container: str, paths: ArmPaths) -> bool:
+        template = (
+            '{{if index .NetworkSettings.Networks "' + config.tokensflow_egress_network + '"}}true{{else}}false{{end}}'
+        )
+        try:
+            result = self._docker.run(
+                ("docker", "inspect", "--format", template, container),
+                cwd=paths.runtime,
+                timeout=30,
+            )
+        except (CommandError, OSError):
+            raise TokensFlowInfrastructureError("TokensFlow egress network inspection failed") from None
+        attached = result.stdout.strip()
+        if attached not in {"true", "false"}:
+            raise TokensFlowInfrastructureError("TokensFlow egress network inspection failed")
+        return attached == "true"
+
+    def _attach_tokensflow_egress(self, config: SutConfig, container: str, paths: ArmPaths) -> None:
+        try:
+            if not self._tokensflow_egress_is_attached(config, container, paths):
+                self._docker.run(
+                    ("docker", "network", "connect", config.tokensflow_egress_network, container),
+                    cwd=paths.runtime,
+                    timeout=30,
+                )
+            if not self._tokensflow_egress_is_attached(config, container, paths):
+                raise TokensFlowInfrastructureError("TokensFlow egress network attachment failed")
+        except (CommandError, OSError, TokensFlowInfrastructureError):
+            self._detach_tokensflow_egress(config, container, paths)
+            raise TokensFlowInfrastructureError("TokensFlow egress network attachment failed") from None
+
+    def _detach_tokensflow_egress(self, config: SutConfig, container: str, paths: ArmPaths) -> None:
+        try:
+            self._docker.run(
+                ("docker", "network", "disconnect", config.tokensflow_egress_network, container),
+                cwd=paths.runtime,
+                timeout=30,
+                check=False,
+            )
+        except (CommandError, OSError):
+            pass
 
     def _capture_tokensflow_output(
         self,
@@ -915,15 +978,18 @@ class DockerSut:
         config: SutConfig,
         container: str,
         paths: ArmPaths,
-        relay_url: str,
         runtime_environment: Mapping[str, str],
         command_secrets: Sequence[str],
     ) -> TokensFlowEvidence:
         tokensflow_binary, tokensflow_home = self._validate_tokensflow_inputs(config, paths)
-        host_environment = {**runtime_environment, "HOME": os.fspath(tokensflow_home)}
+        host_environment = {
+            **runtime_environment,
+            **direct_egress_environment(),
+            "HOME": os.fspath(tokensflow_home),
+        }
         container_environment = {
             **runtime_environment,
-            **loopback_proxy_environment(relay_url),
+            **direct_egress_environment(),
             "HOME": "/runtime/tokensflow-home",
             "CODEX_HOME": "/runtime/codex-home",
         }
@@ -979,7 +1045,6 @@ class DockerSut:
         config: SutConfig,
         container: str,
         paths: ArmPaths,
-        relay_url: str,
         runtime_environment: Mapping[str, str],
         command_secrets: Sequence[str],
     ) -> TokensFlowDaemonHandle:
@@ -989,7 +1054,7 @@ class DockerSut:
         container_log_file = f"{state}/evaluation-daemon.log"
         environment = {
             **runtime_environment,
-            **loopback_proxy_environment(relay_url),
+            **direct_egress_environment(),
             "HOME": "/runtime/tokensflow-home",
             "CODEX_HOME": "/runtime/codex-home",
         }
@@ -1063,7 +1128,6 @@ class DockerSut:
         self,
         container: str,
         paths: ArmPaths,
-        relay_url: str,
         daemon: TokensFlowDaemonHandle,
         evidence: TokensFlowEvidence,
         runtime_environment: Mapping[str, str],
@@ -1072,7 +1136,7 @@ class DockerSut:
         deadline = DrainDeadline(clock=self._clock)
         environment = {
             **runtime_environment,
-            **loopback_proxy_environment(relay_url),
+            **direct_egress_environment(),
             "HOME": "/runtime/tokensflow-home",
             "CODEX_HOME": "/runtime/codex-home",
         }
@@ -1717,6 +1781,7 @@ def run_codex_contract_smoke(
     codex_bin: str,
     tokensflow_bin: str,
     tokensflow_user_home: str,
+    tokensflow_egress_network: str,
     uv_bin: str,
     powercontext_source: str,
     powercontext_sha: str,
@@ -1744,6 +1809,7 @@ def run_codex_contract_smoke(
         plugin_checkout_sha=powercontext_sha,
         proxy=ProxyRelayConfig(proxy_url),
         tokensflow_binary=Path(tokensflow_bin).absolute(),
+        tokensflow_egress_network=tokensflow_egress_network,
     )
     paths: dict[Arm, ArmPaths] = {}
     stores: dict[Arm, ArtifactStore] = {}

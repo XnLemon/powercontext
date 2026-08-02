@@ -70,6 +70,7 @@ class AdvancingClock:
 def _config(root: Path, *, task_parallelism: int = 4) -> WebConfig:
     return WebConfig.for_root(
         root,
+        tokensflow_egress_network="bridge",
         task_parallelism=task_parallelism,
         usage_probe_seconds=60,
         usage_snapshot_max_age_seconds=120,

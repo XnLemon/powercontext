@@ -213,6 +213,7 @@ def _config(tmp_path: Path) -> RunConfig:
         codex_binary=tmp_path / "codex",
         tokensflow_binary=tmp_path / "tokensflow",
         tokensflow_user_home=tmp_path / "tokensflow-profile",
+        tokensflow_egress_network="bridge",
         uv_binary=tmp_path / "uv",
         registry_binary=tmp_path / "regctl",
         auth_json=auth_json,

@@ -57,6 +57,7 @@ def payload(key: str = "api-task-key") -> dict[str, str]:
 def config(tmp_path: Path) -> WebConfig:
     return WebConfig.for_root(
         tmp_path,
+        tokensflow_egress_network="bridge",
         database_path=tmp_path / "tasks.sqlite3",
         run_root=tmp_path / "runs",
         frontend_dist=tmp_path / "deploy" / "frontend",
@@ -1044,7 +1045,7 @@ def test_batch_preview_is_read_only_and_exposes_fixed_facts_usage_and_estimate(
 
 def test_batch_preview_and_confirmation_fail_closed_without_fresh_usage(tmp_path: Path) -> None:
     root = tmp_path / "no-current-usage"
-    config = WebConfig.for_root(root)
+    config = WebConfig.for_root(root, tokensflow_egress_network="bridge")
     store = TaskStore(config.database_path, lease_duration=timedelta(seconds=config.lease_seconds))
     store.initialize()
     client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
@@ -1095,7 +1096,9 @@ def test_batch_confirmation_rejects_unresolvable_latest_before_creating_children
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "missing-source"
-    config = WebConfig.for_root(root, powercontext_source=root / "source" / "powercontext.git")
+    config = WebConfig.for_root(
+        root, powercontext_source=root / "source" / "powercontext.git", tokensflow_egress_network="bridge"
+    )
     store = TaskStore(config.database_path, lease_duration=timedelta(seconds=config.lease_seconds))
     store.initialize()
     store.save_usage_snapshot(_usage(9))

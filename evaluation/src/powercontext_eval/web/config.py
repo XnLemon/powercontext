@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+_SAFE_DOCKER_NETWORK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
 class _EnvironmentNumbers(BaseModel):
@@ -45,6 +48,7 @@ class WebConfig(BaseModel):
     codex_binary: Path
     tokensflow_binary: Path
     tokensflow_user_home: Path = Field(exclude=True, repr=False)
+    tokensflow_egress_network: str = Field(repr=False)
     uv_binary: Path
     registry_binary: Path
     auth_json: Path = Field(exclude=True, repr=False)
@@ -81,6 +85,13 @@ class WebConfig(BaseModel):
             raise ValueError("Runtime paths must be absolute")
         return value
 
+    @field_validator("tokensflow_egress_network")
+    @classmethod
+    def require_safe_tokensflow_egress_network(cls, value: str) -> str:
+        if _SAFE_DOCKER_NETWORK.fullmatch(value) is None:
+            raise ValueError("TokensFlow egress network is unsafe")
+        return value
+
     @model_validator(mode="after")
     def require_usage_snapshot_to_cover_probe_interval(self) -> Self:
         if self.usage_snapshot_max_age_seconds < self.usage_probe_seconds:
@@ -92,6 +103,7 @@ class WebConfig(BaseModel):
         cls,
         root: Path,
         *,
+        tokensflow_egress_network: str,
         database_path: Path | None = None,
         run_root: Path | None = None,
         frontend_dist: Path | None = None,
@@ -131,6 +143,7 @@ class WebConfig(BaseModel):
             codex_binary=codex_binary or root / "bin" / "codex",
             tokensflow_binary=tokensflow_binary or root / "bin" / "tokensflow",
             tokensflow_user_home=tokensflow_user_home or root / "tokensflow-home",
+            tokensflow_egress_network=tokensflow_egress_network,
             uv_binary=uv_binary or root / "bin" / "uv",
             registry_binary=registry_binary or root / "bin" / "regctl",
             auth_json=auth_json or root / "codex-home" / "auth.json",
@@ -180,6 +193,7 @@ class WebConfig(BaseModel):
             codex_binary=path("CODEX_BINARY"),
             tokensflow_binary=path("TOKENSFLOW_BINARY"),
             tokensflow_user_home=path("TOKENSFLOW_USER_HOME"),
+            tokensflow_egress_network=environ[f"{prefix}TOKENSFLOW_EGRESS_NETWORK"],
             uv_binary=path("UV_BINARY"),
             registry_binary=path("REGISTRY_BINARY"),
             auth_json=path("AUTH_JSON"),

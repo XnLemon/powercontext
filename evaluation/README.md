@@ -215,6 +215,15 @@ current configuration. The checked-in example uses a generic operator path and c
 the protected mode-0600 environment file; do not copy credentials into Git or serialize the selected user-home path
 through an API.
 
+Set `POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK` to an existing Docker network that provides the selected TokensFlow
+endpoint with working egress. This value is mandatory and has no code default. The Worker validates it as one literal
+Docker network name, attaches each fresh OFF/ON task container immediately before the TokensFlow identity gate,
+verifies that attachment, keeps the task's original isolated PowerContext network attached, and disconnects only the
+configured egress network after the daemon drain. The Worker never creates, modifies, or removes that external network
+and never changes Docker daemon configuration. A missing, unsafe, unreachable, or unverifiable network fails closed
+before container `tokensflow whoami` and Codex inference. TokensFlow lifecycle commands explicitly clear inherited
+proxy variables and use this configured network directly; PowerContext and Codex continue using the isolated relay.
+
 There are two different change procedures. A **configuration content replacement** atomically updates content at the
 already configured source path; the next OFF or ON arm takes a fresh private snapshot, while an active arm continues
 with its existing snapshot. A **configured path switch** changes either named environment value. Keep the batch paused,

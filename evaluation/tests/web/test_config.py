@@ -39,7 +39,7 @@ def valid_task(**overrides: object) -> dict[str, object]:
 
 
 def test_web_config_derives_confined_paths(tmp_path: Path) -> None:
-    config = WebConfig.for_root(tmp_path)
+    config = WebConfig.for_root(tmp_path, tokensflow_egress_network="bridge")
 
     assert config.database_path == tmp_path / "web" / "tasks.sqlite3"
     assert config.run_root == tmp_path
@@ -49,7 +49,7 @@ def test_web_config_derives_confined_paths(tmp_path: Path) -> None:
 def test_web_config_accepts_explicit_frontend_dist(tmp_path: Path) -> None:
     frontend_dist = tmp_path / "static"
 
-    config = WebConfig.for_root(tmp_path, frontend_dist=frontend_dist)
+    config = WebConfig.for_root(tmp_path, frontend_dist=frontend_dist, tokensflow_egress_network="bridge")
 
     assert config.frontend_dist == frontend_dist
 
@@ -57,7 +57,7 @@ def test_web_config_accepts_explicit_frontend_dist(tmp_path: Path) -> None:
 def test_web_config_defaults_match_m0_layout() -> None:
     root = Path("/data/powercontext-eval")
 
-    config = WebConfig.for_root(root)
+    config = WebConfig.for_root(root, tokensflow_egress_network="bridge")
 
     assert config.powercontext_source == root / "source" / "powercontext.git"
     assert config.harness_root == root / "cache" / "swebench-pro.git"
@@ -66,6 +66,7 @@ def test_web_config_defaults_match_m0_layout() -> None:
     assert config.codex_binary == root / "bin" / "codex"
     assert config.tokensflow_binary == root / "bin" / "tokensflow"
     assert config.tokensflow_user_home == root / "tokensflow-home"
+    assert config.tokensflow_egress_network == "bridge"
     assert config.uv_binary == root / "bin" / "uv"
     assert config.auth_json == root / "codex-home" / "auth.json"
     assert config.proxy_url == "http://127.0.0.1:7890"
@@ -92,7 +93,7 @@ def test_web_config_defaults_match_m0_layout() -> None:
     ],
 )
 def test_web_config_direct_construction_rejects_invalid_values(tmp_path: Path, field: str, value: object) -> None:
-    default = WebConfig.for_root(tmp_path)
+    default = WebConfig.for_root(tmp_path, tokensflow_egress_network="bridge")
     payload = {name: getattr(default, name) for name in WebConfig.model_fields}
 
     with pytest.raises(ValidationError):
@@ -115,6 +116,7 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
         "POWERCONTEXT_EVAL_TASK_PARALLELISM": "4",
         "POWERCONTEXT_EVAL_TOKENSFLOW_BINARY": "/opt/tools/tokensflow",
         "POWERCONTEXT_EVAL_TOKENSFLOW_USER_HOME": "/srv/identities/current",
+        "POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK": "egress-net",
         "ROOT": "/ignored",
         "PORT": "1",
         "PROXY_URL": "https://ignored.invalid",
@@ -135,6 +137,18 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
     assert config.task_parallelism == 4
     assert config.tokensflow_binary == Path("/opt/tools/tokensflow")
     assert config.tokensflow_user_home == Path("/srv/identities/current")
+    assert config.tokensflow_egress_network == "egress-net"
+
+
+def test_web_config_requires_explicit_tokensflow_egress_network(tmp_path: Path) -> None:
+    with pytest.raises(KeyError, match="TOKENSFLOW_EGRESS_NETWORK"):
+        WebConfig.from_environment({"POWERCONTEXT_EVAL_ROOT": str(tmp_path)})
+
+
+@pytest.mark.parametrize("network", ["", "-bridge", "bridge other", "bridge;rm", 'bridge"bad', "a" * 129])
+def test_web_config_rejects_unsafe_tokensflow_egress_network(tmp_path: Path, network: str) -> None:
+    with pytest.raises(ValidationError, match="egress network"):
+        WebConfig.for_root(tmp_path, tokensflow_egress_network=network)
 
 
 @pytest.mark.parametrize(
@@ -157,7 +171,11 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
     ],
 )
 def test_web_config_rejects_relative_paths(tmp_path: Path, name: str, value: str) -> None:
-    environ = {"POWERCONTEXT_EVAL_ROOT": str(tmp_path), name: value}
+    environ = {
+        "POWERCONTEXT_EVAL_ROOT": str(tmp_path),
+        "POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK": "bridge",
+        name: value,
+    }
 
     with pytest.raises(ValidationError):
         WebConfig.from_environment(environ)
@@ -185,7 +203,13 @@ def test_web_config_rejects_relative_paths(tmp_path: Path, name: str, value: str
 )
 def test_web_config_rejects_invalid_numeric_settings(tmp_path: Path, name: str, value: str) -> None:
     with pytest.raises(ValidationError):
-        WebConfig.from_environment({"POWERCONTEXT_EVAL_ROOT": str(tmp_path), name: value})
+        WebConfig.from_environment(
+            {
+                "POWERCONTEXT_EVAL_ROOT": str(tmp_path),
+                "POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK": "bridge",
+                name: value,
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -204,7 +228,13 @@ def test_web_config_rejects_invalid_numeric_settings(tmp_path: Path, name: str, 
 )
 def test_web_config_rejects_malformed_numeric_environment_values(tmp_path: Path, name: str, value: str) -> None:
     with pytest.raises(ValidationError):
-        WebConfig.from_environment({"POWERCONTEXT_EVAL_ROOT": str(tmp_path), name: value})
+        WebConfig.from_environment(
+            {
+                "POWERCONTEXT_EVAL_ROOT": str(tmp_path),
+                "POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK": "bridge",
+                name: value,
+            }
+        )
 
 
 def test_web_config_requires_usage_snapshot_to_cover_probe_interval(tmp_path: Path) -> None:
@@ -212,6 +242,7 @@ def test_web_config_requires_usage_snapshot_to_cover_probe_interval(tmp_path: Pa
         WebConfig.from_environment(
             {
                 "POWERCONTEXT_EVAL_ROOT": str(tmp_path),
+                "POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK": "bridge",
                 "POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS": "90",
                 "POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS": "60",
             }
@@ -224,6 +255,7 @@ def test_web_config_has_no_public_serialization_that_leaks_secrets(tmp_path: Pat
         tmp_path,
         auth_json=tmp_path / "auth-secret.json",
         tokensflow_user_home=tmp_path / "identity-profile",
+        tokensflow_egress_network="bridge",
         proxy_url=secret,
     )
 

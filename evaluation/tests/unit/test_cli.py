@@ -47,6 +47,8 @@ def test_codex_contract_smoke_is_an_executable_injectable_cli(monkeypatch) -> No
             "/tools/tokensflow",
             "--tokensflow-user-home",
             "/tokensflow-home",
+            "--tokensflow-egress-network",
+            "bridge",
             "--uv-bin",
             "/tools/uv",
             "--powercontext-source",
@@ -71,6 +73,7 @@ def test_codex_contract_smoke_is_an_executable_injectable_cli(monkeypatch) -> No
             "codex_bin": "/tools/codex",
             "tokensflow_bin": "/tools/tokensflow",
             "tokensflow_user_home": "/tokensflow-home",
+            "tokensflow_egress_network": "bridge",
             "uv_bin": "/tools/uv",
             "powercontext_source": "/source",
             "powercontext_sha": "a" * 40,
@@ -112,7 +115,16 @@ def test_swebench_pro_run_exposes_the_minimal_m0_command(monkeypatch) -> None:
     monkeypatch.setattr("powercontext_eval.cli.run_swebench_pro_instance", fake_run)
     result = CliRunner().invoke(
         app,
-        ["swebench-pro", "run", "--run-id", "run-fixed", "--instance-id", "instance_owner__repo-b"],
+        [
+            "swebench-pro",
+            "run",
+            "--run-id",
+            "run-fixed",
+            "--instance-id",
+            "instance_owner__repo-b",
+            "--tokensflow-egress-network",
+            "bridge",
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -124,3 +136,4 @@ def test_swebench_pro_run_exposes_the_minimal_m0_command(monkeypatch) -> None:
     config = cast(RunConfig, calls[0][0])
     assert config.tokensflow_binary == Path("/data/powercontext-eval/bin/tokensflow")
     assert config.tokensflow_user_home == Path("/data/powercontext-eval/tokensflow-home")
+    assert config.tokensflow_egress_network == "bridge"

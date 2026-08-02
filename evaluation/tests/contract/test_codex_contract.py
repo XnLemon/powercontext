@@ -308,6 +308,7 @@ class TranscriptDocker:
         self.container_tokensflow_version = (
             container_tokensflow_version if container_tokensflow_version is not None else host_tokensflow_version
         )
+        self.container_networks: dict[str, set[str]] = {}
 
     @staticmethod
     def _output(payload: bytes, kwargs: dict[str, object], *, returncode: int = 0) -> CommandResult:
@@ -343,6 +344,19 @@ class TranscriptDocker:
             )
         if argv[-3:-1] == ("network", "inspect"):
             return command_result('[{"IPAM":{"Config":[{"Gateway":"172.29.0.1"}]}}]')
+        if argv[:3] == ("docker", "run", "-d") and "--name" in argv and "--network" in argv:
+            container = argv[argv.index("--name") + 1]
+            network = argv[argv.index("--network") + 1]
+            self.container_networks[container] = {network}
+        if argv[:3] == ("docker", "network", "connect"):
+            self.container_networks.setdefault(argv[-1], set()).add(argv[-2])
+        if argv[:3] == ("docker", "network", "disconnect"):
+            self.container_networks.setdefault(argv[-1], set()).discard(argv[-2])
+        if argv[:3] == ("docker", "inspect", "--format"):
+            template = argv[3]
+            container = argv[4]
+            network = template.split('"')[1]
+            return command_result("true\n" if network in self.container_networks.get(container, set()) else "false\n")
         if "plugin" in argv and "list" in argv:
             return command_result(
                 json.dumps(
@@ -423,6 +437,7 @@ def sut_config(tmp_path: Path) -> SutConfig:
         proxy=ProxyRelayConfig("http://127.0.0.1:7890"),
         limits=ContainerLimits(cpus="2", memory="4g", pids=256),
         tokensflow_binary=tokensflow_binary,
+        tokensflow_egress_network="bridge",
     )
 
 
@@ -609,6 +624,10 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
         for index, command in enumerate(docker.commands)
         if command[-2:] == ("/tools/tokensflow-dir/tokensflow", "whoami")
     )
+    connect_index = docker.commands.index(("docker", "network", "connect", "bridge", "powercontext-eval-run-1-on"))
+    disconnect_index = docker.commands.index(
+        ("docker", "network", "disconnect", "bridge", "powercontext-eval-run-1-on")
+    )
     daemon_entries = [
         (index, command)
         for index, command in enumerate(docker.commands)
@@ -617,7 +636,11 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
     assert len(daemon_entries) == 1
     daemon_index, daemon = daemon_entries[0]
     codex_index = next(index for index, command in enumerate(docker.commands) if _is_codex_inference(command))
-    assert host_whoami_index < container_whoami_index < daemon_index < codex_index
+    assert connect_index < host_whoami_index < container_whoami_index < daemon_index < codex_index < disconnect_index
+    task_network = task[task.index("--network") + 1]
+    assert task_network == "powercontext-eval-run-1"
+    assert task_network != config.tokensflow_egress_network
+    assert docker.container_networks["powercontext-eval-run-1-on"] == {task_network}
     assert "HOME=/runtime/tokensflow-home" in daemon
     assert "CODEX_HOME=/runtime/codex-home" in daemon
     assert "evaluation-daemon.pid" in " ".join(daemon)
@@ -704,11 +727,23 @@ def test_tokensflow_dynamic_environment_reaches_every_lifecycle_command_without_
             assert environment["HOME"] == os.fspath(paths.tokensflow_home)
             assert environment["TOKENSFLOW_API_URL"] == endpoint
             assert environment["TOKENSFLOW_PROFILE"] == profile
+            assert all(
+                environment[key] == ""
+                for key in ("ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy", "https_proxy", "http_proxy")
+            )
             serialized_environment = json.dumps(environment, sort_keys=True)
         else:
             assignments = {argv[index + 1] for index, part in enumerate(argv[:-1]) if part == "-e"}
             assert f"TOKENSFLOW_API_URL={endpoint}" in assignments
             assert f"TOKENSFLOW_PROFILE={profile}" in assignments
+            assert {
+                "ALL_PROXY=",
+                "HTTPS_PROXY=",
+                "HTTP_PROXY=",
+                "all_proxy=",
+                "https_proxy=",
+                "http_proxy=",
+            } <= assignments
             serialized_environment = "\n".join(sorted(assignments))
         assert "TOKENSFLOW_ACCESS_TOKEN" not in serialized_environment
         assert blocked not in serialized_environment
@@ -847,6 +882,7 @@ def test_tokensflow_drain_failure_preserves_runtime_and_writes_safe_recovery_mar
         command[:3] == ("docker", "rm", "-f") and command[-1] == "powercontext-eval-run-1-on"
         for command in docker.commands
     )
+    assert ("docker", "network", "disconnect", "bridge", "powercontext-eval-run-1-on") in docker.commands
     retry_paths = make_paths(tmp_path / "retry")
     shutil.copy2(marker, retry_paths.runtime / marker.name)
     with pytest.raises(UnsafeSutConfiguration, match="fresh except"):
@@ -1037,6 +1073,96 @@ def test_tokensflow_identity_mismatch_is_sanitized_and_blocks_codex(
         assert all(identity.strip() not in path.read_bytes() for path in paths.result_root.rglob("*") if path.is_file())
     assert not any(_is_codex_inference(command) for command in docker.commands)
     assert not any(_is_tokensflow(command, "daemon") for command in docker.commands)
+    assert ("docker", "network", "disconnect", "bridge", "powercontext-eval-run-1-on") in docker.commands
+
+
+def test_tokensflow_egress_disconnects_after_codex_failure(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class CodexFailureDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if _is_codex_inference(argv):
+                self.commands.append(argv)
+                raise CommandFailed("injected", command_result("", returncode=70))
+            return super().run(argv, **kwargs)
+
+    docker = CodexFailureDocker()
+    with pytest.raises(CodexInfrastructureError):
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            config,
+            Arm.ON,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root),
+        )
+
+    assert ("docker", "network", "disconnect", "bridge", "powercontext-eval-run-1-on") in docker.commands
+
+
+def test_tokensflow_egress_skips_duplicate_connect_and_verifies_existing_attachment(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class PreconnectedDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            result = super().run(argv, **kwargs)
+            if argv[:3] == ("docker", "run", "-d"):
+                self.container_networks["powercontext-eval-run-1-on"].add("bridge")
+            return result
+
+    docker = PreconnectedDocker()
+    DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config,
+        Arm.ON,
+        paths,
+        b"prompt",
+        ArtifactStore(paths.result_root),
+    )
+
+    assert ("docker", "network", "connect", "bridge", "powercontext-eval-run-1-on") not in docker.commands
+    assert ("docker", "network", "disconnect", "bridge", "powercontext-eval-run-1-on") in docker.commands
+
+
+def test_tokensflow_egress_requires_verified_attachment_before_whoami(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class UnattachedDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            result = super().run(argv, **kwargs)
+            if argv[:3] == ("docker", "inspect", "--format"):
+                return command_result("false\n")
+            return result
+
+    docker = UnattachedDocker()
+    with pytest.raises(TokensFlowInfrastructureError, match="egress network attachment"):
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            config,
+            Arm.ON,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root),
+        )
+
+    assert ("docker", "network", "connect", "bridge", "powercontext-eval-run-1-on") in docker.commands
+    assert ("docker", "network", "disconnect", "bridge", "powercontext-eval-run-1-on") in docker.commands
+    assert not any(command[-2:] == ("/tools/tokensflow-dir/tokensflow", "whoami") for command in docker.commands)
+
+
+@pytest.mark.parametrize(
+    "network",
+    ["", "-bridge", "bridge other", "bridge;rm", 'bridge"bad', "bridge\nother", "a" * 129],
+)
+def test_tokensflow_egress_network_rejects_unsafe_command_arguments(tmp_path: Path, network: str) -> None:
+    with pytest.raises(TokensFlowInfrastructureError, match="egress network"):
+        replace(sut_config(tmp_path), tokensflow_egress_network=network)
 
 
 def test_tokensflow_homes_and_daemon_pid_files_are_distinct_across_arms_and_runs(tmp_path: Path) -> None:
@@ -1069,6 +1195,8 @@ def test_tokensflow_homes_and_daemon_pid_files_are_distinct_across_arms_and_runs
             )
             == 2
         )
+        assert sum(command[:3] == ("docker", "network", "connect") for command in docker.commands) == 2
+        assert sum(command[:3] == ("docker", "network", "disconnect") for command in docker.commands) == 2
         for arm, paths in ((Arm.OFF, off_paths), (Arm.ON, on_paths)):
             homes.append(paths.tokensflow_home)
             pid_files.append(outcomes[arm].tokensflow_daemon.pid_file)
@@ -1347,6 +1475,7 @@ def test_contract_smoke_propagates_dynamic_tokensflow_snapshot_and_secret_bounda
         codex_bin=os.fspath(tmp_path / "tools/codex"),
         tokensflow_bin=os.fspath(tokensflow_binary),
         tokensflow_user_home=os.fspath(tokensflow_user_home),
+        tokensflow_egress_network="bridge",
         uv_bin=os.fspath(tmp_path / "tools/uv"),
         powercontext_source=os.fspath(source),
         powercontext_sha="a" * 40,
@@ -1407,6 +1536,7 @@ def test_contract_smoke_translates_unsafe_tokensflow_profile_to_sanitized_error(
             codex_bin=os.fspath(tmp_path / "tools/codex"),
             tokensflow_bin=os.fspath(tmp_path / "tools/tokensflow"),
             tokensflow_user_home=os.fspath(tokensflow_user_home),
+            tokensflow_egress_network="bridge",
             uv_bin=os.fspath(tmp_path / "tools/uv"),
             powercontext_source=os.fspath(source),
             powercontext_sha="a" * 40,
@@ -1574,6 +1704,7 @@ def test_sut_rejects_unsafe_run_names(tmp_path: Path, run_id: str) -> None:
             task_image="image:tag",
             codex_binary=tmp_path / "codex",
             tokensflow_binary=tmp_path / "tokensflow",
+            tokensflow_egress_network="bridge",
             uv_binary=tmp_path / "uv",
             source_checkout=tmp_path / "source",
             plugin_checkout_sha="a" * 40,
