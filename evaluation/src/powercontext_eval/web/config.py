@@ -9,6 +9,8 @@ from typing import Annotated, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from powercontext_eval.codex import DEFAULT_CODEX_MODEL, is_safe_codex_model
+
 _SAFE_DOCKER_NETWORK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 MAX_TASK_PARALLELISM = 10
 
@@ -63,6 +65,7 @@ class WebConfig(BaseModel):
     usage_probe_timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 15
     usage_snapshot_max_age_seconds: Annotated[int, Field(ge=10, le=7200)] = 120
     task_parallelism: Annotated[int, Field(ge=1, le=MAX_TASK_PARALLELISM)] = 1
+    codex_models: tuple[str, ...] = (DEFAULT_CODEX_MODEL,)
 
     @field_validator(
         "root",
@@ -92,6 +95,16 @@ class WebConfig(BaseModel):
         if _SAFE_DOCKER_NETWORK.fullmatch(value) is None:
             raise ValueError("TokensFlow egress network is unsafe")
         return value
+
+    @field_validator("codex_models")
+    @classmethod
+    def require_safe_codex_models_with_default(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        deduplicated = tuple(dict.fromkeys(value))
+        if not deduplicated or any(not is_safe_codex_model(model) for model in deduplicated):
+            raise ValueError("Codex model allowlist is unsafe")
+        if DEFAULT_CODEX_MODEL not in deduplicated:
+            raise ValueError("Codex model allowlist must include the default model")
+        return deduplicated
 
     @model_validator(mode="after")
     def require_usage_snapshot_to_cover_probe_interval(self) -> Self:
@@ -129,6 +142,7 @@ class WebConfig(BaseModel):
         usage_probe_timeout_seconds: int = 15,
         usage_snapshot_max_age_seconds: int = 120,
         task_parallelism: int = 1,
+        codex_models: tuple[str, ...] = (DEFAULT_CODEX_MODEL,),
     ) -> Self:
         return cls(
             root=root,
@@ -158,6 +172,7 @@ class WebConfig(BaseModel):
             usage_probe_timeout_seconds=usage_probe_timeout_seconds,
             usage_snapshot_max_age_seconds=usage_snapshot_max_age_seconds,
             task_parallelism=task_parallelism,
+            codex_models=codex_models,
         )
 
     @classmethod
@@ -208,6 +223,7 @@ class WebConfig(BaseModel):
             usage_probe_timeout_seconds=numbers.usage_probe_timeout_seconds,
             usage_snapshot_max_age_seconds=numbers.usage_snapshot_max_age_seconds,
             task_parallelism=numbers.task_parallelism,
+            codex_models=tuple(environ.get(f"{prefix}CODEX_MODELS", DEFAULT_CODEX_MODEL).split(",")),
         )
 
     @property
@@ -215,3 +231,8 @@ class WebConfig(BaseModel):
         """Compatibility alias while the runner migrates to catalog instances."""
 
         return self.dataset_path
+
+    def accepts_codex_model(self, model: str) -> bool:
+        """Apply the current admission policy to newly submitted work only."""
+
+        return is_safe_codex_model(model) and model in self.codex_models

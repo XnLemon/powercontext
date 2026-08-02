@@ -149,6 +149,9 @@ def test_cli_creates_a_luna_batch_atomically_paused(monkeypatch) -> None:
     calls: list[tuple[Request, float]] = []
 
     class Response:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
         def __enter__(self) -> Self:
             return self
 
@@ -156,11 +159,13 @@ def test_cli_creates_a_luna_batch_atomically_paused(monkeypatch) -> None:
             return None
 
         def read(self) -> bytes:
-            return b'{"batch_id":"batch-luna"}'
+            return self.payload
 
     def fake_urlopen(request: Request, *, timeout: float) -> Response:
         calls.append((request, timeout))
-        return Response()
+        if request.full_url.endswith("/api/capabilities"):
+            return Response(b'{"models":["gpt-5.6-sol","gpt-5.6-luna"]}')
+        return Response(b'{"batch_id":"batch-luna"}')
 
     monkeypatch.setattr("powercontext_eval.cli.urlopen", fake_urlopen, raising=False)
     result = CliRunner().invoke(
@@ -178,11 +183,48 @@ def test_cli_creates_a_luna_batch_atomically_paused(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert '"batch_id": "batch-luna"' in result.output
-    assert len(calls) == 1
-    request, timeout = calls[0]
+    assert len(calls) == 2
+    assert calls[0][0].full_url == "http://127.0.0.1:8787/api/capabilities"
+    request, timeout = calls[1]
     assert timeout == 30
     assert request.full_url == "http://127.0.0.1:8787/api/batches"
     assert isinstance(request.data, bytes)
     payload = json.loads(request.data)
     assert payload["model"] == "gpt-5.6-luna"
     assert payload["initial_control_intent"] == "pause"
+
+
+def test_cli_rejects_a_model_not_published_by_capabilities(monkeypatch) -> None:
+    calls: list[Request] = []
+
+    class Response:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"models":["gpt-5.6-sol"]}'
+
+    def fake_urlopen(request: Request, *, timeout: float) -> Response:
+        assert timeout == 30
+        calls.append(request)
+        return Response()
+
+    monkeypatch.setattr("powercontext_eval.cli.urlopen", fake_urlopen, raising=False)
+    result = CliRunner().invoke(
+        app,
+        [
+            "swebench-pro",
+            "create-batch",
+            "--idempotency-key",
+            "unconfigured-model",
+            "--model",
+            "gpt-5.6-luna",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "not enabled" in result.output
+    assert [request.full_url for request in calls] == ["http://127.0.0.1:8787/api/capabilities"]

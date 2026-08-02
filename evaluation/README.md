@@ -83,6 +83,10 @@ The deployment defaults are:
 | `POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS` | `15` | Maximum duration of one bounded usage probe |
 | `POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS` | `120` | Oldest observation accepted by preview, start, resume, and retry |
 | `POWERCONTEXT_EVAL_TASK_PARALLELISM` | `1` | Concurrent independent OFF/ON task pairs; allowed range is 1 through 4 |
+| `POWERCONTEXT_EVAL_CODEX_MODELS` | `gpt-5.6-sol` | Comma-separated models admitted for newly created batches and tasks; the default Sol model must remain present |
+
+Changing the model allowlist affects only new submissions. Existing batches keep their immutable model and remain
+readable, runnable, and retryable even when that model is no longer admitted for new work.
 
 Pause and cancel use a complete SWE-bench task as the boundary: the active OFF/ON pair finishes, then pause starts no
 new child, while cancel marks every remaining unstarted child cancelled. They do not kill an arm midway. Resume is

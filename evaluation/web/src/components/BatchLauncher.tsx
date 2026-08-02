@@ -34,6 +34,7 @@ function dateTime(value: string): string {
 export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
   const [revision, setRevision] = useState("latest");
   const [model, setModel] = useState("gpt-5.6-sol");
+  const [models, setModels] = useState<string[]>(["gpt-5.6-sol"]);
   const [startPaused, setStartPaused] = useState(false);
   const [threshold, setThreshold] = useState(80);
   const [preview, setPreview] = useState<BatchPreview | null>(null);
@@ -57,6 +58,16 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
     [],
   );
 
+  useEffect(() => {
+    const capabilitiesController = new AbortController();
+    api.getCapabilities(capabilitiesController.signal).then((capabilities) => {
+      if (capabilitiesController.signal.aborted) return;
+      setModels(capabilities.models);
+      setModel((current) => capabilities.models.includes(current) ? current : (capabilities.models[0] ?? ""));
+    }).catch(() => undefined);
+    return () => capabilitiesController.abort();
+  }, [api]);
+
   const invalidatePreview = () => {
     controller.current?.abort();
     generation.current += 1;
@@ -73,8 +84,8 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
       setMessage("请输入 latest 或 commit: 开头的 40 位提交哈希。");
       return;
     }
-    if (!modelPattern.test(model)) {
-      setMessage("Codex 模型只能包含字母、数字、点、下划线和连字符。");
+    if (!modelPattern.test(model) || !models.includes(model)) {
+      setMessage("请选择当前评测服务已启用的 Codex 模型。");
       return;
     }
     if (!Number.isInteger(threshold) || threshold < 1 || threshold > 100) {
@@ -183,15 +194,18 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
         </label>
         <label>
           Codex 模型
-          <input
+          <select
             aria-label="Codex 模型"
             value={model}
             onChange={(event) => {
               invalidatePreview();
               setModel(event.target.value);
             }}
-            spellCheck={false}
-          />
+          >
+            {models.map((availableModel) => (
+              <option key={availableModel} value={availableModel}>{availableModel}</option>
+            ))}
+          </select>
           <span className="field-hint">批次创建后固定，重试也保持不变</span>
         </label>
         <label>

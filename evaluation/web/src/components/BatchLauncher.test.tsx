@@ -70,10 +70,24 @@ describe("BatchLauncher", () => {
     const createBatch = vi.fn().mockResolvedValue(
       batchRecord({ request: { ...batchRecord().request, model: "gpt-5.6-luna" } }),
     );
-    render(<BatchLauncher api={apiStub({ previewBatch, createBatch })} onCreated={() => undefined} />);
+    render(
+      <BatchLauncher
+        api={apiStub({
+          previewBatch,
+          createBatch,
+          getCapabilities: vi.fn().mockResolvedValue({
+            benchmarks: ["swebench-pro"],
+            instances: ["instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"],
+            models: ["gpt-5.6-sol", "gpt-5.6-luna"],
+            reasoning_efforts: ["medium"],
+            treatment_modes: ["off_on"],
+          }),
+        })}
+        onCreated={() => undefined}
+      />,
+    );
 
-    await user.clear(screen.getByLabelText("Codex 模型"));
-    await user.type(screen.getByLabelText("Codex 模型"), "gpt-5.6-luna");
+    await user.selectOptions(await screen.findByLabelText("Codex 模型"), "gpt-5.6-luna");
     await user.click(screen.getByRole("button", { name: "预览评测" }));
 
     expect(previewBatch).toHaveBeenCalledWith(
@@ -85,6 +99,14 @@ describe("BatchLauncher", () => {
       expect.objectContaining({ model: "gpt-5.6-luna", reasoning_effort: "medium" }),
       expect.any(AbortSignal),
     ));
+  });
+
+  it("only offers models published by runtime capabilities", async () => {
+    render(<BatchLauncher api={apiStub()} onCreated={() => undefined} />);
+
+    const model = await screen.findByRole("combobox", { name: "Codex 模型" });
+    expect(model).toHaveValue("gpt-5.6-sol");
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["gpt-5.6-sol"]);
   });
 
   it("creates a batch already paused when the operator selects the atomic pause option", async () => {

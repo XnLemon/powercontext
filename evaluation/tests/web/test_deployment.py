@@ -13,6 +13,7 @@ DEPLOY = EVALUATION / "deploy"
 EXPECTED_ENVIRONMENT_KEYS = {
     "POWERCONTEXT_EVAL_AUTH_JSON",
     "POWERCONTEXT_EVAL_CODEX_BINARY",
+    "POWERCONTEXT_EVAL_CODEX_MODELS",
     "POWERCONTEXT_EVAL_DATABASE_PATH",
     "POWERCONTEXT_EVAL_DATASET_PATH",
     "POWERCONTEXT_EVAL_FRONTEND_DIST",
@@ -120,6 +121,7 @@ def test_example_environment_uses_only_supported_named_configuration() -> None:
     assert config.usage_probe_timeout_seconds == 15
     assert config.usage_snapshot_max_age_seconds == 120
     assert config.task_parallelism == 1
+    assert config.codex_models == ("gpt-5.6-sol",)
     assert config.tokensflow_binary == Path("/usr/local/bin/tokensflow")
     assert config.tokensflow_user_home == Path("/home/evaluation-operator")
     assert config.tokensflow_binary.is_absolute()

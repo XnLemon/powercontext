@@ -77,6 +77,37 @@ def test_web_config_defaults_match_m0_layout() -> None:
     assert config.usage_probe_timeout_seconds == 15
     assert config.usage_snapshot_max_age_seconds == 120
     assert config.task_parallelism == 1
+    assert config.codex_models == ("gpt-5.6-sol",)
+
+
+def test_web_config_parses_deduplicates_and_preserves_configured_codex_models(tmp_path: Path) -> None:
+    config = WebConfig.from_environment(
+        {
+            "POWERCONTEXT_EVAL_ROOT": str(tmp_path),
+            "POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK": "bridge",
+            "POWERCONTEXT_EVAL_CODEX_MODELS": "gpt-5.6-sol,gpt-5.6-luna,gpt-5.6-sol",
+        }
+    )
+
+    assert config.codex_models == ("gpt-5.6-sol", "gpt-5.6-luna")
+
+
+@pytest.mark.parametrize(
+    "models",
+    ["gpt-5.6-luna", "gpt-5.6-sol,unsafe model", "gpt-5.6-sol,,gpt-5.6-luna", ""],
+)
+def test_web_config_rejects_codex_allowlists_without_default_or_with_unsafe_entries(
+    tmp_path: Path,
+    models: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        WebConfig.from_environment(
+            {
+                "POWERCONTEXT_EVAL_ROOT": str(tmp_path),
+                "POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK": "bridge",
+                "POWERCONTEXT_EVAL_CODEX_MODELS": models,
+            }
+        )
 
 
 @pytest.mark.parametrize(

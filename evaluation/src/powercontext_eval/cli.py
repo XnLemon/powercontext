@@ -229,6 +229,17 @@ def swebench_pro_create_batch(
         )
     except ValidationError:
         raise typer.BadParameter("Invalid batch configuration.") from None
+    capabilities_request = Request(_capabilities_api_endpoint(console_url), method="GET")
+    try:
+        with urlopen(capabilities_request, timeout=30) as response:
+            capabilities = json.loads(response.read())
+    except (HTTPError, URLError, OSError, ValueError, UnicodeDecodeError):
+        raise typer.Exit(code=1) from None
+    models = capabilities.get("models") if isinstance(capabilities, dict) else None
+    if not isinstance(models, list) or not all(isinstance(value, str) for value in models):
+        raise typer.Exit(code=1)
+    if batch.model not in models:
+        raise typer.BadParameter("Codex model is not enabled by the evaluation service.", param_hint="--model")
     request = Request(
         endpoint,
         data=batch.model_dump_json().encode("utf-8"),
@@ -258,6 +269,11 @@ def _batch_api_endpoint(console_url: str) -> str:
     ):
         raise typer.BadParameter("Invalid console URL.", param_hint="--console-url")
     return console_url.rstrip("/") + "/api/batches"
+
+
+def _capabilities_api_endpoint(console_url: str) -> str:
+    _batch_api_endpoint(console_url)
+    return console_url.rstrip("/") + "/api/capabilities"
 
 
 def main() -> None:

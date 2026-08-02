@@ -105,6 +105,89 @@ def test_health_and_capabilities_are_server_owned_and_secret_free(client: TestCl
     assert_safe(capabilities)
 
 
+def test_capabilities_and_new_task_inputs_share_the_configured_model_allowlist(
+    tmp_path: Path,
+) -> None:
+    configured = WebConfig.for_root(
+        tmp_path,
+        tokensflow_egress_network="bridge",
+        codex_models=("gpt-5.6-sol", "gpt-5.6-luna"),
+    )
+    task_store = TaskStore(configured.database_path, lease_duration=timedelta(seconds=configured.lease_seconds))
+    task_store.initialize()
+    task_store.save_usage_snapshot(_usage(9))
+    app = TestClient(create_app(configured, task_store, catalog=_BatchCatalog()))
+
+    capabilities = app.get("/api/capabilities")
+    preview = app.post(
+        "/api/batches/preview",
+        json={"powercontext_ref": "latest", "model": "gpt-5.6-luna", "usage_pause_percent": 80},
+    )
+    batch = app.post("/api/batches", json=_batch_payload("configured-luna", model="gpt-5.6-luna"))
+    task = app.post("/api/tasks", json=payload("configured-luna-task") | {"model": "gpt-5.6-luna"})
+
+    assert capabilities.json()["models"] == ["gpt-5.6-sol", "gpt-5.6-luna"]
+    assert preview.status_code == 200
+    assert batch.status_code == 201
+    assert task.status_code == 201
+
+
+def test_unconfigured_and_malicious_models_are_rejected_for_all_new_api_inputs(client: TestClient) -> None:
+    for model in ("gpt-5.6-luna", "unsafe model"):
+        assert (
+            client.post(
+                "/api/batches/preview",
+                json={"powercontext_ref": "latest", "model": model, "usage_pause_percent": 80},
+            ).status_code
+            == 422
+        )
+        assert client.post("/api/batches", json=_batch_payload(f"rejected-{model}", model=model)).status_code == 422
+        assert client.post("/api/tasks", json=payload(f"rejected-{model}") | {"model": model}).status_code == 422
+
+
+def test_removed_model_remains_readable_runnable_and_retryable_for_existing_batch(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    configured = config.model_copy(update={"codex_models": ("gpt-5.6-sol", "gpt-5.6-luna")})
+    enabled_client = TestClient(create_app(configured, store, catalog=_BatchCatalog()))
+    created = enabled_client.post(
+        "/api/batches",
+        json=_batch_payload("legacy-luna-batch", model="gpt-5.6-luna"),
+    ).json()
+    task = store.list_batch_tasks(created["batch_id"])[0]
+    started = datetime.now(UTC) + timedelta(seconds=1)
+    claimed = store.claim_next("legacy-model-worker", now=started)
+    assert claimed is not None and claimed.request.model == "gpt-5.6-luna"
+    store.fail(
+        task.task_id,
+        "legacy-model-worker",
+        SafeFailure(
+            category=FailureCategory.CODEX_EXECUTION,
+            phase=TaskPhase.RUNNING_OFF,
+            summary="Codex execution did not complete",
+        ),
+        now=started + timedelta(seconds=1),
+    )
+
+    current_client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
+    listed = current_client.get(f"/api/batches/{created['batch_id']}")
+    retried = current_client.post(
+        f"/api/batches/{created['batch_id']}/tasks/{task.task_id}/retry",
+        json={"idempotency_key": "legacy-luna-retry"},
+    )
+    rejected_new = current_client.post(
+        "/api/batches",
+        json=_batch_payload("new-luna-rejected", model="gpt-5.6-luna"),
+    )
+
+    assert listed.status_code == 200
+    assert listed.json()["request"]["model"] == "gpt-5.6-luna"
+    assert retried.status_code == 201
+    assert store.get(task.task_id).request.model == "gpt-5.6-luna"
+    assert rejected_new.status_code == 422
+
+
 def test_health_reads_four_active_pairs_and_published_capacity_from_store(
     config: WebConfig,
     store: TaskStore,
@@ -1054,7 +1137,8 @@ def test_luna_preview_batch_tasks_detail_and_report_keep_the_requested_model(
     store: TaskStore,
 ) -> None:
     catalog = _BatchCatalog()
-    client = TestClient(create_app(config, store, catalog=catalog))
+    configured = config.model_copy(update={"codex_models": ("gpt-5.6-sol", "gpt-5.6-luna")})
+    client = TestClient(create_app(configured, store, catalog=catalog))
 
     preview = client.post(
         "/api/batches/preview",
@@ -1086,7 +1170,8 @@ def test_api_can_create_batch_atomically_paused_without_a_claimable_window(
     store: TaskStore,
     model: str,
 ) -> None:
-    client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
+    configured = config.model_copy(update={"codex_models": ("gpt-5.6-sol", model)} if model != "gpt-5.6-sol" else {})
+    client = TestClient(create_app(configured, store, catalog=_BatchCatalog()))
 
     response = client.post(
         "/api/batches",

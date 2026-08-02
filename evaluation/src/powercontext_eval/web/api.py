@@ -413,10 +413,12 @@ def create_app(
 
     @app.get("/api/capabilities")
     def capabilities() -> Capabilities:
-        return Capabilities()
+        return Capabilities(models=config.codex_models)
 
     @app.post("/api/batches/preview")
     def preview_batch(request: BatchPreviewRequest) -> Response:
+        if not config.accepts_codex_model(request.model):
+            return _error(422, "invalid_request", "The evaluation request is invalid.")
         snapshot = current_usage()
         if snapshot is None:
             return _error(503, "usage_unavailable", "Current Codex subscription usage is unavailable.")
@@ -443,6 +445,8 @@ def create_app(
 
     @app.post("/api/batches")
     def create_batch(request: BatchCreate) -> Response:
+        if not config.accepts_codex_model(request.model):
+            return _error(422, "invalid_request", "The evaluation request is invalid.")
         snapshot = current_usage()
         if snapshot is None:
             return _error(503, "usage_unavailable", "Current Codex subscription usage is unavailable.")
@@ -828,6 +832,8 @@ def create_app(
 
     @app.post("/api/tasks")
     def create_task(task: TaskCreate) -> Response:
+        if not config.accepts_codex_model(task.model):
+            return _error(422, "invalid_request", "The evaluation request is invalid.")
         record, created = task_store.create(task, now=datetime.now(UTC))
         return JSONResponse(
             status_code=201 if created else 200,
