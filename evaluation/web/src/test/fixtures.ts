@@ -231,6 +231,8 @@ export function batchTask(overrides: Partial<BatchTaskItem> = {}): BatchTaskItem
     attempt_number: 1,
     attempt_count: 1,
     retryable: false,
+    model: "gpt-5.6-sol",
+    reasoning_effort: "medium",
     instance_id: "instance_owner__repo-001",
     repository: "owner/repo",
     source_index: 0,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -235,8 +236,11 @@ def _run_with_fakes(
     observed: dict[str, object] | None = None,
     instance: SweBenchProInstance | None = None,
     config_mutator: Callable[[RunConfig], None] | None = None,
+    model: str | None = None,
 ) -> tuple[RunConfig, MinimalRunResult, dict[str, object]]:
     config = _config(tmp_path)
+    if model is not None:
+        config = replace(config, model=model)
     if config_mutator is not None:
         config_mutator(config)
     instance = _instance() if instance is None else instance
@@ -359,6 +363,26 @@ def _run_with_fakes(
     callback = on_phase if on_phase is not None else lambda phase: events.append(phase)
     result = run_swebench_pro_instance(config, instance=instance, on_phase=callback)
     return config, result, observed
+
+
+def test_runner_propagates_batch_model_to_codex_pair_and_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, result, observed = _run_with_fakes(
+        tmp_path,
+        monkeypatch,
+        [],
+        model="gpt-5.6-luna",
+    )
+
+    sut_config = cast(SutConfig, observed["sut_config"])
+    report = ReportBundle.model_validate_json(
+        (config.root / "runs" / result.run_id / "report.json").read_text(),
+        strict=True,
+    )
+    assert (sut_config.model, sut_config.reasoning_effort) == ("gpt-5.6-luna", "medium")
+    assert report.configuration["model"] == "gpt-5.6-luna"
+    assert report.configuration["reasoning_effort"] == "medium"
 
 
 def test_runner_snapshots_tokensflow_per_arm_and_blocks_both_credential_sets(

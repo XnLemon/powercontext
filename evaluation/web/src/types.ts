@@ -25,7 +25,7 @@ export interface TaskCreate {
   powercontext_ref: string;
   benchmark: "swebench-pro";
   instance_id: "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9";
-  model: "gpt-5.6-sol";
+  model: string;
   reasoning_effort: "medium";
   treatment_mode: "off_on";
   idempotency_key: string;
@@ -143,7 +143,7 @@ export interface TaskEvent {
 export interface Capabilities {
   benchmarks: "swebench-pro"[];
   instances: "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"[];
-  models: "gpt-5.6-sol"[];
+  models: string[];
   reasoning_efforts: "medium"[];
   treatment_modes: "off_on"[];
 }
@@ -304,7 +304,7 @@ export interface BatchCreate {
   powercontext_ref: string;
   benchmark: "swebench-pro";
   task_set: "swebench-pro-public-v2";
-  model: "gpt-5.6-sol";
+  model: string;
   reasoning_effort: "medium";
   treatment_mode: "off_on";
   idempotency_key: string;
@@ -327,7 +327,7 @@ export interface BatchPreview {
   powercontext_ref: string;
   benchmark: "swebench-pro";
   task_set: "swebench-pro-public-v2";
-  model: "gpt-5.6-sol";
+  model: string;
   reasoning_effort: "medium";
   treatment_mode: "off_on";
   total_tasks: number;
@@ -398,6 +398,8 @@ export interface BatchTaskItem {
   attempt_number: number;
   attempt_count: number;
   retryable: boolean;
+  model: string;
+  reasoning_effort: "medium";
   instance_id: string;
   repository: string;
   source_index: number;

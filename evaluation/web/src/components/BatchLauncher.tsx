@@ -10,6 +10,7 @@ interface BatchLauncherProps {
 }
 
 const revisionPattern = /^(latest|commit:[0-9a-fA-F]{40})$/;
+const modelPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 function idempotencyKey(): string {
   if (typeof crypto.randomUUID === "function") return `web-${crypto.randomUUID()}`;
@@ -32,13 +33,14 @@ function dateTime(value: string): string {
 
 export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
   const [revision, setRevision] = useState("latest");
+  const [model, setModel] = useState("gpt-5.6-sol");
   const [threshold, setThreshold] = useState(80);
   const [preview, setPreview] = useState<BatchPreview | null>(null);
   const [pending, setPending] = useState<"preview" | "submitting" | null>(null);
   const [message, setMessage] = useState("");
   const controller = useRef<AbortController | null>(null);
   const generation = useRef(0);
-  const confirmationKey = useRef<{ revision: string; threshold: number; key: string } | null>(null);
+  const confirmationKey = useRef<{ revision: string; model: string; threshold: number; key: string } | null>(null);
 
   useEffect(
     () => () => {
@@ -64,6 +66,10 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
       setMessage("请输入 latest 或 commit: 开头的 40 位提交哈希。");
       return;
     }
+    if (!modelPattern.test(model)) {
+      setMessage("Codex 模型只能包含字母、数字、点、下划线和连字符。");
+      return;
+    }
     if (!Number.isInteger(threshold) || threshold < 1 || threshold > 100) {
       setMessage("暂停阈值必须是 1 到 100 之间的整数。");
       return;
@@ -75,7 +81,7 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
     setPending("preview");
     try {
       const result = await api.previewBatch(
-        { powercontext_ref: revision, usage_pause_percent: threshold },
+        { powercontext_ref: revision, model, usage_pause_percent: threshold },
         nextController.signal,
       );
       if (nextController.signal.aborted || generation.current !== currentGeneration) return;
@@ -92,9 +98,10 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
 
   const confirm = async () => {
     if (preview === null || !preview.can_start || pending !== null) return;
-    const intent = { revision: preview.powercontext_ref, threshold: preview.usage_pause_percent };
+    const intent = { revision: preview.powercontext_ref, model: preview.model, threshold: preview.usage_pause_percent };
     if (
       confirmationKey.current?.revision !== intent.revision
+      || confirmationKey.current.model !== intent.model
       || confirmationKey.current.threshold !== intent.threshold
     ) {
       confirmationKey.current = { ...intent, key: idempotencyKey() };
@@ -142,7 +149,7 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
       <div className="batch-contract" aria-label="固定评测范围">
         <strong>SWE-bench Pro public v2</strong>
         <span>731 个任务，每个任务依次运行 OFF / ON</span>
-        <span>gpt-5.6-sol · medium</span>
+        <span>{model} · medium</span>
         <span>Worker 按配置并行运行独立任务对</span>
       </div>
 
@@ -159,6 +166,19 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
             spellCheck={false}
           />
           <span className="field-hint">latest 或 commit: 加 40 位提交哈希</span>
+        </label>
+        <label>
+          Codex 模型
+          <input
+            aria-label="Codex 模型"
+            value={model}
+            onChange={(event) => {
+              invalidatePreview();
+              setModel(event.target.value);
+            }}
+            spellCheck={false}
+          />
+          <span className="field-hint">批次创建后固定，重试也保持不变</span>
         </label>
         <label>
           暂停阈值
@@ -195,6 +215,7 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
           <dl className="preview-facts">
             <div><dt>任务集</dt><dd>SWE-bench Pro public v2</dd></div>
             <div><dt>运行方式</dt><dd>每个任务 OFF / ON 配对执行</dd></div>
+            <div><dt>Codex 模型</dt><dd>{preview.model} · {preview.reasoning_effort}</dd></div>
             <div><dt>暂停阈值</dt><dd>{preview.usage_pause_percent}%</dd></div>
             <div><dt>计量窗口</dt><dd>{formatUsageWindow(preview.usage.window_duration_minutes)}</dd></div>
             <div><dt>额度重置</dt><dd>{dateTime(preview.usage.resets_at)}</dd></div>

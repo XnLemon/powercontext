@@ -96,12 +96,13 @@ const failureCategorySchema = z.enum([
   "worker_interruption",
   "internal",
 ]);
+const codexModelSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
 
 const taskCreateSchema = z.strictObject({
   powercontext_ref: z.union([z.literal("latest"), z.string().regex(/^commit:[0-9a-fA-F]{40}$/)]),
   benchmark: z.literal("swebench-pro"),
   instance_id: z.literal(INSTANCE_ID),
-  model: z.literal("gpt-5.6-sol"),
+  model: codexModelSchema,
   reasoning_effort: z.literal("medium"),
   treatment_mode: z.literal("off_on"),
   idempotency_key: z.string().min(8).max(128).regex(/^[A-Za-z0-9._-]+$/),
@@ -223,7 +224,7 @@ const taskEventSchema = z.strictObject({
 const capabilitiesSchema = z.strictObject({
   benchmarks: z.array(z.literal("swebench-pro")),
   instances: z.array(z.literal(INSTANCE_ID)),
-  models: z.array(z.literal("gpt-5.6-sol")),
+  models: z.array(codexModelSchema),
   reasoning_efforts: z.array(z.literal("medium")),
   treatment_modes: z.array(z.literal("off_on")),
 });
@@ -234,7 +235,7 @@ const healthSchema = z.strictObject({
   queued_tasks: nonnegativeIntegerSchema,
   running_tasks: nonnegativeIntegerSchema,
   active_task_pairs: nonnegativeIntegerSchema,
-  task_parallelism: z.number().int().min(1).max(4),
+  task_parallelism: z.number().int().min(1).max(10),
 });
 
 function armSchema<Arm extends "off" | "on">(arm: Arm) {
@@ -308,7 +309,7 @@ const batchCreateSchema = z.strictObject({
   powercontext_ref: z.union([z.literal("latest"), z.string().regex(/^commit:[0-9a-fA-F]{40}$/)]),
   benchmark: z.literal("swebench-pro"),
   task_set: z.literal("swebench-pro-public-v2"),
-  model: z.literal("gpt-5.6-sol"),
+  model: codexModelSchema,
   reasoning_effort: z.literal("medium"),
   treatment_mode: z.literal("off_on"),
   idempotency_key: z.string().min(8).max(128).regex(/^[A-Za-z0-9._-]+$/),
@@ -360,7 +361,7 @@ const batchPreviewSchema = z.strictObject({
   powercontext_ref: z.union([z.literal("latest"), z.string().regex(/^commit:[0-9a-fA-F]{40}$/)]),
   benchmark: z.literal("swebench-pro"),
   task_set: z.literal("swebench-pro-public-v2"),
-  model: z.literal("gpt-5.6-sol"),
+  model: codexModelSchema,
   reasoning_effort: z.literal("medium"),
   treatment_mode: z.literal("off_on"),
   total_tasks: z.number().int().positive(),
@@ -430,6 +431,8 @@ const batchTaskItemSchema = z.strictObject({
   attempt_number: z.number().int().positive(),
   attempt_count: z.number().int().positive(),
   retryable: z.boolean(),
+  model: codexModelSchema,
+  reasoning_effort: z.literal("medium"),
   instance_id: z.string(),
   repository: z.string(),
   source_index: nonnegativeIntegerSchema,
@@ -655,7 +658,7 @@ export class EvaluationApi {
   }
 
   previewBatch(
-    request: { powercontext_ref: string; usage_pause_percent: number },
+    request: { powercontext_ref: string; model: string; usage_pause_percent: number },
     signal?: AbortSignal,
   ): Promise<BatchPreview> {
     return this.#json(apiPath("/batches/preview"), validateBatchPreview, {

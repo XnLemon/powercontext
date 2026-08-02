@@ -35,7 +35,7 @@ describe("BatchLauncher", () => {
     await user.click(screen.getByRole("button", { name: "预览评测" }));
 
     expect(previewBatch).toHaveBeenCalledWith(
-      { powercontext_ref: "latest", usage_pause_percent: 80 },
+      { powercontext_ref: "latest", model: "gpt-5.6-sol", usage_pause_percent: 80 },
       expect.any(AbortSignal),
     );
     expect(createBatch).not.toHaveBeenCalled();
@@ -62,6 +62,29 @@ describe("BatchLauncher", () => {
     );
     expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ batch_id: "batch-created" }));
     expect(document.body.textContent).not.toMatch(/¥|￥|美元|人民币|费用|金额/);
+  });
+
+  it("previews and confirms the operator-selected safe model", async () => {
+    const user = userEvent.setup();
+    const previewBatch = vi.fn().mockResolvedValue(preview({ model: "gpt-5.6-luna" }));
+    const createBatch = vi.fn().mockResolvedValue(
+      batchRecord({ request: { ...batchRecord().request, model: "gpt-5.6-luna" } }),
+    );
+    render(<BatchLauncher api={apiStub({ previewBatch, createBatch })} onCreated={() => undefined} />);
+
+    await user.clear(screen.getByLabelText("Codex 模型"));
+    await user.type(screen.getByLabelText("Codex 模型"), "gpt-5.6-luna");
+    await user.click(screen.getByRole("button", { name: "预览评测" }));
+
+    expect(previewBatch).toHaveBeenCalledWith(
+      { powercontext_ref: "latest", model: "gpt-5.6-luna", usage_pause_percent: 80 },
+      expect.any(AbortSignal),
+    );
+    await user.click(await screen.findByRole("button", { name: "确认并开始评测" }));
+    await waitFor(() => expect(createBatch).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "gpt-5.6-luna", reasoning_effort: "medium" }),
+      expect.any(AbortSignal),
+    ));
   });
 
   it("invalidates stale previews and clearly represents unavailable estimates or blocked usage", async () => {

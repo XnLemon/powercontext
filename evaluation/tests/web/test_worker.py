@@ -119,13 +119,14 @@ def _create_batch(
     *,
     key: str = "batch-worker-test",
     instance_ids: tuple[str, ...] = ("instance_owner__repo-a", "instance_owner__repo-b"),
+    model: str = "gpt-5.6-sol",
 ) -> Any:
     return store.create_batch(
         BatchCreate(
             powercontext_ref="latest",
             benchmark="swebench-pro",
             task_set="swebench-pro-public-v2",
-            model="gpt-5.6-sol",
+            model=model,
             reasoning_effort="medium",
             treatment_mode="off_on",
             idempotency_key=key,
@@ -459,6 +460,33 @@ def test_latest_is_pinned_once_and_every_child_uses_catalog_instance(
     persisted = store.get_batch(batch.batch_id)
     assert persisted.resolved_powercontext_sha == source.sha
     assert persisted.status is BatchStatus.COMPLETED
+
+
+def test_worker_uses_each_batch_immutable_model_for_runner_configuration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    batch = _create_batch(
+        store,
+        key="luna-worker-model",
+        instance_ids=("instance_owner__repo-luna",),
+        model="gpt-5.6-luna",
+    )
+    calls: list[tuple[RunConfig, SweBenchProInstance]] = []
+    monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
+    worker = EvaluationWorker(
+        config,
+        store,
+        runner=_successful_batch_runner(config, calls),
+        source=FakeSource(),
+        catalog=FakeCatalog(("instance_owner__repo-luna",)),
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is True
+    assert calls[0][0].model == batch.request.model == "gpt-5.6-luna"
+    assert calls[0][0].reasoning_effort == batch.request.reasoning_effort == "medium"
 
 
 def test_only_one_child_runs_physically_across_multiple_batches(tmp_path: Path) -> None:
@@ -1074,18 +1102,18 @@ def test_run_forever_recovers_once_and_waits_only_when_idle(
     assert waits == [config.poll_seconds]
 
 
-def test_supervisor_runs_four_isolated_task_pairs_and_stop_prevents_replacement(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+@pytest.mark.parametrize("parallelism", [4, 10])
+def test_supervisor_respects_configured_isolated_task_pair_capacity_and_stop_prevents_replacement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, parallelism: int
 ) -> None:
-    config = _config(tmp_path, task_parallelism=4)
+    config = _config(tmp_path, task_parallelism=parallelism)
     store = _store(config)
     batch = _create_batch(
         store,
         key="parallel-supervisor",
-        instance_ids=tuple(f"instance_owner__repo-{index}" for index in range(5)),
+        instance_ids=tuple(f"instance_owner__repo-{index}" for index in range(parallelism + 1)),
     )
-    catalog = FakeCatalog(tuple(f"instance_owner__repo-{index}" for index in range(5)))
+    catalog = FakeCatalog(tuple(f"instance_owner__repo-{index}" for index in range(parallelism + 1)))
     entered = threading.Event()
     release = threading.Event()
     calls_lock = threading.Lock()
@@ -1095,7 +1123,7 @@ def test_supervisor_runs_four_isolated_task_pairs_and_stop_prevents_replacement(
         del instance, on_phase
         with calls_lock:
             run_ids.append(run_config.run_id)
-            if len(run_ids) == 4:
+            if len(run_ids) == parallelism:
                 entered.set()
         release.wait(timeout=5)
         report = config.run_root / "runs" / run_config.run_id / "report.md"
@@ -1117,10 +1145,10 @@ def test_supervisor_runs_four_isolated_task_pairs_and_stop_prevents_replacement(
     try:
         assert entered.wait(timeout=3)
         health = store.health_snapshot(now=NOW)
-        assert health["task_parallelism"] == 4
-        assert health["active_task_pairs"] == 4
+        assert health["task_parallelism"] == parallelism
+        assert health["active_task_pairs"] == parallelism
         assert len(store.list_tasks(status=TaskStatus.QUEUED, limit=10, offset=0)) == 1
-        assert len(set(run_ids)) == 4
+        assert len(set(run_ids)) == parallelism
     finally:
         worker.stop()
         release.set()
@@ -1128,7 +1156,7 @@ def test_supervisor_runs_four_isolated_task_pairs_and_stop_prevents_replacement(
 
     assert not supervisor.is_alive()
     children = store.list_batch_tasks(batch.batch_id)
-    assert [child.status for child in children].count(TaskStatus.SUCCEEDED) == 4
+    assert [child.status for child in children].count(TaskStatus.SUCCEEDED) == parallelism
     assert [child.status for child in children].count(TaskStatus.QUEUED) == 1
 
 

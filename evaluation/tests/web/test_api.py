@@ -847,12 +847,12 @@ class _BatchCatalog:
         return cast(SweBenchProInstance, self.instances[instance_id])
 
 
-def _batch_payload(key: str = "batch-api-key") -> dict[str, object]:
+def _batch_payload(key: str = "batch-api-key", *, model: str = "gpt-5.6-sol") -> dict[str, object]:
     return {
         "powercontext_ref": "commit:" + "a" * 40,
         "benchmark": "swebench-pro",
         "task_set": "swebench-pro-public-v2",
-        "model": "gpt-5.6-sol",
+        "model": model,
         "reasoning_effort": "medium",
         "treatment_mode": "off_on",
         "idempotency_key": key,
@@ -1041,6 +1041,37 @@ def test_batch_preview_is_read_only_and_exposes_fixed_facts_usage_and_estimate(
         "block_reason": None,
     }
     assert response.json()["usage"]["used_percent"] == 9
+
+
+def test_luna_preview_batch_tasks_detail_and_report_keep_the_requested_model(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    catalog = _BatchCatalog()
+    client = TestClient(create_app(config, store, catalog=catalog))
+
+    preview = client.post(
+        "/api/batches/preview",
+        json={"powercontext_ref": "latest", "model": "gpt-5.6-luna", "usage_pause_percent": 75},
+    )
+    created = client.post(
+        "/api/batches",
+        json=_batch_payload("luna-api-batch", model="gpt-5.6-luna"),
+    )
+    batch_id = created.json()["batch_id"]
+    task = store.list_batch_tasks(batch_id)[0]
+    tasks = client.get(f"/api/batches/{batch_id}/tasks")
+    detail = client.get(f"/api/batches/{batch_id}/tasks/{task.task_id}")
+    report = client.get(f"/api/batches/{batch_id}/report")
+
+    assert preview.status_code == 200
+    assert preview.json()["model"] == "gpt-5.6-luna"
+    assert created.status_code == 201
+    assert created.json()["request"]["model"] == "gpt-5.6-luna"
+    assert tasks.json()["items"][0]["model"] == "gpt-5.6-luna"
+    assert tasks.json()["items"][0]["reasoning_effort"] == "medium"
+    assert detail.json()["task"]["model"] == "gpt-5.6-luna"
+    assert report.json()["configuration"]["model"] == "gpt-5.6-luna"
 
 
 def test_batch_preview_and_confirmation_fail_closed_without_fresh_usage(tmp_path: Path) -> None:

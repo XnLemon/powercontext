@@ -124,6 +124,8 @@ def test_swebench_pro_run_exposes_the_minimal_m0_command(monkeypatch) -> None:
             "instance_owner__repo-b",
             "--tokensflow-egress-network",
             "bridge",
+            "--model",
+            "gpt-5.6-luna",
         ],
     )
 
@@ -137,3 +139,5 @@ def test_swebench_pro_run_exposes_the_minimal_m0_command(monkeypatch) -> None:
     assert config.tokensflow_binary == Path("/data/powercontext-eval/bin/tokensflow")
     assert config.tokensflow_user_home == Path("/data/powercontext-eval/tokensflow-home")
     assert config.tokensflow_egress_network == "bridge"
+    assert config.model == "gpt-5.6-luna"
+    assert config.reasoning_effort == "medium"

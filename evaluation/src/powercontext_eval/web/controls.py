@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from powercontext_eval.codex import DEFAULT_CODEX_MODEL, is_safe_codex_model
 from powercontext_eval.models import PowerContextRef
 from powercontext_eval.web.models import TaskStatus
 
@@ -41,6 +42,7 @@ class BatchPreviewRequest(_FrozenModel):
     """Inputs required to preview a full public-v2 run before confirmation."""
 
     powercontext_ref: str
+    model: str = DEFAULT_CODEX_MODEL
     usage_pause_percent: Annotated[int, Field(ge=1, le=100)] = 80
 
     @field_validator("powercontext_ref")
@@ -49,6 +51,13 @@ class BatchPreviewRequest(_FrozenModel):
         PowerContextRef.parse(value)
         if value != "latest" and not value.startswith("commit:"):
             raise ValueError("Web evaluations accept only latest or an exact commit")
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        if not is_safe_codex_model(value):
+            raise ValueError("Codex model is unsafe")
         return value
 
 

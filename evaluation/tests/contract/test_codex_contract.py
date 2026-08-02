@@ -100,6 +100,12 @@ def test_dangerous_codex_invocation_is_rejected_outside_container() -> None:
         CodexInvocation(arm=Arm.OFF, inside_disposable_container=False).argv()
 
 
+@pytest.mark.parametrize("model", ["-c", "gpt-5.6-luna --disable plugins", "gpt/../../model", "模型"])
+def test_codex_invocation_rejects_unsafe_model_names(model: str) -> None:
+    with pytest.raises(UnsafeCodexInvocation, match="model is unsafe"):
+        CodexInvocation(arm=Arm.OFF, inside_disposable_container=True, model=model).argv()
+
+
 class FakeRunner:
     def __init__(self, result: CommandResult | BaseException) -> None:
         self.result = result

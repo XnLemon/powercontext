@@ -53,7 +53,7 @@ describe("EvaluationApi HTTP", () => {
       powercontext_ref: "latest",
       benchmark: "swebench-pro",
       task_set: "swebench-pro-public-v2",
-      model: "gpt-5.6-sol",
+      model: "gpt-5.6-luna",
       reasoning_effort: "medium",
       treatment_mode: "off_on",
       idempotency_key: "batch-request-1",
@@ -298,7 +298,7 @@ describe("EvaluationApi HTTP", () => {
     {
       name: "nested task request",
       method: "getTask" as const,
-      payload: { ...queuedTask, request: { ...validTask, model: "unknown-model" } },
+      payload: { ...queuedTask, request: { ...validTask, model: "unsafe model" } },
     },
     {
       name: "task lifecycle mismatch",
@@ -362,7 +362,7 @@ describe("EvaluationApi HTTP", () => {
         queued_tasks: 0,
         running_tasks: 0,
         active_task_pairs: 0,
-        task_parallelism: 5,
+        task_parallelism: 11,
       },
     },
     {
@@ -392,7 +392,7 @@ describe("EvaluationApi HTTP", () => {
       code: "invalid_response",
       message: "The evaluation service could not complete the request.",
     });
-    await expect(operation).rejects.not.toThrow(/unknown-model|secret/i);
+    await expect(operation).rejects.not.toThrow(/unsafe model|secret/i);
   });
 
   it("rejects malformed nested report evidence", async () => {

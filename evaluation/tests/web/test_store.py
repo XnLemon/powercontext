@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
@@ -35,12 +36,12 @@ def request(key: str) -> TaskCreate:
     )
 
 
-def batch_request(key: str) -> BatchCreate:
+def batch_request(key: str, *, model: str = "gpt-5.6-sol") -> BatchCreate:
     return BatchCreate(
         powercontext_ref="latest",
         benchmark="swebench-pro",
         task_set="swebench-pro-public-v2",
-        model="gpt-5.6-sol",
+        model=model,
         reasoning_effort="medium",
         treatment_mode="off_on",
         idempotency_key=key,
@@ -339,6 +340,9 @@ def test_initialize_migrates_current_attempt_lease_without_losing_owner(database
 
 def test_initialize_migrates_current_cancelled_batch_control_without_rewriting_children(database: Path) -> None:
     batch = batch_request("legacy-batch")
+    legacy_batch = batch.model_dump(mode="json")
+    legacy_batch.pop("model")
+    legacy_batch.pop("reasoning_effort")
     with sqlite3.connect(database) as connection:
         connection.executescript(
             """
@@ -384,10 +388,13 @@ def test_initialize_migrates_current_cancelled_batch_control_without_rewriting_c
                 batch_id, idempotency_key, request_json, total_tasks, created_at
             ) VALUES (?, ?, ?, ?, ?)
             """,
-            ("batch-legacy", batch.idempotency_key, batch.model_dump_json(), 2, NOW.isoformat()),
+            ("batch-legacy", batch.idempotency_key, json.dumps(legacy_batch), 2, NOW.isoformat()),
         )
         for index in range(2):
             child = request(f"legacy-child-{index}").model_copy(update={"instance_id": f"instance_owner__repo-{index}"})
+            legacy_child = child.model_dump(mode="json")
+            legacy_child.pop("model")
+            legacy_child.pop("reasoning_effort")
             connection.execute(
                 """
                 INSERT INTO tasks(
@@ -398,7 +405,7 @@ def test_initialize_migrates_current_cancelled_batch_control_without_rewriting_c
                 (
                     f"run-legacy-{index}",
                     child.idempotency_key,
-                    child.model_dump_json(),
+                    json.dumps(legacy_child),
                     "batch-legacy",
                     child.instance_id,
                     index,
@@ -417,6 +424,10 @@ def test_initialize_migrates_current_cancelled_batch_control_without_rewriting_c
     assert migrated.control.intent is BatchControlIntent.CANCEL
     assert migrated.control.usage_pause_percent == 80
     assert migrated.control.version == 0
+    assert (migrated.request.model, migrated.request.reasoning_effort) == ("gpt-5.6-sol", "medium")
+    assert {(task.request.model, task.request.reasoning_effort) for task in store.list_batch_tasks("batch-legacy")} == {
+        ("gpt-5.6-sol", "medium")
+    }
     assert [task.status for task in store.list_batch_tasks("batch-legacy")] == [
         TaskStatus.CANCELLED,
         TaskStatus.CANCELLED,
@@ -461,6 +472,65 @@ def test_create_batch_expands_every_instance_atomically_in_source_order(store: T
     assert all(task.batch_id == batch.batch_id for task in children)
     assert all(EvaluationPaths(tmp_path, task.task_id) for task in children)
     assert store.health_snapshot(now=NOW)["queued_tasks"] == 3
+
+
+def test_sol_and_luna_batches_keep_children_and_retries_model_isolated(store: TaskStore) -> None:
+    luna = store.create_batch(
+        batch_request("luna-batch", model="gpt-5.6-luna"),
+        ("instance_owner__repo-luna",),
+        now=NOW,
+    )[0]
+    sol = store.create_batch(batch_request("sol-batch"), ("instance_owner__repo-sol",), now=NOW)[0]
+    sol_task = store.list_batch_tasks(sol.batch_id)[0]
+    luna_task = store.list_batch_tasks(luna.batch_id)[0]
+    assert sol_task.request.model == "gpt-5.6-sol"
+    assert luna_task.request.model == "gpt-5.6-luna"
+
+    claimed = store.claim_next("luna-worker", now=NOW + timedelta(seconds=1))
+    assert claimed is not None and claimed.task_id == luna_task.task_id
+    store.fail(
+        luna_task.task_id,
+        "luna-worker",
+        SafeFailure(
+            category=FailureCategory.CODEX_EXECUTION,
+            phase=TaskPhase.RUNNING_OFF,
+            summary="retry isolation",
+        ),
+        now=NOW + timedelta(seconds=2),
+    )
+    retried, created = store.retry_failed_task(
+        luna.batch_id,
+        luna_task.task_id,
+        idempotency_key="luna-retry-isolated",
+        now=NOW + timedelta(seconds=3),
+    )
+
+    assert created is True
+    assert store.get_batch_task(sol.batch_id, sol_task.task_id).request.model == "gpt-5.6-sol"
+    assert retried.attempt_number == 2
+    assert store.get_batch_task(luna.batch_id, luna_task.task_id).request.model == "gpt-5.6-luna"
+
+
+def test_store_migrates_worker_capacity_and_enforces_ten_pair_limit(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE worker_runtime (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                task_parallelism INTEGER NOT NULL CHECK (task_parallelism BETWEEN 1 AND 4),
+                observed_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("INSERT INTO worker_runtime VALUES (1, 4, ?)", (NOW.isoformat(),))
+    store = TaskStore(database, lease_duration=timedelta(seconds=60))
+
+    store.initialize()
+    store.record_worker_capacity(10, now=NOW)
+
+    assert store.health_snapshot(now=NOW)["task_parallelism"] == 10
+    with pytest.raises(ValueError, match="between 1 and 10"):
+        store.record_worker_capacity(11, now=NOW)
 
 
 def test_pause_without_a_running_task_is_immediate_idempotent_and_restart_safe(database: Path) -> None:
@@ -1217,7 +1287,7 @@ def test_worker_capacity_is_published_without_web_configuration_reload(store: Ta
     assert store.health_snapshot(now=NOW + timedelta(seconds=2))["task_parallelism"] == 4
 
 
-@pytest.mark.parametrize("value", [0, 5, True])
+@pytest.mark.parametrize("value", [0, 11, True])
 def test_worker_capacity_rejects_out_of_range_values(store: TaskStore, value: object) -> None:
     with pytest.raises(ValueError):
         store.record_worker_capacity(value, now=NOW)  # ty: ignore[invalid-argument-type]

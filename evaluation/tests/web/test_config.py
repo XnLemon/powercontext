@@ -9,6 +9,7 @@ from powercontext_eval.artifacts import ArmState
 from powercontext_eval.runner import INSTANCE_ID
 from powercontext_eval.web.batches import BatchCreate, PairCategory
 from powercontext_eval.web.config import WebConfig
+from powercontext_eval.web.controls import BatchPreviewRequest
 from powercontext_eval.web.models import (
     ArmResponse,
     ComparisonResponse,
@@ -88,7 +89,7 @@ def test_web_config_defaults_match_m0_layout() -> None:
         ("lease_seconds", 0),
         ("poll_seconds", 0.0),
         ("task_parallelism", 0),
-        ("task_parallelism", 5),
+        ("task_parallelism", 11),
         ("task_parallelism", "1"),
     ],
 )
@@ -113,7 +114,7 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
         "POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS": "90",
         "POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS": "20",
         "POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS": "180",
-        "POWERCONTEXT_EVAL_TASK_PARALLELISM": "4",
+        "POWERCONTEXT_EVAL_TASK_PARALLELISM": "10",
         "POWERCONTEXT_EVAL_TOKENSFLOW_BINARY": "/opt/tools/tokensflow",
         "POWERCONTEXT_EVAL_TOKENSFLOW_USER_HOME": "/srv/identities/current",
         "POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK": "egress-net",
@@ -134,7 +135,7 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
     assert config.usage_probe_seconds == 90
     assert config.usage_probe_timeout_seconds == 20
     assert config.usage_snapshot_max_age_seconds == 180
-    assert config.task_parallelism == 4
+    assert config.task_parallelism == 10
     assert config.tokensflow_binary == Path("/opt/tools/tokensflow")
     assert config.tokensflow_user_home == Path("/srv/identities/current")
     assert config.tokensflow_egress_network == "egress-net"
@@ -198,7 +199,7 @@ def test_web_config_rejects_relative_paths(tmp_path: Path, name: str, value: str
         ("POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS", "9"),
         ("POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS", "7201"),
         ("POWERCONTEXT_EVAL_TASK_PARALLELISM", "0"),
-        ("POWERCONTEXT_EVAL_TASK_PARALLELISM", "5"),
+        ("POWERCONTEXT_EVAL_TASK_PARALLELISM", "11"),
     ],
 )
 def test_web_config_rejects_invalid_numeric_settings(tmp_path: Path, name: str, value: str) -> None:
@@ -292,7 +293,7 @@ def test_task_create_rejects_unsupported_revision(powercontext_ref: str) -> None
     [
         ("benchmark", "swebench"),
         ("instance_id", "unsafe/instance"),
-        ("model", "gpt-5"),
+        ("model", "unsafe model"),
         ("reasoning_effort", "high"),
         ("treatment_mode", "on"),
         ("idempotency_key", "unsafe key"),
@@ -330,6 +331,43 @@ def test_batch_create_pins_the_public_v2_task_set() -> None:
         "both_fail",
         "execution_failure",
     ]
+
+
+def test_batch_model_defaults_to_sol_and_accepts_luna_without_an_allowlist() -> None:
+    base = {
+        "powercontext_ref": "latest",
+        "benchmark": "swebench-pro",
+        "task_set": "swebench-pro-public-v2",
+        "treatment_mode": "off_on",
+        "idempotency_key": "batch-request",
+    }
+
+    default = BatchCreate.model_validate(base)
+    luna = BatchCreate.model_validate({**base, "model": "gpt-5.6-luna"})
+    preview = BatchPreviewRequest(powercontext_ref="latest", model="gpt-5.6-luna")
+    task = TaskCreate.model_validate(valid_task(model="gpt-5.6-luna", idempotency_key="luna-task-request"))
+
+    assert (default.model, default.reasoning_effort) == ("gpt-5.6-sol", "medium")
+    assert (luna.model, luna.reasoning_effort) == ("gpt-5.6-luna", "medium")
+    assert preview.model == task.model == "gpt-5.6-luna"
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["", "-c", "gpt-5.6-luna --disable plugins", "gpt-5.6-luna\n-c", "gpt/../../model", "模型"],
+)
+def test_batch_and_task_reject_unsafe_model_names(model: str) -> None:
+    with pytest.raises(ValidationError):
+        BatchCreate(
+            powercontext_ref="latest",
+            benchmark="swebench-pro",
+            task_set="swebench-pro-public-v2",
+            model=model,
+            treatment_mode="off_on",
+            idempotency_key="unsafe-model",
+        )
+    with pytest.raises(ValidationError):
+        TaskCreate.model_validate(valid_task(model=model))
 
 
 def test_batch_create_accepts_a_per_batch_usage_threshold_override() -> None:
@@ -370,7 +408,7 @@ def test_batch_create_strictly_rejects_invalid_usage_threshold(value: object) ->
         ("powercontext_ref", "branch:main"),
         ("benchmark", "swebench"),
         ("task_set", "sample"),
-        ("model", "gpt-5"),
+        ("model", "gpt-5;rm"),
         ("reasoning_effort", "high"),
         ("treatment_mode", "on"),
         ("idempotency_key", "unsafe key"),

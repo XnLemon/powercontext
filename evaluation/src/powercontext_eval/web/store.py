@@ -12,6 +12,7 @@ from pathlib import Path
 from re import fullmatch
 from typing import Any, Literal, TypedDict
 
+from powercontext_eval.codex import DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT
 from powercontext_eval.paths import EvaluationPaths
 from powercontext_eval.web.batches import (
     BatchControlEvent,
@@ -20,6 +21,7 @@ from powercontext_eval.web.batches import (
     BatchRecord,
     BatchStatus,
 )
+from powercontext_eval.web.config import MAX_TASK_PARALLELISM
 from powercontext_eval.web.controls import (
     BatchControlIntent,
     BatchControlState,
@@ -167,7 +169,7 @@ class TaskStore:
                 );
                 CREATE TABLE IF NOT EXISTS worker_runtime (
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                    task_parallelism INTEGER NOT NULL CHECK (task_parallelism BETWEEN 1 AND 4),
+                    task_parallelism INTEGER NOT NULL CHECK (task_parallelism BETWEEN 1 AND 10),
                     observed_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS usage_snapshots (
@@ -204,6 +206,9 @@ class TaskStore:
             if "control_version" not in batch_columns:
                 connection.execute("ALTER TABLE batches ADD COLUMN control_version INTEGER NOT NULL DEFAULT 0")
             connection.execute("UPDATE batches SET control_updated_at = created_at WHERE control_updated_at IS NULL")
+            _migrate_worker_runtime_parallelism_constraint(connection)
+            _backfill_legacy_batch_requests(connection)
+            _backfill_legacy_task_requests(connection)
             connection.execute(
                 """
                 UPDATE batches
@@ -1877,8 +1882,61 @@ def _validate_percentage(value: int) -> None:
 
 
 def _validate_task_parallelism(value: int) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
-        raise ValueError("task parallelism must be an integer between 1 and 4")
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_TASK_PARALLELISM:
+        raise ValueError(f"task parallelism must be an integer between 1 and {MAX_TASK_PARALLELISM}")
+
+
+def _migrate_worker_runtime_parallelism_constraint(connection: sqlite3.Connection) -> None:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'worker_runtime'"
+    ).fetchone()
+    if row is None or "BETWEEN 1 AND 4" not in str(row["sql"]).upper():
+        return
+    connection.execute("ALTER TABLE worker_runtime RENAME TO worker_runtime_v1")
+    connection.execute(
+        """
+        CREATE TABLE worker_runtime (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            task_parallelism INTEGER NOT NULL CHECK (task_parallelism BETWEEN 1 AND 10),
+            observed_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO worker_runtime(singleton, task_parallelism, observed_at)
+        SELECT singleton, task_parallelism, observed_at FROM worker_runtime_v1
+        """
+    )
+    connection.execute("DROP TABLE worker_runtime_v1")
+
+
+def _backfill_legacy_batch_requests(connection: sqlite3.Connection) -> None:
+    for row in connection.execute("SELECT batch_seq, request_json FROM batches").fetchall():
+        value = json.loads(row["request_json"])
+        if not isinstance(value, dict) or ("model" in value and "reasoning_effort" in value):
+            continue
+        value.setdefault("model", DEFAULT_CODEX_MODEL)
+        value.setdefault("reasoning_effort", DEFAULT_REASONING_EFFORT)
+        canonical = BatchCreate.model_validate(value).model_dump_json()
+        connection.execute(
+            "UPDATE batches SET request_json = ? WHERE batch_seq = ?",
+            (canonical, row["batch_seq"]),
+        )
+
+
+def _backfill_legacy_task_requests(connection: sqlite3.Connection) -> None:
+    for row in connection.execute("SELECT queue_seq, request_json FROM tasks").fetchall():
+        value = json.loads(row["request_json"])
+        if not isinstance(value, dict) or ("model" in value and "reasoning_effort" in value):
+            continue
+        value.setdefault("model", DEFAULT_CODEX_MODEL)
+        value.setdefault("reasoning_effort", DEFAULT_REASONING_EFFORT)
+        canonical = TaskCreate.model_validate(value).model_dump_json()
+        connection.execute(
+            "UPDATE tasks SET request_json = ? WHERE queue_seq = ?",
+            (canonical, row["queue_seq"]),
+        )
 
 
 def _execute_transactional_script(connection: sqlite3.Connection, script: str) -> None:

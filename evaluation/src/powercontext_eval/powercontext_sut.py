@@ -25,11 +25,14 @@ from urllib.parse import quote, quote_plus, urlsplit
 
 from powercontext_eval.artifacts import ArtifactStore
 from powercontext_eval.codex import (
+    DEFAULT_CODEX_MODEL,
+    DEFAULT_REASONING_EFFORT,
     EXPECTED_CODEX_VERSION,
     CodexInfrastructureError,
     CodexInvocation,
     CodexOutcome,
     CodexRunner,
+    is_safe_codex_model,
 )
 from powercontext_eval.errors import CommandError, CommandFailed, CommandTimedOut, PowerContextEvalError
 from powercontext_eval.models import Arm
@@ -329,6 +332,8 @@ class SutConfig:
     source_checkout: Path
     plugin_checkout_sha: str
     proxy: ProxyRelayConfig
+    model: str = DEFAULT_CODEX_MODEL
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
     recorder_script: Path = _DEFAULT_RECORDER_SCRIPT
     limits: ContainerLimits = ContainerLimits()
     plugin_version: str = "0.1.0"
@@ -345,6 +350,10 @@ class SutConfig:
             raise UnsafeSutConfiguration("Task image is unsafe")
         if _SHA.fullmatch(self.plugin_checkout_sha) is None:
             raise UnsafeSutConfiguration("Plugin checkout SHA is unsafe")
+        if not is_safe_codex_model(self.model):
+            raise UnsafeSutConfiguration("Codex model is unsafe")
+        if self.reasoning_effort != DEFAULT_REASONING_EFFORT:
+            raise UnsafeSutConfiguration("Unsupported Codex reasoning effort")
         for path in (self.codex_binary, self.uv_binary, self.source_checkout, self.recorder_script):
             if not path.is_absolute() or "\0" in os.fspath(path):
                 raise UnsafeSutConfiguration("SUT paths must be absolute")
@@ -773,6 +782,8 @@ class DockerSut:
                     arm,
                     inside_disposable_container=True,
                     executable=_CONTAINER_CODEX,
+                    model=config.model,
+                    reasoning_effort=config.reasoning_effort,
                     recorder_python="/runtime/pc-env/bin/python",
                     recorder_script=_CONTAINER_RECORDER,
                     recorder_sidecar="/runtime/pc-home/codex-observed.jsonl",

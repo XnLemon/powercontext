@@ -23,6 +23,7 @@ from powercontext_eval.benchmarks.swebench_pro.adapter import (
 )
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluation, OfficialEvaluator
 from powercontext_eval.benchmarks.swebench_pro.prediction import encode_predictions
+from powercontext_eval.codex import DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT, is_safe_codex_model
 from powercontext_eval.context_trace import write_context_trace
 from powercontext_eval.errors import CommandFailed
 from powercontext_eval.git_source import GitSource
@@ -93,6 +94,14 @@ class RunConfig:
     auth_json: Path
     proxy_url: str
     run_id: str
+    model: str = DEFAULT_CODEX_MODEL
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
+
+    def __post_init__(self) -> None:
+        if not is_safe_codex_model(self.model):
+            raise ValueError("Codex model is unsafe")
+        if self.reasoning_effort != DEFAULT_REASONING_EFFORT:
+            raise ValueError("Unsupported Codex reasoning effort")
 
 
 @dataclass(frozen=True)
@@ -266,6 +275,8 @@ def _run_swebench_pro_instance(
                 proxy=ProxyRelayConfig(config.proxy_url),
                 tokensflow_binary=config.tokensflow_binary,
                 tokensflow_egress_network=config.tokensflow_egress_network,
+                model=config.model,
+                reasoning_effort=config.reasoning_effort,
             ),
             paths=arm_paths,
             prompts={Arm.OFF: prompt, Arm.ON: prompt},
@@ -331,8 +342,8 @@ def _run_swebench_pro_instance(
         configuration={
             "codex": "0.145.0",
             "instance": instance.instance_id,
-            "model": "gpt-5.6-sol",
-            "reasoning_effort": "medium",
+            "model": config.model,
+            "reasoning_effort": config.reasoning_effort,
         },
         off=_arm_report(Arm.OFF, off_eval, off_outcome, patch_sizes[Arm.OFF]),
         on=_arm_report(Arm.ON, on_eval, on_outcome, patch_sizes[Arm.ON]),
@@ -382,6 +393,14 @@ class MinimalRunConfig:
     auth_json: Path
     proxy_url: str
     run_id: str | None = None
+    model: str = DEFAULT_CODEX_MODEL
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
+
+    def __post_init__(self) -> None:
+        if not is_safe_codex_model(self.model):
+            raise ValueError("Codex model is unsafe")
+        if self.reasoning_effort != DEFAULT_REASONING_EFFORT:
+            raise ValueError("Unsupported Codex reasoning effort")
 
 
 def run_minimal_swebench_pro(
@@ -413,6 +432,8 @@ def run_minimal_swebench_pro(
             auth_json=config.auth_json,
             proxy_url=config.proxy_url,
             run_id=run_id,
+            model=config.model,
+            reasoning_effort=config.reasoning_effort,
         ),
         instance=instance,
         on_phase=on_phase,

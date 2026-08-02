@@ -21,6 +21,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from powercontext_eval.benchmarks.swebench_pro.catalog import CatalogError, SweBenchProCatalog
+from powercontext_eval.codex import DEFAULT_REASONING_EFFORT
 from powercontext_eval.errors import GitSourceError
 from powercontext_eval.git_source import GitSource
 from powercontext_eval.models import PowerContextRef
@@ -365,8 +366,8 @@ def create_app(
             if (
                 candidate.benchmark != "swebench-pro"
                 or candidate.task_set != "swebench-pro-public-v2"
-                or candidate.model != "gpt-5.6-sol"
-                or candidate.reasoning_effort != "medium"
+                or candidate.model != request.model
+                or candidate.reasoning_effort != DEFAULT_REASONING_EFFORT
                 or candidate.treatment_mode != "off_on"
             ):
                 continue
@@ -428,8 +429,8 @@ def create_app(
             powercontext_ref=request.powercontext_ref,
             benchmark="swebench-pro",
             task_set="swebench-pro-public-v2",
-            model="gpt-5.6-sol",
-            reasoning_effort="medium",
+            model=request.model,
+            reasoning_effort=DEFAULT_REASONING_EFFORT,
             treatment_mode="off_on",
             total_tasks=total_tasks,
             usage_pause_percent=request.usage_pause_percent,

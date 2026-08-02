@@ -16,6 +16,7 @@ import typer
 from pydantic import ValidationError
 
 from powercontext_eval.benchmarks.swebench_pro.catalog import SweBenchProCatalog
+from powercontext_eval.codex import DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT
 from powercontext_eval.powercontext_sut import run_codex_contract_smoke
 from powercontext_eval.runner import RunConfig, run_swebench_pro_instance
 
@@ -155,6 +156,8 @@ def swebench_pro_run(
     registry_bin: str = typer.Option("/data/powercontext-eval/bin/regctl"),
     auth_json: str = typer.Option("/data/powercontext-eval/codex-home/auth.json"),
     proxy_url: str = typer.Option("http://127.0.0.1:7890"),
+    model: str = typer.Option(DEFAULT_CODEX_MODEL, "--model"),
+    reasoning_effort: str = typer.Option(DEFAULT_REASONING_EFFORT, "--reasoning-effort"),
     run_id: str | None = typer.Option(None),
 ) -> None:
     """Run Gold, PowerContext OFF/ON, official grading, and report generation."""
@@ -178,6 +181,8 @@ def swebench_pro_run(
             auth_json=Path(auth_json),
             proxy_url=proxy_url,
             run_id=run_id or datetime.now(UTC).strftime("run-%Y%m%d-%H%M%S"),
+            model=model,
+            reasoning_effort=reasoning_effort,
         ),
         instance=catalog.require(instance_id),
     )

@@ -9,6 +9,7 @@ from typing import Annotated, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from powercontext_eval.artifacts import ArmState
+from powercontext_eval.codex import DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT, is_safe_codex_model
 from powercontext_eval.models import PowerContextRef
 from powercontext_eval.runner import INSTANCE_ID
 
@@ -72,8 +73,8 @@ class TaskCreate(FrozenModel):
     powercontext_ref: str
     benchmark: Literal["swebench-pro"]
     instance_id: str = Field(min_length=1, max_length=300, pattern=r"^[A-Za-z0-9._-]+$")
-    model: Literal["gpt-5.6-sol"]
-    reasoning_effort: Literal["medium"]
+    model: str = DEFAULT_CODEX_MODEL
+    reasoning_effort: Literal["medium"] = DEFAULT_REASONING_EFFORT
     treatment_mode: Literal["off_on"]
     idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
 
@@ -83,6 +84,13 @@ class TaskCreate(FrozenModel):
         PowerContextRef.parse(value)
         if value != "latest" and not value.startswith("commit:"):
             raise ValueError("Web evaluations accept only latest or an exact commit")
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        if not is_safe_codex_model(value):
+            raise ValueError("Codex model is unsafe")
         return value
 
 
@@ -199,8 +207,6 @@ class TaskAttemptRecord(FrozenModel):
                 powercontext_ref="latest",
                 benchmark="swebench-pro",
                 instance_id="attempt-validation",
-                model="gpt-5.6-sol",
-                reasoning_effort="medium",
                 treatment_mode="off_on",
                 idempotency_key="attempt-validation",
             ),
@@ -253,7 +259,7 @@ class TaskEvent(FrozenModel):
 class Capabilities(FrozenModel):
     benchmarks: tuple[Literal["swebench-pro"], ...] = ("swebench-pro",)
     instances: tuple[Literal["instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9"], ...] = (INSTANCE_ID,)
-    models: tuple[Literal["gpt-5.6-sol"], ...] = ("gpt-5.6-sol",)
+    models: tuple[str, ...] = (DEFAULT_CODEX_MODEL,)
     reasoning_efforts: tuple[Literal["medium"], ...] = ("medium",)
     treatment_modes: tuple[Literal["off_on"], ...] = ("off_on",)
 
@@ -262,7 +268,7 @@ class HealthResponse(FrozenModel):
     service: Literal["ok"]
     worker_lease_active: bool
     active_task_pairs: Annotated[int, Field(ge=0)]
-    task_parallelism: Annotated[int, Field(ge=1, le=4)]
+    task_parallelism: Annotated[int, Field(ge=1, le=10)]
     queued_tasks: Annotated[int, Field(ge=0)]
     running_tasks: Annotated[int, Field(ge=0)]
 

@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from powercontext_eval.codex import DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT, is_safe_codex_model
 from powercontext_eval.models import PowerContextRef
 from powercontext_eval.web.controls import BatchControlState
 from powercontext_eval.web.estimation import BatchEstimate
@@ -23,8 +24,8 @@ class BatchCreate(_FrozenModel):
     powercontext_ref: str
     benchmark: Literal["swebench-pro"]
     task_set: Literal["swebench-pro-public-v2"]
-    model: Literal["gpt-5.6-sol"]
-    reasoning_effort: Literal["medium"]
+    model: str = DEFAULT_CODEX_MODEL
+    reasoning_effort: Literal["medium"] = DEFAULT_REASONING_EFFORT
     treatment_mode: Literal["off_on"]
     idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
     usage_pause_percent: Annotated[int, Field(ge=1, le=100)] = 80
@@ -37,12 +38,19 @@ class BatchCreate(_FrozenModel):
             raise ValueError("Web evaluations accept only latest or an exact commit")
         return value
 
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        if not is_safe_codex_model(value):
+            raise ValueError("Codex model is unsafe")
+        return value
+
 
 class BatchPreviewResponse(_FrozenModel):
     powercontext_ref: str
     benchmark: Literal["swebench-pro"]
     task_set: Literal["swebench-pro-public-v2"]
-    model: Literal["gpt-5.6-sol"]
+    model: str
     reasoning_effort: Literal["medium"]
     treatment_mode: Literal["off_on"]
     total_tasks: Annotated[int, Field(ge=1)]
@@ -190,6 +198,8 @@ class BatchTaskItem(_FrozenModel):
     instance_id: str
     repository: str
     source_index: Annotated[int, Field(ge=0)]
+    model: str
+    reasoning_effort: Literal["medium"]
     status: TaskStatus
     pair_category: PairCategory | None = None
     off: TaskArmSummary | None = None

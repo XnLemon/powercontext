@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -16,6 +17,15 @@ from powercontext_eval.models import Arm
 from powercontext_eval.process import CommandResult
 
 EXPECTED_CODEX_VERSION = "0.145.0"
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+DEFAULT_REASONING_EFFORT = "medium"
+_SAFE_CODEX_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def is_safe_codex_model(value: str) -> bool:
+    """Return whether a model is one opaque argument without restricting the model catalog."""
+
+    return _SAFE_CODEX_MODEL.fullmatch(value) is not None
 
 
 class UnsafeCodexInvocation(PowerContextEvalError):
@@ -33,8 +43,8 @@ class CodexInvocation:
     arm: Arm
     inside_disposable_container: bool
     executable: str = "codex"
-    model: str = "gpt-5.6-sol"
-    reasoning_effort: str = "medium"
+    model: str = DEFAULT_CODEX_MODEL
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
     expected_version: str = EXPECTED_CODEX_VERSION
     recorder_python: str | None = None
     recorder_script: str | None = None
@@ -47,7 +57,7 @@ class CodexInvocation:
             raise UnsafeCodexInvocation("Dangerous Codex invocation requires a disposable task container")
         if not self.executable or self.executable.startswith("-") or "\0" in self.executable:
             raise UnsafeCodexInvocation("Codex executable is unsafe")
-        if not self.model or self.model.startswith("-") or "\0" in self.model:
+        if not is_safe_codex_model(self.model):
             raise UnsafeCodexInvocation("Codex model is unsafe")
         if not self.reasoning_effort or "\0" in self.reasoning_effort:
             raise UnsafeCodexInvocation("Codex reasoning effort is unsafe")

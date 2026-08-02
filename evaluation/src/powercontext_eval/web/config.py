@@ -10,6 +10,7 @@ from typing import Annotated, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _SAFE_DOCKER_NETWORK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+MAX_TASK_PARALLELISM = 10
 
 
 class _EnvironmentNumbers(BaseModel):
@@ -22,7 +23,7 @@ class _EnvironmentNumbers(BaseModel):
     usage_probe_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
     usage_probe_timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 15
     usage_snapshot_max_age_seconds: Annotated[int, Field(ge=10, le=7200)] = 120
-    task_parallelism: Annotated[int, Field(ge=1, le=4)] = 1
+    task_parallelism: Annotated[int, Field(ge=1, le=MAX_TASK_PARALLELISM)] = 1
 
     @field_validator("task_parallelism", mode="before")
     @classmethod
@@ -61,7 +62,7 @@ class WebConfig(BaseModel):
     usage_probe_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
     usage_probe_timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 15
     usage_snapshot_max_age_seconds: Annotated[int, Field(ge=10, le=7200)] = 120
-    task_parallelism: Annotated[int, Field(ge=1, le=4)] = 1
+    task_parallelism: Annotated[int, Field(ge=1, le=MAX_TASK_PARALLELISM)] = 1
 
     @field_validator(
         "root",

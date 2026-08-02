@@ -417,6 +417,8 @@ def _task_item(
         attempt_number=task.attempt_number,
         attempt_count=task.attempt_count,
         retryable=task.retryable,
+        model=task.request.model,
+        reasoning_effort=task.request.reasoning_effort,
         instance_id=task.instance_id,
         repository=instance.repo,
         source_index=task.source_index,

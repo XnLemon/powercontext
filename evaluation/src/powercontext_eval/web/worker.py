@@ -223,6 +223,8 @@ class TaskPairWorker:
             auth_json=self._config.auth_json,
             proxy_url=self._config.proxy_url,
             run_id=_execution_run_id(task),
+            model=task.request.model,
+            reasoning_effort=task.request.reasoning_effort,
         )
 
     def _legacy_run_config(self, task: TaskRecord) -> MinimalRunConfig:
@@ -242,6 +244,8 @@ class TaskPairWorker:
             auth_json=self._config.auth_json,
             proxy_url=self._config.proxy_url,
             run_id=_execution_run_id(task),
+            model=task.request.model,
+            reasoning_effort=task.request.reasoning_effort,
         )
 
     def _pinned_batch_ref(self, batch_id: str) -> str:
