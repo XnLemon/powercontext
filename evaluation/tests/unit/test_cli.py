@@ -1,11 +1,12 @@
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 from typer.testing import CliRunner
 
 from powercontext_eval.cli import app
-from powercontext_eval.runner import MinimalRunResult
+from powercontext_eval.runner import MinimalRunResult, RunConfig
 
 
 def test_cli_help_describes_the_evaluation_runner() -> None:
@@ -34,6 +35,10 @@ def test_codex_contract_smoke_is_an_executable_injectable_cli(monkeypatch) -> No
             "fixture:image",
             "--codex-bin",
             "/tools/codex",
+            "--tokensflow-bin",
+            "/tools/tokensflow",
+            "--tokensflow-user-home",
+            "/tokensflow-home",
             "--uv-bin",
             "/tools/uv",
             "--powercontext-source",
@@ -54,6 +59,8 @@ def test_codex_contract_smoke_is_an_executable_injectable_cli(monkeypatch) -> No
             "run_root": "/tmp/contract",
             "task_image": "fixture:image",
             "codex_bin": "/tools/codex",
+            "tokensflow_bin": "/tools/tokensflow",
+            "tokensflow_user_home": "/tokensflow-home",
             "uv_bin": "/tools/uv",
             "powercontext_source": "/source",
             "powercontext_sha": "a" * 40,
@@ -104,5 +111,6 @@ def test_swebench_pro_run_exposes_the_minimal_m0_command(monkeypatch) -> None:
     assert '"on_resolved": true' in result.output
     assert len(calls) == 1
     assert calls[0][1] is instance
-    assert calls[0][0].tokensflow_binary == Path("/data/powercontext-eval/bin/tokensflow")
-    assert calls[0][0].tokensflow_user_home == Path("/data/powercontext-eval/tokensflow-home")
+    config = cast(RunConfig, calls[0][0])
+    assert config.tokensflow_binary == Path("/data/powercontext-eval/bin/tokensflow")
+    assert config.tokensflow_user_home == Path("/data/powercontext-eval/tokensflow-home")

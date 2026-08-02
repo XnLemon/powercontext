@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -10,13 +11,14 @@ from base64 import b64encode, urlsafe_b64encode
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import BinaryIO, cast
 from urllib.parse import quote, quote_plus
 from urllib.request import urlopen
 
 import pytest
 
-from powercontext_eval.artifacts import ArtifactStore
+from powercontext_eval.artifacts import ArtifactStore, SecretDetected
 from powercontext_eval.codex import (
     CodexInfrastructureError,
     CodexInvocation,
@@ -37,9 +39,11 @@ from powercontext_eval.powercontext_sut import (
     UnsafeSutConfiguration,
     auth_secret_variants,
     loopback_proxy_environment,
+    run_codex_contract_smoke,
     validate_treatment,
 )
 from powercontext_eval.process import CommandFailed, CommandResult, CommandTimedOut
+from powercontext_eval.tokensflow import TokensFlowInfrastructureError
 
 EXPECTED_COMMON = (
     "codex",
@@ -415,7 +419,7 @@ def test_workspace_initialization_recovers_from_docker_cp_rejecting_an_escaping_
         def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
             if argv[:2] == ("docker", "cp"):
                 self.commands.append(argv)
-                cwd = os.fspath(kwargs["cwd"])
+                cwd = os.fspath(cast(str | Path, kwargs["cwd"]))
                 Path(argv[-1], "partial-copy").write_text("must be discarded")
                 result = CommandResult(
                     argv,
@@ -558,7 +562,14 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
     config = sut_config(tmp_path)
     config.codex_binary.write_text("binary")
     config.uv_binary.write_text("binary")
-    docker = TranscriptDocker(host_identity=b"fixture-person\r\n", container_identity=b"fixture-person\n")
+    raw_host_identity = b"fixture-person\r\n"
+    raw_container_identity = b"fixture-person\n"
+    raw_version = b"tokensflow 1.0.16\n"
+    docker = TranscriptDocker(
+        host_identity=raw_host_identity,
+        container_identity=raw_container_identity,
+        host_tokensflow_version=raw_version,
+    )
 
     outcome = DockerSut(docker, relay_factory=FakeRelay).run_arm(
         config,
@@ -604,10 +615,16 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
     assert tokensflow.identity_match is True
     assert tokensflow.identity_bytes == len(b"fixture-person")
     assert tokensflow.host_identity_sha256 == tokensflow.container_identity_sha256
+    assert tokensflow.host_identity_sha256 == hashlib.sha256(b"fixture-person").hexdigest()
     assert tokensflow.daemon_started is True
-    retained = (paths.result_root / "tokensflow/provenance.json").read_text()
-    assert "fixture-person" not in retained
-    assert "tokensflow 1.0.16" not in retained
+    provenance = json.loads((paths.result_root / "tokensflow/provenance.json").read_text())
+    assert provenance["host_version"] == "1.0.16"
+    assert provenance["identity_bytes"] == len(b"fixture-person")
+    assert provenance["host_identity_sha256"] == hashlib.sha256(b"fixture-person").hexdigest()
+    retained = b"".join(path.read_bytes() for path in paths.result_root.rglob("*") if path.is_file())
+    assert raw_host_identity not in retained
+    assert raw_container_identity not in retained
+    assert raw_version not in retained
 
 
 @pytest.mark.parametrize(
@@ -714,7 +731,15 @@ def test_tokensflow_homes_and_daemon_pid_files_are_distinct_across_arms_and_runs
 
 @pytest.mark.parametrize(
     "failure",
-    ["non-executable", "unsafe-name", "unsafe-path", "malformed-version", "version-mismatch", "whoami-failed"],
+    [
+        "missing",
+        "non-executable",
+        "unsafe-name",
+        "unsafe-path",
+        "malformed-version",
+        "version-mismatch",
+        "whoami-failed",
+    ],
 )
 def test_tokensflow_configuration_or_execution_failure_blocks_codex(tmp_path: Path, failure: str) -> None:
     paths = make_paths(tmp_path)
@@ -726,7 +751,9 @@ def test_tokensflow_configuration_or_execution_failure_blocks_codex(tmp_path: Pa
         host_tokensflow_version=b"not-a-version\n" if failure == "malformed-version" else b"tokensflow 1.0.16\n",
         container_tokensflow_version=b"tokensflow 9.9.9\n" if failure == "version-mismatch" else None,
     )
-    if failure == "non-executable":
+    if failure == "missing":
+        object.__setattr__(config, "tokensflow_binary", tmp_path / "missing-tokensflow")
+    elif failure == "non-executable":
         config.tokensflow_binary.chmod(0o600)
     elif failure == "unsafe-name":
         unexpected = tmp_path / "unexpected-tool"
@@ -738,7 +765,7 @@ def test_tokensflow_configuration_or_execution_failure_blocks_codex(tmp_path: Pa
         nested.mkdir()
         object.__setattr__(config, "tokensflow_binary", nested / ".." / "tokensflow")
 
-    with pytest.raises(Exception) as captured:
+    with pytest.raises(TokensFlowInfrastructureError) as captured:
         DockerSut(docker, relay_factory=FakeRelay).run_arm(
             config,
             Arm.ON,
@@ -747,8 +774,165 @@ def test_tokensflow_configuration_or_execution_failure_blocks_codex(tmp_path: Pa
             ArtifactStore(paths.result_root),
         )
 
-    assert type(captured.value).__name__ in {"TokensFlowInfrastructureError", "UnsafeSutConfiguration"}
+    assert "TokensFlow" in str(captured.value)
+    assert os.fspath(config.tokensflow_binary) not in str(captured.value)
     assert not any(_is_codex_inference(command) for command in docker.commands)
+
+
+@pytest.mark.parametrize("unsafe", [Path("tokensflow"), Path("/tmp/to\0kensflow")])
+def test_tokensflow_binary_path_validation_is_a_sanitized_infrastructure_error(
+    tmp_path: Path,
+    unsafe: Path,
+) -> None:
+    config = sut_config(tmp_path)
+
+    with pytest.raises(TokensFlowInfrastructureError) as captured:
+        replace(config, tokensflow_binary=unsafe)
+
+    assert os.fspath(unsafe) not in str(captured.value)
+
+
+def test_missing_tokensflow_arm_home_is_a_sanitized_infrastructure_error(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    object.__setattr__(paths, "tokensflow_home", None)
+    config = sut_config(tmp_path)
+
+    with pytest.raises(TokensFlowInfrastructureError, match="TokensFlow inputs"):
+        DockerSut(TranscriptDocker(), relay_factory=FakeRelay).run_arm(
+            config,
+            Arm.ON,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root),
+        )
+
+
+@pytest.mark.parametrize("tokensflow_home", [Path("relative-home"), Path("/outside/runtime/tokensflow-home")])
+def test_tokensflow_arm_home_path_validation_is_a_sanitized_infrastructure_error(
+    tmp_path: Path,
+    tokensflow_home: Path,
+) -> None:
+    paths = make_paths(tmp_path)
+
+    with pytest.raises(TokensFlowInfrastructureError):
+        replace(paths, tokensflow_home=tokensflow_home)
+
+
+@pytest.mark.parametrize("phase", ["detached-exec", "readiness"])
+def test_tokensflow_daemon_failures_are_sanitized_block_codex_and_cleanup(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    leaked_identity = "leaked-daemon-person"
+    leaked_version = "tokensflow RAW 9.9.9"
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class AdversarialDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            detached = argv[:3] == ("docker", "exec", "-d") and _is_tokensflow(argv, "daemon")
+            readiness = any("kill -0" in part for part in argv)
+            if (phase == "detached-exec" and detached) or (phase == "readiness" and readiness):
+                self.commands.append(argv)
+                result = command_result(leaked_identity, returncode=70, stderr=leaked_version)
+                if detached:
+                    raise CommandFailed(f"{leaked_identity} {leaked_version}", result)
+                return result
+            return super().run(argv, **kwargs)
+
+    clock_values = iter((0.0, 6.0, 6.0))
+    docker = AdversarialDocker()
+    if phase == "readiness":
+        sut = DockerSut(
+            docker,
+            relay_factory=FakeRelay,
+            clock=lambda: next(clock_values),
+            sleeper=lambda _seconds: None,
+        )
+    else:
+        sut = DockerSut(docker, relay_factory=FakeRelay)
+
+    with pytest.raises(TokensFlowInfrastructureError) as captured:
+        sut.run_arm(
+            config,
+            Arm.ON,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root),
+        )
+
+    assert str(captured.value) == "TokensFlow daemon failed to start"
+    assert leaked_identity not in repr(captured.value)
+    assert leaked_version not in repr(captured.value)
+    assert not any(_is_codex_inference(command) for command in docker.commands)
+    assert ("docker", "rm", "-f", "powercontext-eval-run-1-on") in docker.commands
+    retained = b"".join(path.read_bytes() for path in paths.result_root.rglob("*") if path.is_file())
+    assert leaked_identity.encode() not in retained
+    assert leaked_version.encode() not in retained
+
+
+def test_contract_smoke_propagates_dynamic_tokensflow_snapshot_and_secret_boundary(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    auth = tmp_path / "auth.json"
+    auth.write_text('{"token":"codex-smoke-secret"}')
+    tokensflow_user_home = tmp_path / "tokensflow-profile"
+    tokensflow_config = tokensflow_user_home / ".tokensflow"
+    tokensflow_config.mkdir(parents=True)
+    (tokensflow_config / "credentials.json").write_text('{"token":"tokensflow-smoke-secret"}')
+    tokensflow_binary = tmp_path / "tools/tokensflow"
+    tokensflow_binary.parent.mkdir()
+    tokensflow_binary.write_text("binary")
+    tokensflow_binary.chmod(0o755)
+    observed: dict[str, object] = {}
+
+    class CapturingSut:
+        def run_pair(
+            self,
+            config: SutConfig,
+            *,
+            paths: dict[Arm, ArmPaths],
+            prompts: dict[Arm, bytes],
+            stores: dict[Arm, ArtifactStore],
+        ) -> dict[Arm, SimpleNamespace]:
+            observed.update(config=config, paths=paths, prompts=prompts, stores=stores)
+            for arm in (Arm.OFF, Arm.ON):
+                assert paths[arm].tokensflow_home is not None
+                assert paths[arm].tokensflow_home.is_relative_to(paths[arm].runtime)
+                assert (paths[arm].tokensflow_home / ".tokensflow/credentials.json").read_text() == (
+                    '{"token":"tokensflow-smoke-secret"}'
+                )
+                with pytest.raises(SecretDetected):
+                    stores[arm].write_text("codex-leak.txt", "codex-smoke-secret")
+                with pytest.raises(SecretDetected):
+                    stores[arm].write_text("tokensflow-leak.txt", "tokensflow-smoke-secret")
+            return {
+                Arm.OFF: SimpleNamespace(evidence=SimpleNamespace(prompt_sources=0)),
+                Arm.ON: SimpleNamespace(evidence=SimpleNamespace(prompt_sources=1)),
+            }
+
+    result = run_codex_contract_smoke(
+        run_root=os.fspath(tmp_path / "run"),
+        task_image="fixture:image",
+        codex_bin=os.fspath(tmp_path / "tools/codex"),
+        tokensflow_bin=os.fspath(tokensflow_binary),
+        tokensflow_user_home=os.fspath(tokensflow_user_home),
+        uv_bin=os.fspath(tmp_path / "tools/uv"),
+        powercontext_source=os.fspath(source),
+        powercontext_sha="a" * 40,
+        auth_json=os.fspath(auth),
+        proxy_url="http://127.0.0.1:7890",
+        sut_factory=lambda _process: CapturingSut(),  # type: ignore[arg-type]
+    )
+
+    config = cast(SutConfig, observed["config"])
+    paths = cast(dict[Arm, ArmPaths], observed["paths"])
+    assert config.tokensflow_binary == tokensflow_binary
+    assert paths[Arm.OFF].tokensflow_home != paths[Arm.ON].tokensflow_home
+    assert result["off_prompt_sources"] == 0
+    assert result["on_prompt_sources"] == 1
 
 
 def test_distinct_run_ids_derive_distinct_runtime_network_and_scope(tmp_path: Path) -> None:
@@ -903,6 +1087,7 @@ def test_sut_rejects_unsafe_run_names(tmp_path: Path, run_id: str) -> None:
             run_id=run_id,
             task_image="image:tag",
             codex_binary=tmp_path / "codex",
+            tokensflow_binary=tmp_path / "tokensflow",
             uv_binary=tmp_path / "uv",
             source_checkout=tmp_path / "source",
             plugin_checkout_sha="a" * 40,

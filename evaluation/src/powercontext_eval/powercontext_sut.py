@@ -40,6 +40,8 @@ from powercontext_eval.tokensflow import (
     TokensFlowInfrastructureError,
     matched_tokensflow_evidence,
     parse_tokensflow_version,
+    snapshot_tokensflow_home,
+    tokensflow_secret_variants,
 )
 
 PLUGIN_ID = "powercontext@powercontext"
@@ -300,6 +302,7 @@ class SutConfig:
     run_id: str
     task_image: str
     codex_binary: Path
+    tokensflow_binary: Path
     uv_binary: Path
     source_checkout: Path
     plugin_checkout_sha: str
@@ -308,7 +311,6 @@ class SutConfig:
     limits: ContainerLimits = ContainerLimits()
     plugin_version: str = "0.1.0"
     codex_timeout: float = 3600
-    tokensflow_binary: Path | None = None
 
     def __post_init__(self) -> None:
         if _SAFE_RUN_ID.fullmatch(self.run_id) is None:
@@ -324,10 +326,8 @@ class SutConfig:
         for path in (self.codex_binary, self.uv_binary, self.source_checkout, self.recorder_script):
             if not path.is_absolute() or "\0" in os.fspath(path):
                 raise UnsafeSutConfiguration("SUT paths must be absolute")
-        if self.tokensflow_binary is not None and (
-            not self.tokensflow_binary.is_absolute() or "\0" in os.fspath(self.tokensflow_binary)
-        ):
-            raise UnsafeSutConfiguration("SUT paths must be absolute")
+        if not self.tokensflow_binary.is_absolute() or "\0" in os.fspath(self.tokensflow_binary):
+            raise TokensFlowInfrastructureError("TokensFlow binary path is unsafe")
         try:
             recorder_metadata = self.recorder_script.stat(follow_symlinks=False)
         except OSError as error:
@@ -348,8 +348,8 @@ class ArmPaths:
     runtime: Path
     codex_home: Path
     pc_home: Path
+    tokensflow_home: Path
     result_root: Path
-    tokensflow_home: Path | None = None
 
     def __post_init__(self) -> None:
         paths = (
@@ -367,13 +367,12 @@ class ArmPaths:
             raise UnsafeSutConfiguration("Private homes must remain outside retained results")
         if not self.codex_home.is_relative_to(self.runtime) or not self.pc_home.is_relative_to(self.runtime):
             raise UnsafeSutConfiguration("Private homes must remain within the ephemeral runtime")
-        if self.tokensflow_home is not None:
-            if not self.tokensflow_home.is_absolute():
-                raise UnsafeSutConfiguration("Arm paths must be absolute")
-            if self.tokensflow_home.is_relative_to(self.result_root):
-                raise UnsafeSutConfiguration("Private homes must remain outside retained results")
-            if not self.tokensflow_home.is_relative_to(self.runtime):
-                raise UnsafeSutConfiguration("Private homes must remain within the ephemeral runtime")
+        if not self.tokensflow_home.is_absolute():
+            raise TokensFlowInfrastructureError("TokensFlow home path is unsafe")
+        if self.tokensflow_home.is_relative_to(self.result_root):
+            raise TokensFlowInfrastructureError("TokensFlow home path is unsafe")
+        if not self.tokensflow_home.is_relative_to(self.runtime):
+            raise TokensFlowInfrastructureError("TokensFlow home path is unsafe")
 
     def prepare(self) -> None:
         try:
@@ -385,7 +384,7 @@ class ArmPaths:
         try:
             self.runtime.mkdir(parents=True, exist_ok=False, mode=0o700)
         except FileExistsError as error:
-            if self.runtime.is_symlink() or not self.runtime.is_dir() or self.tokensflow_home is None:
+            if self.runtime.is_symlink() or not self.runtime.is_dir():
                 raise UnsafeSutConfiguration("Arm workspace and runtime must be fresh directories") from error
             if self.tokensflow_home.parent != self.runtime or set(self.runtime.iterdir()) != {self.tokensflow_home}:
                 raise UnsafeSutConfiguration("Arm runtime must be fresh except for the private TokensFlow home")
@@ -530,9 +529,13 @@ class DockerSut:
         docker: Any,
         *,
         relay_factory: Callable[[], ProxyRelay] = SocatProxyRelay,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self._docker = docker
         self._relay_factory = relay_factory
+        self._clock = clock
+        self._sleeper = sleeper
 
     def network_gateway(self, network: str, cwd: Path) -> str:
         if (
@@ -797,14 +800,17 @@ class DockerSut:
 
     @staticmethod
     def _validate_tokensflow_inputs(config: SutConfig, paths: ArmPaths) -> tuple[Path, Path]:
-        if config.tokensflow_binary is None or paths.tokensflow_home is None:
-            raise UnsafeSutConfiguration("TokensFlow inputs must be configured")
-        _tool_directory_mount(
-            config.tokensflow_binary,
-            "/tools/tokensflow-dir",
-            expected_name="tokensflow",
-            require_executable=True,
-        )
+        if paths.tokensflow_home is None:
+            raise TokensFlowInfrastructureError("TokensFlow inputs must be configured")
+        try:
+            _tool_directory_mount(
+                config.tokensflow_binary,
+                "/tools/tokensflow-dir",
+                expected_name="tokensflow",
+                require_executable=True,
+            )
+        except UnsafeSutConfiguration:
+            raise TokensFlowInfrastructureError("TokensFlow binary validation failed") from None
         return config.tokensflow_binary, paths.tokensflow_home
 
     def _capture_tokensflow_output(
@@ -937,22 +943,22 @@ class DockerSut:
             "-c",
             f'test -s {container_pid_file} && kill -0 "$(cat {container_pid_file})"',
         )
-        deadline = time.monotonic() + 5
+        deadline = self._clock() + 5
         while True:
             try:
                 readiness = self._docker.run(
                     readiness_command,
                     cwd=paths.runtime,
-                    timeout=min(1.0, max(0.1, deadline - time.monotonic())),
+                    timeout=min(1.0, max(0.1, deadline - self._clock())),
                     check=False,
                 )
             except (CommandError, OSError):
                 readiness = None
             if readiness is not None and readiness.returncode == 0:
                 break
-            if time.monotonic() >= deadline:
+            if self._clock() >= deadline:
                 raise TokensFlowInfrastructureError("TokensFlow daemon failed to start")
-            time.sleep(0.05)
+            self._sleeper(0.05)
         host_state = tokensflow_home / ".local/share/tokensflow"
         return TokensFlowDaemonHandle(
             pid_file=host_state / "evaluation-daemon.pid",
@@ -1519,13 +1525,15 @@ def run_codex_contract_smoke(
     run_root: str,
     task_image: str,
     codex_bin: str,
+    tokensflow_bin: str,
+    tokensflow_user_home: str,
     uv_bin: str,
     powercontext_source: str,
     powercontext_sha: str,
     auth_json: str,
     proxy_url: str,
     prompt: str = "Reply with exactly OK.",
-    sut_factory: Callable[[ProcessRunner], DockerSut] = DockerSut,
+    sut_factory: Callable[[ProcessRunner], Any] = DockerSut,
 ) -> dict[str, object]:
     """Execute the real disposable OFF/ON contract through an injectable Docker adapter."""
 
@@ -1545,6 +1553,7 @@ def run_codex_contract_smoke(
         source_checkout=source,
         plugin_checkout_sha=powercontext_sha,
         proxy=ProxyRelayConfig(proxy_url),
+        tokensflow_binary=Path(tokensflow_bin).absolute(),
     )
     paths: dict[Arm, ArmPaths] = {}
     stores: dict[Arm, ArtifactStore] = {}
@@ -1552,6 +1561,10 @@ def run_codex_contract_smoke(
         arm_root = root / arm.value
         arm_root.mkdir(mode=0o700)
         runtime = arm_root / "ephemeral/runtime"
+        tokensflow = snapshot_tokensflow_home(
+            Path(tokensflow_user_home).absolute(),
+            runtime / "tokensflow-home",
+        )
         paths[arm] = ArmPaths(
             source=source,
             auth_source=auth,
@@ -1560,8 +1573,12 @@ def run_codex_contract_smoke(
             codex_home=runtime / "codex-home",
             pc_home=runtime / "pc-home",
             result_root=arm_root / "results",
+            tokensflow_home=tokensflow.user_home,
         )
-        stores[arm] = ArtifactStore(paths[arm].result_root, forbidden_values=variants)
+        stores[arm] = ArtifactStore(
+            paths[arm].result_root,
+            forbidden_values=variants + tokensflow_secret_variants(tokensflow.credentials),
+        )
     outcomes = sut_factory(ProcessRunner()).run_pair(
         config,
         paths=paths,

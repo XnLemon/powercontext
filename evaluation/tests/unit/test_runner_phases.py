@@ -401,6 +401,7 @@ def test_runner_uses_arbitrary_instance_prompt_image_and_base_commit(
     assert "pass_to_pass" not in retained
     sut_config = cast(SutConfig, observed["sut_config"])
     assert sut_config.task_image == IMAGE_ID
+    assert sut_config.tokensflow_binary == config.tokensflow_binary
     prompts = cast(dict[Arm, bytes], observed["prompts"])
     assert isinstance(prompts, dict)
     assert prompts[Arm.OFF] == prompts[Arm.ON]
