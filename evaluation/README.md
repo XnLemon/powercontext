@@ -36,8 +36,9 @@ A real batch requires explicit final approval after the non-mutating preview sho
 
 ## Configurable task-pair parallelism
 
-`POWERCONTEXT_EVAL_TASK_PARALLELISM` accepts an integer from `1` through `4` and defaults to `1`. Setting it to `4`
-runs up to four concurrent task pairs. Parallelism is across independent SWE-bench tasks only: each task remains one
+`POWERCONTEXT_EVAL_TASK_PARALLELISM` accepts an integer from `1` through `10` and defaults to `1`. Setting it to `4`
+runs up to four concurrent task pairs; higher values may be selected up to the validated limit of ten. Parallelism is
+across independent SWE-bench tasks only: each task remains one
 ordered OFF-then-ON comparison pair, followed by official evaluation and reporting.
 
 Each concurrent task has its own workspace, runtime, Codex home, PowerContext home, Docker network, and scope. Leases
@@ -82,7 +83,7 @@ The deployment defaults are:
 | `POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS` | `60` | Normal interval between account-usage observations |
 | `POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS` | `15` | Maximum duration of one bounded usage probe |
 | `POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS` | `120` | Oldest observation accepted by preview, start, resume, and retry |
-| `POWERCONTEXT_EVAL_TASK_PARALLELISM` | `1` | Concurrent independent OFF/ON task pairs; allowed range is 1 through 4 |
+| `POWERCONTEXT_EVAL_TASK_PARALLELISM` | `1` | Concurrent independent OFF/ON task pairs; allowed range is 1 through 10 |
 | `POWERCONTEXT_EVAL_CODEX_MODELS` | `gpt-5.6-sol` | Comma-separated models admitted for newly created batches and tasks; the default Sol model must remain present |
 
 Changing the model allowlist affects only new submissions. Existing batches keep their immutable model and remain

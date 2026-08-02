@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -57,6 +57,10 @@ class BatchNotFound(TaskStoreError):
 
 class TaskConflict(TaskStoreError):
     """The requested transition conflicts with the task lifecycle."""
+
+
+class TaskAdmissionRejected(TaskStoreError):
+    """A genuinely new task or batch fails the current admission policy."""
 
 
 class TaskOwnershipError(TaskStoreError):
@@ -314,6 +318,7 @@ class TaskStore:
         *,
         now: datetime,
         resolved_powercontext_sha: str | None = None,
+        admit_model: Callable[[str], bool] | None = None,
     ) -> tuple[BatchRecord, bool]:
         """Create a durable batch and all of its queued children atomically."""
 
@@ -327,13 +332,17 @@ class TaskStore:
         created_at = _timestamp(now)
         initial_intent = BatchControlIntent(request.initial_control_intent)
         initial_pause_reason = BatchPauseReason.USER if initial_intent is BatchControlIntent.PAUSE else None
+        request_json = request.model_dump_json()
         with self._write() as connection:
             existing = connection.execute(
                 "SELECT * FROM batches WHERE idempotency_key = ?",
                 (request.idempotency_key,),
             ).fetchone()
             if existing is not None:
+                self._require_idempotent_request(existing["request_json"], request_json)
                 return self._batch_record(connection, existing), False
+            if admit_model is not None and not admit_model(request.model):
+                raise TaskAdmissionRejected("The requested model is not admitted for new work")
 
             placeholder = f"pending-batch-{uuid.uuid4().hex}"
             cursor = connection.execute(
@@ -347,7 +356,7 @@ class TaskStore:
                 (
                     placeholder,
                     request.idempotency_key,
-                    request.model_dump_json(),
+                    request_json,
                     len(ordered_ids),
                     created_at,
                     resolved_powercontext_sha,
@@ -413,6 +422,27 @@ class TaskStore:
                 now,
             )
             return self._batch_record(connection, self._select_batch(connection, batch_id)), True
+
+    def find_batch_replay(
+        self,
+        request: BatchCreate,
+        *,
+        admit_model: Callable[[str], bool] | None = None,
+    ) -> BatchRecord | None:
+        """Serialize replay lookup and admission before expensive batch preparation."""
+
+        request_json = request.model_dump_json()
+        with self._write() as connection:
+            existing = connection.execute(
+                "SELECT * FROM batches WHERE idempotency_key = ?",
+                (request.idempotency_key,),
+            ).fetchone()
+            if existing is None:
+                if admit_model is not None and not admit_model(request.model):
+                    raise TaskAdmissionRejected("The requested model is not admitted for new work")
+                return None
+            self._require_idempotent_request(existing["request_json"], request_json)
+            return self._batch_record(connection, existing)
 
     def get_batch(self, batch_id: str) -> BatchRecord:
         """Return one batch with lifecycle state derived from its children."""
@@ -783,7 +813,13 @@ class TaskStore:
 
         return self.request_cancel(batch_id, now=now)
 
-    def create(self, request: TaskCreate, *, now: datetime) -> tuple[TaskRecord, bool]:
+    def create(
+        self,
+        request: TaskCreate,
+        *,
+        now: datetime,
+        admit_model: Callable[[str], bool] | None = None,
+    ) -> tuple[TaskRecord, bool]:
         """Create a queued task, or replay the task for an idempotency key."""
         created_at = _timestamp(now)
         request_json = request.model_dump_json()
@@ -793,7 +829,10 @@ class TaskStore:
                 (request.idempotency_key,),
             ).fetchone()
             if existing is not None:
+                self._require_idempotent_request(existing["request_json"], request_json)
                 return self._record(connection, existing), False
+            if admit_model is not None and not admit_model(request.model):
+                raise TaskAdmissionRejected("The requested model is not admitted for new work")
 
             placeholder = f"pending-{uuid.uuid4().hex}"
             cursor = connection.execute(
@@ -820,6 +859,32 @@ class TaskStore:
             )
             row = self._select_task(connection, task_id)
             return self._record(connection, row), True
+
+    def find_task_replay(
+        self,
+        request: TaskCreate,
+        *,
+        admit_model: Callable[[str], bool] | None = None,
+    ) -> TaskRecord | None:
+        """Serialize replay lookup and admission before creating a task."""
+
+        request_json = request.model_dump_json()
+        with self._write() as connection:
+            existing = connection.execute(
+                "SELECT * FROM tasks WHERE idempotency_key = ?",
+                (request.idempotency_key,),
+            ).fetchone()
+            if existing is None:
+                if admit_model is not None and not admit_model(request.model):
+                    raise TaskAdmissionRejected("The requested model is not admitted for new work")
+                return None
+            self._require_idempotent_request(existing["request_json"], request_json)
+            return self._record(connection, existing)
+
+    @staticmethod
+    def _require_idempotent_request(stored_json: object, request_json: str) -> None:
+        if not isinstance(stored_json, str) or stored_json != request_json:
+            raise TaskConflict("The idempotency key belongs to a different request")
 
     def get(self, task_id: str) -> TaskRecord:
         """Return one task or raise :class:`TaskNotFound`."""

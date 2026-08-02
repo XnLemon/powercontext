@@ -18,7 +18,7 @@ from powercontext_eval.web.models import (
     TaskResult,
     TaskStatus,
 )
-from powercontext_eval.web.store import TaskConflict, TaskNotFound, TaskOwnershipError, TaskStore
+from powercontext_eval.web.store import TaskAdmissionRejected, TaskConflict, TaskNotFound, TaskOwnershipError, TaskStore
 from powercontext_eval.web.usage import UsageSnapshot
 
 NOW = datetime(2026, 7, 29, 1, 2, 3, tzinfo=UTC)
@@ -1190,6 +1190,78 @@ def test_create_batch_replays_idempotency_key_without_duplicate_children(store: 
     assert [task.instance_id for task in store.list_batch_tasks(replay.batch_id)] == list(instance_ids)
 
 
+def test_create_batch_admits_only_new_work_and_rejects_conflicting_reuse(store: TaskStore) -> None:
+    original = batch_request("batch-admission", model="gpt-5.6-luna")
+    created, created_new = store.create_batch(
+        original,
+        ("instance_owner__repo-a",),
+        now=NOW,
+        admit_model=lambda model: model == "gpt-5.6-luna",
+    )
+
+    replay, replay_new = store.create_batch(
+        original,
+        ("instance_other__repo-b",),
+        now=NOW + timedelta(seconds=1),
+        admit_model=lambda _model: False,
+    )
+
+    assert created_new is True
+    assert replay_new is False
+    assert replay == created
+    with pytest.raises(TaskConflict, match="idempotency"):
+        store.create_batch(
+            original.model_copy(update={"usage_pause_percent": 79}),
+            ("instance_owner__repo-a",),
+            now=NOW + timedelta(seconds=2),
+            admit_model=lambda _model: False,
+        )
+    with pytest.raises(TaskAdmissionRejected):
+        store.create_batch(
+            batch_request("new-disabled-batch", model="gpt-5.6-luna"),
+            ("instance_owner__repo-a",),
+            now=NOW + timedelta(seconds=3),
+            admit_model=lambda _model: False,
+        )
+
+
+def test_create_batch_serializes_concurrent_idempotent_admission(store: TaskStore) -> None:
+    batch = batch_request("concurrent-batch-admission", model="gpt-5.6-luna")
+    barrier = threading.Barrier(3)
+    lock = threading.Lock()
+    admission_calls = 0
+    outcomes: list[tuple[str, bool]] = []
+
+    def admit(_model: str) -> bool:
+        nonlocal admission_calls
+        with lock:
+            admission_calls += 1
+        return True
+
+    def create_batch() -> None:
+        barrier.wait()
+        record, created = store.create_batch(
+            batch,
+            ("instance_owner__repo-a",),
+            now=NOW,
+            admit_model=admit,
+        )
+        with lock:
+            outcomes.append((record.batch_id, created))
+
+    workers = [threading.Thread(target=create_batch) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert len(outcomes) == 2
+    assert len({batch_id for batch_id, _created in outcomes}) == 1
+    assert sorted(created for _batch_id, created in outcomes) == [False, True]
+    assert admission_calls == 1
+
+
 def test_create_batch_failure_leaves_neither_batch_nor_children(store: TaskStore) -> None:
     with pytest.raises(ValueError):
         store.create_batch(
@@ -1240,6 +1312,49 @@ def test_create_replays_idempotency_key_without_reordering(store: TaskStore) -> 
         original.task_id,
         later.task_id,
     ]
+
+
+def test_create_task_admits_only_new_work_and_serializes_concurrent_replays(store: TaskStore) -> None:
+    task = request("concurrent-admission").model_copy(update={"model": "gpt-5.6-luna"})
+    barrier = threading.Barrier(3)
+    lock = threading.Lock()
+    admission_calls = 0
+    outcomes: list[tuple[str, bool]] = []
+
+    def admit(_model: str) -> bool:
+        nonlocal admission_calls
+        with lock:
+            admission_calls += 1
+        return True
+
+    def create_task() -> None:
+        barrier.wait()
+        record, created = store.create(task, now=NOW, admit_model=admit)
+        with lock:
+            outcomes.append((record.task_id, created))
+
+    workers = [threading.Thread(target=create_task) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert len(outcomes) == 2
+    assert len({task_id for task_id, _created in outcomes}) == 1
+    assert sorted(created for _task_id, created in outcomes) == [False, True]
+    assert admission_calls == 1
+    replay, replay_created = store.create(task, now=NOW, admit_model=lambda _model: False)
+    assert replay.task_id == outcomes[0][0]
+    assert replay_created is False
+    with pytest.raises(TaskConflict, match="idempotency"):
+        store.create(task.model_copy(update={"model": "gpt-5.6-sol"}), now=NOW, admit_model=lambda _model: True)
+    with pytest.raises(TaskAdmissionRejected):
+        store.create(
+            task.model_copy(update={"idempotency_key": "new-disabled-task"}),
+            now=NOW,
+            admit_model=lambda _model: False,
+        )
 
 
 def test_distinct_idempotency_keys_create_distinct_safe_sortable_ids(store: TaskStore, tmp_path: Path) -> None:

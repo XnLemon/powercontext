@@ -171,6 +171,14 @@ def test_removed_model_remains_readable_runnable_and_retryable_for_existing_batc
     )
 
     current_client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
+    replayed = current_client.post(
+        "/api/batches",
+        json=_batch_payload("legacy-luna-batch", model="gpt-5.6-luna"),
+    )
+    conflicted = current_client.post(
+        "/api/batches",
+        json=_batch_payload("legacy-luna-batch", model="gpt-5.6-luna") | {"usage_pause_percent": 79},
+    )
     listed = current_client.get(f"/api/batches/{created['batch_id']}")
     retried = current_client.post(
         f"/api/batches/{created['batch_id']}/tasks/{task.task_id}/retry",
@@ -182,9 +190,36 @@ def test_removed_model_remains_readable_runnable_and_retryable_for_existing_batc
     )
 
     assert listed.status_code == 200
+    assert replayed.status_code == 200
+    assert replayed.json()["batch_id"] == created["batch_id"]
+    assert conflicted.status_code == 409
     assert listed.json()["request"]["model"] == "gpt-5.6-luna"
     assert retried.status_code == 201
     assert store.get(task.task_id).request.model == "gpt-5.6-luna"
+    assert rejected_new.status_code == 422
+
+
+def test_removed_model_task_replay_precedes_current_allowlist_but_conflicts_do_not(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    configured = config.model_copy(update={"codex_models": ("gpt-5.6-sol", "gpt-5.6-luna")})
+    enabled_client = TestClient(create_app(configured, store))
+    luna = payload("legacy-luna-task") | {"model": "gpt-5.6-luna"}
+    created = enabled_client.post("/api/tasks", json=luna)
+
+    current_client = TestClient(create_app(config, store))
+    replayed = current_client.post("/api/tasks", json=luna)
+    conflicted = current_client.post("/api/tasks", json=luna | {"model": "gpt-5.6-sol"})
+    rejected_new = current_client.post(
+        "/api/tasks",
+        json=payload("new-disabled-luna-task") | {"model": "gpt-5.6-luna"},
+    )
+
+    assert created.status_code == 201
+    assert replayed.status_code == 200
+    assert replayed.json()["task_id"] == created.json()["task_id"]
+    assert conflicted.status_code == 409
     assert rejected_new.status_code == 422
 
 

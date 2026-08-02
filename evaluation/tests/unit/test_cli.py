@@ -1,8 +1,11 @@
 import json
 import subprocess
 import sys
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
 from typing import Self, cast
+from urllib.error import HTTPError
 from urllib.request import Request
 
 from typer.testing import CliRunner
@@ -183,9 +186,8 @@ def test_cli_creates_a_luna_batch_atomically_paused(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert '"batch_id": "batch-luna"' in result.output
-    assert len(calls) == 2
-    assert calls[0][0].full_url == "http://127.0.0.1:8787/api/capabilities"
-    request, timeout = calls[1]
+    assert len(calls) == 1
+    request, timeout = calls[0]
     assert timeout == 30
     assert request.full_url == "http://127.0.0.1:8787/api/batches"
     assert isinstance(request.data, bytes)
@@ -194,23 +196,19 @@ def test_cli_creates_a_luna_batch_atomically_paused(monkeypatch) -> None:
     assert payload["initial_control_intent"] == "pause"
 
 
-def test_cli_rejects_a_model_not_published_by_capabilities(monkeypatch) -> None:
+def test_cli_surfaces_server_rejection_for_a_new_unconfigured_model(monkeypatch) -> None:
     calls: list[Request] = []
 
-    class Response:
-        def __enter__(self) -> Self:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return b'{"models":["gpt-5.6-sol"]}'
-
-    def fake_urlopen(request: Request, *, timeout: float) -> Response:
+    def fake_urlopen(request: Request, *, timeout: float) -> None:
         assert timeout == 30
         calls.append(request)
-        return Response()
+        raise HTTPError(
+            request.full_url,
+            422,
+            "Unprocessable Entity",
+            hdrs=Message(),
+            fp=BytesIO(b'{"error":{"code":"invalid_request","message":"The evaluation request is invalid."}}'),
+        )
 
     monkeypatch.setattr("powercontext_eval.cli.urlopen", fake_urlopen, raising=False)
     result = CliRunner().invoke(
@@ -227,4 +225,4 @@ def test_cli_rejects_a_model_not_published_by_capabilities(monkeypatch) -> None:
 
     assert result.exit_code == 2
     assert "not enabled" in result.output
-    assert [request.full_url for request in calls] == ["http://127.0.0.1:8787/api/capabilities"]
+    assert [request.full_url for request in calls] == ["http://127.0.0.1:8787/api/batches"]
