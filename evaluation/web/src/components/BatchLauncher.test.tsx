@@ -87,6 +87,27 @@ describe("BatchLauncher", () => {
     ));
   });
 
+  it("creates a batch already paused when the operator selects the atomic pause option", async () => {
+    const user = userEvent.setup();
+    const previewBatch = vi.fn().mockResolvedValue(preview());
+    const createBatch = vi.fn().mockResolvedValue(
+      batchRecord({
+        request: { ...batchRecord().request, initial_control_intent: "pause" },
+        status: "paused",
+      }),
+    );
+    render(<BatchLauncher api={apiStub({ previewBatch, createBatch })} onCreated={() => undefined} />);
+
+    await user.click(screen.getByRole("checkbox", { name: "创建后保持暂停" }));
+    await user.click(screen.getByRole("button", { name: "预览评测" }));
+    await user.click(await screen.findByRole("button", { name: "确认并开始评测" }));
+
+    await waitFor(() => expect(createBatch).toHaveBeenCalledWith(
+      expect.objectContaining({ initial_control_intent: "pause" }),
+      expect.any(AbortSignal),
+    ));
+  });
+
   it("invalidates stale previews and clearly represents unavailable estimates or blocked usage", async () => {
     const user = userEvent.setup();
     const previewBatch = vi

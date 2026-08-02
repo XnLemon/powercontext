@@ -11,6 +11,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 import typer
 from pydantic import ValidationError
@@ -19,6 +22,7 @@ from powercontext_eval.benchmarks.swebench_pro.catalog import SweBenchProCatalog
 from powercontext_eval.codex import DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT
 from powercontext_eval.powercontext_sut import run_codex_contract_smoke
 from powercontext_eval.runner import RunConfig, run_swebench_pro_instance
+from powercontext_eval.web.batches import BatchCreate
 
 if TYPE_CHECKING:
     from powercontext_eval.web.config import WebConfig
@@ -197,6 +201,63 @@ def swebench_pro_run(
             sort_keys=True,
         )
     )
+
+
+@swebench_pro_app.command("create-batch")
+def swebench_pro_create_batch(
+    idempotency_key: str = typer.Option(..., "--idempotency-key"),
+    console_url: str = typer.Option("http://127.0.0.1:8787", "--console-url"),
+    powercontext_ref: str = typer.Option("latest", "--powercontext-ref"),
+    model: str = typer.Option(DEFAULT_CODEX_MODEL, "--model"),
+    usage_pause_percent: int = typer.Option(80, "--usage-pause-percent", min=1, max=100),
+    start_paused: bool = typer.Option(False, "--start-paused/--start-running"),
+) -> None:
+    """Create one full batch through the console API, optionally atomically paused."""
+
+    endpoint = _batch_api_endpoint(console_url)
+    try:
+        batch = BatchCreate(
+            powercontext_ref=powercontext_ref,
+            benchmark="swebench-pro",
+            task_set="swebench-pro-public-v2",
+            model=model,
+            reasoning_effort=DEFAULT_REASONING_EFFORT,
+            treatment_mode="off_on",
+            idempotency_key=idempotency_key,
+            usage_pause_percent=usage_pause_percent,
+            initial_control_intent="pause" if start_paused else "run",
+        )
+    except ValidationError:
+        raise typer.BadParameter("Invalid batch configuration.") from None
+    request = Request(
+        endpoint,
+        data=batch.model_dump_json().encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read())
+    except (HTTPError, URLError, OSError, ValueError, UnicodeDecodeError):
+        raise typer.Exit(code=1) from None
+    if not isinstance(payload, dict) or not isinstance(payload.get("batch_id"), str):
+        raise typer.Exit(code=1)
+    typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+def _batch_api_endpoint(console_url: str) -> str:
+    parsed = urlsplit(console_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise typer.BadParameter("Invalid console URL.", param_hint="--console-url")
+    return console_url.rstrip("/") + "/api/batches"
 
 
 def main() -> None:

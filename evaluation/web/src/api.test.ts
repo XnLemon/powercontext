@@ -58,6 +58,7 @@ describe("EvaluationApi HTTP", () => {
       treatment_mode: "off_on",
       idempotency_key: "batch-request-1",
       usage_pause_percent: 80,
+      initial_control_intent: "run",
     } as const;
     const batch = {
       batch_id: "batch/1",

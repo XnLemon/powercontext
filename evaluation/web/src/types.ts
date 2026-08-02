@@ -309,6 +309,7 @@ export interface BatchCreate {
   treatment_mode: "off_on";
   idempotency_key: string;
   usage_pause_percent: number;
+  initial_control_intent: "run" | "pause";
 }
 
 export interface BatchRecord {

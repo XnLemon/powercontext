@@ -343,6 +343,7 @@ def test_initialize_migrates_current_cancelled_batch_control_without_rewriting_c
     legacy_batch = batch.model_dump(mode="json")
     legacy_batch.pop("model")
     legacy_batch.pop("reasoning_effort")
+    legacy_batch.pop("initial_control_intent")
     with sqlite3.connect(database) as connection:
         connection.executescript(
             """
@@ -472,6 +473,49 @@ def test_create_batch_expands_every_instance_atomically_in_source_order(store: T
     assert all(task.batch_id == batch.batch_id for task in children)
     assert all(EvaluationPaths(tmp_path, task.task_id) for task in children)
     assert store.health_snapshot(now=NOW)["queued_tasks"] == 3
+
+
+@pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-5.6-luna"])
+def test_create_paused_batch_has_no_claim_window_under_concurrent_workers(
+    database: Path,
+    model: str,
+) -> None:
+    creator = TaskStore(database, lease_duration=timedelta(seconds=60))
+    creator.initialize()
+    workers = [TaskStore(database, lease_duration=timedelta(seconds=60)) for _ in range(4)]
+    start = threading.Barrier(len(workers) + 1)
+    creation_finished = threading.Event()
+    claims: list[object] = []
+    claims_lock = threading.Lock()
+
+    def claim(index: int) -> None:
+        start.wait()
+        while not creation_finished.is_set():
+            claimed = workers[index].claim_next(f"worker-{index}", now=NOW, max_concurrency=10)
+            if claimed is not None:
+                with claims_lock:
+                    claims.append(claimed)
+
+    threads = [threading.Thread(target=claim, args=(index,)) for index in range(len(workers))]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    request = batch_request(f"paused-{model}", model=model).model_copy(update={"initial_control_intent": "pause"})
+    batch = creator.create_batch(request, ("instance_owner__repo-paused",), now=NOW)[0]
+    creation_finished.set()
+    for thread in threads:
+        thread.join(timeout=2)
+    claims.extend(
+        worker.claim_next(f"worker-final-{index}", now=NOW, max_concurrency=10) for index, worker in enumerate(workers)
+    )
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert claims == [None, None, None, None]
+    assert batch.status is BatchStatus.PAUSED
+    assert batch.control.intent is BatchControlIntent.PAUSE
+    assert batch.control.pause_reason is BatchPauseReason.USER
+    assert creator.list_batch_tasks(batch.batch_id)[0].status is TaskStatus.QUEUED
+    assert creator.list_control_events(batch.batch_id)[0].details["initial_control_intent"] == "pause"
 
 
 def test_sol_and_luna_batches_keep_children_and_retries_model_isolated(store: TaskStore) -> None:

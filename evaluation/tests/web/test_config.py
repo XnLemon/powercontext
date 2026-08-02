@@ -352,6 +352,21 @@ def test_batch_model_defaults_to_sol_and_accepts_luna_without_an_allowlist() -> 
     assert preview.model == task.model == "gpt-5.6-luna"
 
 
+def test_batch_initial_control_defaults_to_run_and_accepts_pause() -> None:
+    base = {
+        "powercontext_ref": "latest",
+        "benchmark": "swebench-pro",
+        "task_set": "swebench-pro-public-v2",
+        "treatment_mode": "off_on",
+        "idempotency_key": "initial-control",
+    }
+
+    assert BatchCreate.model_validate(base).initial_control_intent == "run"
+    assert BatchCreate.model_validate({**base, "initial_control_intent": "pause"}).initial_control_intent == "pause"
+    with pytest.raises(ValidationError):
+        BatchCreate.model_validate({**base, "initial_control_intent": "cancel"})
+
+
 @pytest.mark.parametrize(
     "model",
     ["", "-c", "gpt-5.6-luna --disable plugins", "gpt-5.6-luna\n-c", "gpt/../../model", "模型"],

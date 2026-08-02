@@ -325,6 +325,8 @@ class TaskStore:
         if resolved_powercontext_sha is not None and fullmatch(r"[0-9a-f]{40}", resolved_powercontext_sha) is None:
             raise ValueError("Resolved PowerContext SHA must be 40 lowercase hexadecimal characters")
         created_at = _timestamp(now)
+        initial_intent = BatchControlIntent(request.initial_control_intent)
+        initial_pause_reason = BatchPauseReason.USER if initial_intent is BatchControlIntent.PAUSE else None
         with self._write() as connection:
             existing = connection.execute(
                 "SELECT * FROM batches WHERE idempotency_key = ?",
@@ -339,8 +341,8 @@ class TaskStore:
                 INSERT INTO batches(
                     batch_id, idempotency_key, request_json, total_tasks, created_at,
                     resolved_powercontext_sha, control_intent, usage_pause_percent,
-                    control_updated_at, control_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    pause_reason, control_updated_at, control_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     placeholder,
@@ -349,8 +351,9 @@ class TaskStore:
                     len(ordered_ids),
                     created_at,
                     resolved_powercontext_sha,
-                    BatchControlIntent.RUN.value,
+                    initial_intent.value,
                     request.usage_pause_percent,
+                    initial_pause_reason.value if initial_pause_reason is not None else None,
                     created_at,
                     0,
                 ),
@@ -403,7 +406,10 @@ class TaskStore:
                 batch_id,
                 BatchControlEventType.BATCH_CREATED,
                 "system",
-                {"usage_pause_percent": request.usage_pause_percent},
+                {
+                    "usage_pause_percent": request.usage_pause_percent,
+                    "initial_control_intent": initial_intent.value,
+                },
                 now,
             )
             return self._batch_record(connection, self._select_batch(connection, batch_id)), True
@@ -1914,10 +1920,13 @@ def _migrate_worker_runtime_parallelism_constraint(connection: sqlite3.Connectio
 def _backfill_legacy_batch_requests(connection: sqlite3.Connection) -> None:
     for row in connection.execute("SELECT batch_seq, request_json FROM batches").fetchall():
         value = json.loads(row["request_json"])
-        if not isinstance(value, dict) or ("model" in value and "reasoning_effort" in value):
+        if not isinstance(value, dict) or (
+            "model" in value and "reasoning_effort" in value and "initial_control_intent" in value
+        ):
             continue
         value.setdefault("model", DEFAULT_CODEX_MODEL)
         value.setdefault("reasoning_effort", DEFAULT_REASONING_EFFORT)
+        value.setdefault("initial_control_intent", BatchControlIntent.RUN.value)
         canonical = BatchCreate.model_validate(value).model_dump_json()
         connection.execute(
             "UPDATE batches SET request_json = ? WHERE batch_seq = ?",

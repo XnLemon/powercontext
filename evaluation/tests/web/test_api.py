@@ -847,7 +847,12 @@ class _BatchCatalog:
         return cast(SweBenchProInstance, self.instances[instance_id])
 
 
-def _batch_payload(key: str = "batch-api-key", *, model: str = "gpt-5.6-sol") -> dict[str, object]:
+def _batch_payload(
+    key: str = "batch-api-key",
+    *,
+    model: str = "gpt-5.6-sol",
+    initial_control_intent: str = "run",
+) -> dict[str, object]:
     return {
         "powercontext_ref": "commit:" + "a" * 40,
         "benchmark": "swebench-pro",
@@ -856,6 +861,7 @@ def _batch_payload(key: str = "batch-api-key", *, model: str = "gpt-5.6-sol") ->
         "reasoning_effort": "medium",
         "treatment_mode": "off_on",
         "idempotency_key": key,
+        "initial_control_intent": initial_control_intent,
     }
 
 
@@ -1072,6 +1078,27 @@ def test_luna_preview_batch_tasks_detail_and_report_keep_the_requested_model(
     assert tasks.json()["items"][0]["reasoning_effort"] == "medium"
     assert detail.json()["task"]["model"] == "gpt-5.6-luna"
     assert report.json()["configuration"]["model"] == "gpt-5.6-luna"
+
+
+@pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-5.6-luna"])
+def test_api_can_create_batch_atomically_paused_without_a_claimable_window(
+    config: WebConfig,
+    store: TaskStore,
+    model: str,
+) -> None:
+    client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
+
+    response = client.post(
+        "/api/batches",
+        json=_batch_payload(f"paused-api-{model}", model=model, initial_control_intent="pause"),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["request"]["initial_control_intent"] == "pause"
+    assert response.json()["status"] == "paused"
+    assert response.json()["control"]["intent"] == "pause"
+    assert response.json()["control"]["pause_reason"] == "user"
+    assert store.claim_next("api-racing-worker", now=NOW, max_concurrency=10) is None
 
 
 def test_batch_preview_and_confirmation_fail_closed_without_fresh_usage(tmp_path: Path) -> None:

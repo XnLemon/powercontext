@@ -786,6 +786,22 @@ td small {
   grid-column: 1 / -1;
 }
 
+.checkbox-field {
+  grid-column: 1 / -1;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+}
+
+.checkbox-field input {
+  width: 18px;
+  min-height: 18px;
+  padding: 0;
+}
+
+.checkbox-field .field-hint {
+  grid-column: 2;
+}
+
 .threshold-input {
   display: grid;
   grid-template-columns: 1fr 32px;

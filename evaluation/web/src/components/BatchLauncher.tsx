@@ -34,13 +34,20 @@ function dateTime(value: string): string {
 export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
   const [revision, setRevision] = useState("latest");
   const [model, setModel] = useState("gpt-5.6-sol");
+  const [startPaused, setStartPaused] = useState(false);
   const [threshold, setThreshold] = useState(80);
   const [preview, setPreview] = useState<BatchPreview | null>(null);
   const [pending, setPending] = useState<"preview" | "submitting" | null>(null);
   const [message, setMessage] = useState("");
   const controller = useRef<AbortController | null>(null);
   const generation = useRef(0);
-  const confirmationKey = useRef<{ revision: string; model: string; threshold: number; key: string } | null>(null);
+  const confirmationKey = useRef<{
+    revision: string;
+    model: string;
+    threshold: number;
+    initialControlIntent: "run" | "pause";
+    key: string;
+  } | null>(null);
 
   useEffect(
     () => () => {
@@ -98,11 +105,17 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
 
   const confirm = async () => {
     if (preview === null || !preview.can_start || pending !== null) return;
-    const intent = { revision: preview.powercontext_ref, model: preview.model, threshold: preview.usage_pause_percent };
+    const intent = {
+      revision: preview.powercontext_ref,
+      model: preview.model,
+      threshold: preview.usage_pause_percent,
+      initialControlIntent: startPaused ? "pause" as const : "run" as const,
+    };
     if (
       confirmationKey.current?.revision !== intent.revision
       || confirmationKey.current.model !== intent.model
       || confirmationKey.current.threshold !== intent.threshold
+      || confirmationKey.current.initialControlIntent !== intent.initialControlIntent
     ) {
       confirmationKey.current = { ...intent, key: idempotencyKey() };
     }
@@ -115,6 +128,7 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
       treatment_mode: preview.treatment_mode,
       usage_pause_percent: preview.usage_pause_percent,
       idempotency_key: confirmationKey.current.key,
+      initial_control_intent: intent.initialControlIntent,
     };
     controller.current?.abort();
     const nextController = new AbortController();
@@ -197,6 +211,19 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
             <span>%</span>
           </span>
           <span className="field-hint">达到阈值后，在当前完整 OFF / ON 任务结束时暂停</span>
+        </label>
+        <label className="checkbox-field">
+          <input
+            aria-label="创建后保持暂停"
+            type="checkbox"
+            checked={startPaused}
+            onChange={(event) => {
+              invalidatePreview();
+              setStartPaused(event.target.checked);
+            }}
+          />
+          创建后保持暂停
+          <span className="field-hint">批次和任务原子写入暂停状态，显式恢复前 Worker 不会领取</span>
         </label>
         <button className="primary-button" type="submit" disabled={pending !== null}>
           {pending === "preview" ? "正在读取…" : "预览评测"}

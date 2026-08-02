@@ -135,6 +135,7 @@ export const batchRequest: BatchCreate = {
   treatment_mode: "off_on",
   idempotency_key: "fixture-batch-key",
   usage_pause_percent: 80,
+  initial_control_intent: "run",
 };
 
 export const usageSnapshot = {

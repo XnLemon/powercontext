@@ -314,6 +314,7 @@ const batchCreateSchema = z.strictObject({
   treatment_mode: z.literal("off_on"),
   idempotency_key: z.string().min(8).max(128).regex(/^[A-Za-z0-9._-]+$/),
   usage_pause_percent: z.number().int().min(1).max(100),
+  initial_control_intent: z.enum(["run", "pause"]),
 });
 const usageSnapshotSchema = z.strictObject({
   limit_id: z.literal("codex"),

@@ -1,7 +1,9 @@
+import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Self, cast
+from urllib.request import Request
 
 from typer.testing import CliRunner
 
@@ -141,3 +143,46 @@ def test_swebench_pro_run_exposes_the_minimal_m0_command(monkeypatch) -> None:
     assert config.tokensflow_egress_network == "bridge"
     assert config.model == "gpt-5.6-luna"
     assert config.reasoning_effort == "medium"
+
+
+def test_cli_creates_a_luna_batch_atomically_paused(monkeypatch) -> None:
+    calls: list[tuple[Request, float]] = []
+
+    class Response:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"batch_id":"batch-luna"}'
+
+    def fake_urlopen(request: Request, *, timeout: float) -> Response:
+        calls.append((request, timeout))
+        return Response()
+
+    monkeypatch.setattr("powercontext_eval.cli.urlopen", fake_urlopen, raising=False)
+    result = CliRunner().invoke(
+        app,
+        [
+            "swebench-pro",
+            "create-batch",
+            "--idempotency-key",
+            "luna-paused-cli",
+            "--model",
+            "gpt-5.6-luna",
+            "--start-paused",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert '"batch_id": "batch-luna"' in result.output
+    assert len(calls) == 1
+    request, timeout = calls[0]
+    assert timeout == 30
+    assert request.full_url == "http://127.0.0.1:8787/api/batches"
+    assert isinstance(request.data, bytes)
+    payload = json.loads(request.data)
+    assert payload["model"] == "gpt-5.6-luna"
+    assert payload["initial_control_intent"] == "pause"
