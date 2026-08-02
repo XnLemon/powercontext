@@ -691,6 +691,106 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
     assert raw_version not in retained
 
 
+def test_tokensflow_path_wrapper_clears_only_proxy_environment_and_preserves_arguments(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    paths.prepare()
+    sut = DockerSut(TranscriptDocker())
+    sut._stage_tokensflow_wrapper(paths)
+    wrapper = paths.runtime.parent / "evaluation-control" / "tokensflow-wrapper" / "tokensflow"
+    assert wrapper.is_file() and not wrapper.is_symlink()
+    assert not wrapper.is_relative_to(paths.runtime)
+    assert stat.S_IMODE(wrapper.stat().st_mode) == 0o555
+
+    dynamic = tmp_path / "dynamic" / "tokensflow"
+    dynamic.parent.mkdir()
+    dynamic.write_text(
+        "#!/bin/sh\n"
+        "python3 -c 'import json, os, sys; print(json.dumps({"
+        '"argv": sys.argv[1:], "home": os.environ.get("HOME"), '
+        '"profile": os.environ.get("TOKENSFLOW_PROFILE"), '
+        '"proxy_names": sorted(name for name in os.environ if "PROXY" in name.upper())'
+        '}))\' -- "$@"\n'
+    )
+    dynamic.chmod(0o500)
+    environment = {
+        **os.environ,
+        "POWERCONTEXT_EVAL_TOKENSFLOW_REAL_BINARY": os.fspath(dynamic),
+        "HOME": "/runtime/tokensflow-home",
+        "TOKENSFLOW_PROFILE": "dynamic-profile",
+        "HTTP_PROXY": "http://relay.invalid",
+        "HTTPS_PROXY": "http://relay.invalid",
+        "ALL_PROXY": "http://relay.invalid",
+        "NO_PROXY": "localhost",
+        "http_proxy": "http://relay.invalid",
+        "https_proxy": "http://relay.invalid",
+        "all_proxy": "http://relay.invalid",
+        "no_proxy": "localhost",
+    }
+    completed = subprocess.run(
+        (wrapper, "whoami", "argument with spaces", "--literal=$HOME"),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    observed = json.loads(completed.stdout)
+    assert observed == {
+        "argv": ["--", "whoami", "argument with spaces", "--literal=$HOME"],
+        "home": "/runtime/tokensflow-home",
+        "profile": "dynamic-profile",
+        "proxy_names": [],
+    }
+    sut._cleanup_tokensflow_wrapper(paths)
+    assert not wrapper.parent.parent.exists()
+
+
+def test_container_mounts_tokensflow_wrapper_read_only_without_changing_relay_environment(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    docker = TranscriptDocker()
+
+    DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config,
+        Arm.ON,
+        paths,
+        b"prompt",
+        ArtifactStore(paths.result_root),
+    )
+
+    task = next(command for command in docker.commands if command[:3] == ("docker", "run", "-d"))
+    wrapper_directory = paths.runtime.parent / "evaluation-control" / "tokensflow-wrapper"
+    wrapper_mount = f"type=bind,src={wrapper_directory},dst=/tools/tokensflow-wrapper,readonly"
+    assert wrapper_mount in task
+    assert any(
+        part.startswith("PATH=/tools/tokensflow-wrapper:/tools/uv-dir:/tools/codex-dir:/tools/tokensflow-dir:")
+        for part in task
+    )
+    assert "POWERCONTEXT_EVAL_TOKENSFLOW_REAL_BINARY=/tools/tokensflow-dir/tokensflow" in task
+    assert "HTTP_PROXY=http://172.29.0.1:17890" in task
+    assert "HTTPS_PROXY=http://172.29.0.1:17890" in task
+    assert not wrapper_directory.parent.exists()
+
+
+def test_tokensflow_path_wrapper_rejects_an_unsafe_real_binary_parameter(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    paths.prepare()
+    sut = DockerSut(TranscriptDocker())
+    sut._stage_tokensflow_wrapper(paths)
+    wrapper = paths.runtime.parent / "evaluation-control" / "tokensflow-wrapper" / "tokensflow"
+    completed = subprocess.run(
+        (wrapper, "whoami"),
+        check=False,
+        capture_output=True,
+        env={"POWERCONTEXT_EVAL_TOKENSFLOW_REAL_BINARY": "tokensflow"},
+    )
+    assert completed.returncode == 126
+    assert completed.stdout == b""
+    assert completed.stderr == b""
+    sut._cleanup_tokensflow_wrapper(paths)
+
+
 def test_tokensflow_dynamic_environment_reaches_every_lifecycle_command_without_leaking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1123,9 +1223,10 @@ def test_tokensflow_commands_redact_only_credentials_and_allow_normal_provenance
             self.tokensflow_secrets = []
 
         def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-            if any(part.endswith("/tokensflow") for part in argv) or any(
-                "evaluation-daemon.pid" in part for part in argv
-            ):
+            lifecycle = argv[:1] == (os.fspath(config.tokensflow_binary),) or (
+                argv[:2] == ("docker", "exec") and any(part.endswith("/tokensflow") for part in argv)
+            )
+            if lifecycle or any("evaluation-daemon.pid" in part for part in argv):
                 self.tokensflow_secrets.append(tuple(cast(Sequence[str], kwargs.get("secrets", ()))))
             return super().run(argv, **kwargs)
 
@@ -1451,7 +1552,11 @@ def test_tokensflow_command_failures_are_sanitized_block_codex_and_cleanup(
             detached = argv[:3] == ("docker", "exec", "-d") and _is_tokensflow(argv, "daemon")
             readiness = not detached and any("evaluation-daemon.pid" in part for part in argv)
             capture = argv == (os.fspath(config.tokensflow_binary), "whoami")
-            related = any(part.endswith("/tokensflow") for part in argv) or readiness
+            related = (
+                argv[:1] == (os.fspath(config.tokensflow_binary),)
+                or (argv[:2] == ("docker", "exec") and any(part.endswith("/tokensflow") for part in argv))
+                or readiness
+            )
             if related:
                 self.tokensflow_secrets.append(tuple(cast(Sequence[str], kwargs.get("secrets", ()))))
             if (

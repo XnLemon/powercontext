@@ -60,12 +60,23 @@ _INVALID_DOCKER_COPY_SYMLINK = re.compile(r'invalid symlink "[^"\r\n]+" -> "[^"\
 _CONTAINER_UID_GID = "2950:100"
 _CONTAINER_CODEX = "/tools/codex-dir/codex"
 _CONTAINER_TOKENSFLOW = "/tools/tokensflow-dir/tokensflow"
+_CONTAINER_TOKENSFLOW_WRAPPER_DIR = "/tools/tokensflow-wrapper"
 _CONTAINER_UV = "/tools/uv-dir/uv"
 _CONTAINER_RECORDER = "/evaluation/record_codex_jsonl.py"
 _CONTAINER_UV_PYTHON_INSTALL_DIR = "/runtime/uv-python"
 _DEFAULT_RECORDER_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "record_codex_jsonl.py"
 LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
 _PLUGIN_RELATIVE = Path("integrations/codex/plugins/powercontext")
+_TOKENSFLOW_WRAPPER = b"""#!/bin/sh
+real=${POWERCONTEXT_EVAL_TOKENSFLOW_REAL_BINARY-}
+case "$real" in
+  /*/tokensflow) ;;
+  *) exit 126 ;;
+esac
+test -f "$real" && test -x "$real" || exit 126
+unset ALL_PROXY HTTPS_PROXY HTTP_PROXY NO_PROXY all_proxy https_proxy http_proxy no_proxy
+exec "$real" "$@"
+"""
 
 
 class InvalidTreatment(PowerContextEvalError):
@@ -735,6 +746,7 @@ class DockerSut:
         container_started = False
         tokensflow_egress_attached = False
         preserve_after_drain_failure = False
+        tokensflow_wrapper_staged = False
         tokensflow_environment = tokensflow_runtime_environment()
         tokensflow_environment_values = tuple(
             dict.fromkeys(value for value in tokensflow_environment.values() if value)
@@ -748,6 +760,8 @@ class DockerSut:
             paths.prepare()
             auth = paths.copy_auth()
             self._stage_recorder(config, paths)
+            self._stage_tokensflow_wrapper(paths)
+            tokensflow_wrapper_staged = True
             self._initialize_workspace(config, arm, paths)
             self._assign_arm_ownership(config, paths)
             self._prewarm(config, arm, paths, network, relay_url, auth)
@@ -865,15 +879,21 @@ class DockerSut:
             store.write_bytes("powercontext/provenance.json", provenance_bytes)
             return SutOutcome(codex, evidence, tokensflow, tokensflow_daemon)
         finally:
-            if tokensflow_egress_attached:
-                self._detach_tokensflow_egress(config, container, paths)
-            if container_started and not preserve_after_drain_failure:
-                self._docker.run(
-                    ("docker", "rm", "-f", container),
-                    cwd=paths.runtime,
-                    timeout=30,
-                    check=False,
-                )
+            try:
+                if tokensflow_egress_attached:
+                    self._detach_tokensflow_egress(config, container, paths)
+            finally:
+                try:
+                    if container_started and not preserve_after_drain_failure:
+                        self._docker.run(
+                            ("docker", "rm", "-f", container),
+                            cwd=paths.runtime,
+                            timeout=30,
+                            check=False,
+                        )
+                finally:
+                    if tokensflow_wrapper_staged and not preserve_after_drain_failure:
+                        self._cleanup_tokensflow_wrapper(paths)
 
     @staticmethod
     def _validate_tokensflow_inputs(config: SutConfig, paths: ArmPaths) -> tuple[Path, Path]:
@@ -1462,6 +1482,72 @@ class DockerSut:
             if destination_fd >= 0:
                 os.close(destination_fd)
 
+    @staticmethod
+    def _stage_tokensflow_wrapper(paths: ArmPaths) -> None:
+        """Stage the evaluator-owned wrapper outside container-writable mounts."""
+
+        control = paths.runtime.parent / "evaluation-control"
+        wrapper_directory = control / "tokensflow-wrapper"
+        try:
+            control.mkdir(mode=0o700)
+            wrapper_directory.mkdir(mode=0o700)
+            destination_fd = os.open(
+                wrapper_directory / "tokensflow",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                0o555,
+            )
+            try:
+                view = memoryview(_TOKENSFLOW_WRAPPER)
+                written = 0
+                while written < len(view):
+                    count = os.write(destination_fd, view[written:])
+                    if count <= 0:
+                        raise OSError("TokensFlow wrapper staging made no progress")
+                    written += count
+                os.fchmod(destination_fd, 0o555)
+                os.fsync(destination_fd)
+            finally:
+                os.close(destination_fd)
+            directory_fd = os.open(
+                wrapper_directory,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            os.chmod(wrapper_directory, 0o555)
+            os.chmod(control, 0o555)
+        except OSError as error:
+            try:
+                os.chmod(control, 0o700)
+                os.chmod(wrapper_directory, 0o700)
+            except OSError:
+                pass
+            shutil.rmtree(control, ignore_errors=True)
+            raise UnsafeSutConfiguration("TokensFlow wrapper cannot be staged safely") from error
+
+    @staticmethod
+    def _cleanup_tokensflow_wrapper(paths: ArmPaths) -> None:
+        """Remove the per-arm wrapper after its container is gone."""
+
+        control = paths.runtime.parent / "evaluation-control"
+        try:
+            metadata = control.lstat()
+            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                raise UnsafeSutConfiguration("TokensFlow wrapper cleanup path is unsafe")
+            os.chmod(control, 0o700)
+            wrapper_directory = control / "tokensflow-wrapper"
+            wrapper_metadata = wrapper_directory.lstat()
+            if not stat.S_ISDIR(wrapper_metadata.st_mode) or stat.S_ISLNK(wrapper_metadata.st_mode):
+                raise UnsafeSutConfiguration("TokensFlow wrapper cleanup path is unsafe")
+            os.chmod(wrapper_directory, 0o700)
+            shutil.rmtree(control)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise UnsafeSutConfiguration("TokensFlow wrapper cleanup failed") from error
+
     def _assign_arm_ownership(self, config: SutConfig, paths: ArmPaths) -> None:
         """Use a networkless, capability-minimal helper for exact owned mounts."""
 
@@ -1709,6 +1795,11 @@ class DockerSut:
             "--mount",
             _tool_directory_mount(tokensflow_binary, "/tools/tokensflow-dir", expected_name="tokensflow"),
             "--mount",
+            (
+                f"type=bind,src={paths.runtime.parent / 'evaluation-control' / 'tokensflow-wrapper'},"
+                f"dst={_CONTAINER_TOKENSFLOW_WRAPPER_DIR},readonly"
+            ),
+            "--mount",
             _tool_directory_mount(config.uv_binary, "/tools/uv-dir", expected_name="uv"),
             "--mount",
             f"type=bind,src={auth},dst=/runtime/codex-home/auth.json,readonly",
@@ -1725,7 +1816,9 @@ class DockerSut:
                     "UV_CACHE_DIR": "/runtime/uv-cache",
                     "UV_PYTHON_INSTALL_DIR": _CONTAINER_UV_PYTHON_INSTALL_DIR,
                     "UV_OFFLINE": "1",
+                    "POWERCONTEXT_EVAL_TOKENSFLOW_REAL_BINARY": _CONTAINER_TOKENSFLOW,
                     "PATH": (
+                        f"{_CONTAINER_TOKENSFLOW_WRAPPER_DIR}:"
                         "/tools/uv-dir:/tools/codex-dir:/tools/tokensflow-dir:/runtime/pc-env/bin:"
                         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                     ),
