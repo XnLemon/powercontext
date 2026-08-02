@@ -374,6 +374,7 @@ def test_workspace_initialization_recovers_from_docker_cp_rejecting_an_escaping_
             if argv[:2] == ("docker", "cp"):
                 self.commands.append(argv)
                 cwd = os.fspath(kwargs["cwd"])
+                Path(argv[-1], "partial-copy").write_text("must be discarded")
                 result = CommandResult(
                     argv,
                     cwd,
@@ -402,6 +403,7 @@ def test_workspace_initialization_recovers_from_docker_cp_rejecting_an_escaping_
     assert fallback[fallback.index("--user") + 1] == "2950:100"
     assert fallback[fallback.index("--entrypoint") + 1] == "/bin/cp"
     assert fallback[-4:] == ("--archive", "--no-preserve=ownership", "/app/.", "/workspace")
+    assert not paths.workspace.joinpath("partial-copy").exists()
 
 
 def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(tmp_path: Path) -> None:

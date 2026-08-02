@@ -8,6 +8,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import stat
@@ -777,6 +778,8 @@ class DockerSut:
             except CommandFailed as error:
                 if _INVALID_DOCKER_COPY_SYMLINK.fullmatch(error.result.stderr.strip()) is None:
                     raise
+                shutil.rmtree(paths.workspace)
+                paths.workspace.mkdir(mode=0o700)
                 self._docker.run(
                     (
                         "docker",
