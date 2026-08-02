@@ -4,6 +4,9 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from powercontext_eval.web.batches import BatchControlEventType, BatchCreate, BatchStatus
 from powercontext_eval.web.claiming import ClaimCoordinator
@@ -170,7 +173,7 @@ def test_stop_closes_the_shared_claim_gate_before_any_replacement(tmp_path: Path
     assert store.get_batch(batch_id).status is BatchStatus.QUEUED
 
 
-def test_stop_waits_for_inflight_claim_then_rejects_later_claim(tmp_path: Path) -> None:
+def test_stop_does_not_wait_for_inflight_probe_or_allow_its_claim(tmp_path: Path) -> None:
     config = _config(tmp_path)
     store = _store(config)
     _batch(store, key="claim-stop-order", count=2)
@@ -208,7 +211,7 @@ def test_stop_waits_for_inflight_claim_then_rejects_later_claim(tmp_path: Path) 
 
     stop_thread.start()
     assert stop_started.wait(timeout=2)
-    assert not stop_finished.is_set()
+    stop_returned_promptly = stop_finished.wait(timeout=0.5)
 
     release_probe.set()
     claim_thread.join(timeout=2)
@@ -216,10 +219,94 @@ def test_stop_waits_for_inflight_claim_then_rejects_later_claim(tmp_path: Path) 
 
     assert not claim_thread.is_alive()
     assert not stop_thread.is_alive()
-    assert first_claim[0] is not None
+    assert stop_returned_promptly
+    assert first_claim == [None]
     assert stop_finished.is_set()
     assert coordinator.claim("slot-after-stop") is None
     assert probe.calls == 1
+
+
+def test_stop_rejects_waiting_parallel_claims_without_starting_more_probes(tmp_path: Path) -> None:
+    parallelism = 10
+    config = _config(tmp_path, task_parallelism=parallelism)
+    store = _store(config)
+    _batch(store, key="claim-stop-parallel", count=parallelism)
+    probe_entered = threading.Event()
+    release_probe = threading.Event()
+
+    class BlockingProbe:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read(self, *, now: datetime) -> UsageSnapshot:
+            self.calls += 1
+            probe_entered.set()
+            assert release_probe.wait(timeout=2)
+            return _usage(9, observed_at=now)
+
+    probe = BlockingProbe()
+    coordinator = ClaimCoordinator(config, store, usage_probe=probe, clock=lambda: NOW)
+    claims: list[object] = []
+    claims_lock = threading.Lock()
+
+    def claim(slot: int) -> None:
+        result = coordinator.claim(f"slot-{slot}")
+        with claims_lock:
+            claims.append(result)
+
+    threads = [threading.Thread(target=claim, args=(slot,)) for slot in range(parallelism)]
+    threads[0].start()
+    assert probe_entered.wait(timeout=2)
+    for thread in threads[1:]:
+        thread.start()
+
+    coordinator.stop()
+    release_probe.set()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert claims == [None] * parallelism
+    assert probe.calls == 1
+
+
+def test_stop_waits_only_for_a_claim_that_entered_the_database_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    _batch(store, key="claim-stop-commit", count=1)
+    coordinator = ClaimCoordinator(config, store, usage_probe=CountingProbe([_usage(9)]), clock=lambda: NOW)
+    commit_entered = threading.Event()
+    release_commit = threading.Event()
+    original_claim = store.claim_next_with_usage
+
+    def blocking_claim(*args: Any, **kwargs: Any) -> TaskRecord | None:
+        commit_entered.set()
+        assert release_commit.wait(timeout=2)
+        return original_claim(*args, **kwargs)
+
+    monkeypatch.setattr(store, "claim_next_with_usage", blocking_claim)
+    claims: list[TaskRecord | None] = []
+    claim_thread = threading.Thread(target=lambda: claims.append(coordinator.claim("slot-commit")))
+    stop_finished = threading.Event()
+    stop_thread = threading.Thread(target=lambda: (coordinator.stop(), stop_finished.set()))
+    claim_thread.start()
+    assert commit_entered.wait(timeout=2)
+
+    stop_thread.start()
+    stop_returned_before_commit = stop_finished.wait(timeout=0.5)
+    release_commit.set()
+    claim_thread.join(timeout=2)
+    stop_thread.join(timeout=2)
+
+    assert not claim_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert not stop_returned_before_commit
+    assert claims[0] is not None
+    assert stop_finished.is_set()
+    assert coordinator.claim("slot-after-stop") is None
 
 
 def test_refresh_after_attempt_serializes_probes_and_finalizes_idempotently(tmp_path: Path) -> None:
