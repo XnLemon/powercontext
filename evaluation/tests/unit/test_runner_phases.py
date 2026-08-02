@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import cast
 
 import pytest
 
-from powercontext_eval.artifacts import ArtifactStore
+from powercontext_eval.artifacts import ArtifactStore, SecretDetected
 from powercontext_eval.benchmarks.swebench_pro.adapter import SweBenchProInstance
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluation
 from powercontext_eval.codex import CodexOutcome
@@ -192,6 +193,9 @@ def test_failed_task_image_export_removes_the_partial_archive(tmp_path: Path) ->
 def _config(tmp_path: Path) -> RunConfig:
     auth_json = tmp_path / "auth.json"
     auth_json.write_text('{"api_key":"runner-secret-value"}')
+    tokensflow_config = tmp_path / "tokensflow-profile" / ".tokensflow"
+    tokensflow_config.mkdir(parents=True)
+    (tokensflow_config / "credentials.json").write_text('{"access_token":"tokensflow-secret-value"}')
     return RunConfig(
         root=tmp_path / "eval",
         powercontext_source=tmp_path / "source",
@@ -322,6 +326,7 @@ def _run_with_fakes(
             observed["sut_config"] = sut_config
             observed["prompts"] = prompts
             stores = cast(dict[Arm, ArtifactStore], kwargs["stores"])
+            observed["stores"] = stores
             assert before_arm is not None
             for arm in (Arm.OFF, Arm.ON):
                 before_arm(arm)
@@ -342,6 +347,27 @@ def _run_with_fakes(
     callback = on_phase if on_phase is not None else lambda phase: events.append(phase)
     result = run_swebench_pro_instance(config, instance=instance, on_phase=callback)
     return config, result, observed
+
+
+def test_runner_snapshots_tokensflow_per_arm_and_blocks_both_credential_sets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, result, observed = _run_with_fakes(tmp_path, monkeypatch, [])
+
+    for arm in (Arm.OFF, Arm.ON):
+        snapshot = config.root / "work" / result.run_id / arm.value / "runtime/tokensflow-home"
+        assert (snapshot / ".tokensflow/credentials.json").read_text() == (
+            config.tokensflow_user_home / ".tokensflow/credentials.json"
+        ).read_text()
+        store = cast(dict[Arm, ArtifactStore], observed["stores"])[arm]
+        with pytest.raises(SecretDetected):
+            store.write_text("leak-codex.txt", "runner-secret-value")
+        with pytest.raises(SecretDetected):
+            store.write_text("leak-tokensflow.txt", "tokensflow-secret-value")
+
+    retained = (config.root / "runs" / result.run_id / "manifest.json").read_text()
+    assert os.fspath(config.auth_json) not in retained
+    assert os.fspath(config.tokensflow_user_home) not in retained
 
 
 def test_runner_reuses_one_proxy_configured_official_evaluator_for_gold_off_and_on(

@@ -1,0 +1,182 @@
+"""Private TokensFlow profile snapshots and non-secret lifecycle helpers."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import stat
+from dataclasses import dataclass
+from pathlib import Path
+
+from powercontext_eval.errors import PowerContextEvalError
+
+
+class UnsafeTokensFlowConfiguration(PowerContextEvalError):
+    """A TokensFlow profile or destination is missing or unsafe."""
+
+
+@dataclass(frozen=True)
+class TokensFlowSnapshot:
+    """Private, arm-owned TokensFlow user home."""
+
+    user_home: Path
+    credentials: Path
+
+
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+_WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _require_safe_absolute_path(path: Path) -> None:
+    raw = os.fspath(path)
+    if not path.is_absolute() or "\x00" in raw or ".." in path.parts:
+        raise UnsafeTokensFlowConfiguration("Source is not a safe TokensFlow profile")
+
+
+def _open_directory(path: Path) -> int:
+    current_fd = os.open(path.anchor, _DIRECTORY_FLAGS)
+    try:
+        for component in path.parts[1:]:
+            next_fd = os.open(component, _DIRECTORY_FLAGS, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _create_private_destination(destination: Path) -> int:
+    anchor_fd = os.open(destination.anchor, _DIRECTORY_FLAGS)
+    current_fd = anchor_fd
+    try:
+        parts = destination.parts[1:]
+        for index, component in enumerate(parts):
+            is_destination = index == len(parts) - 1
+            if is_destination:
+                os.mkdir(component, 0o700, dir_fd=current_fd)
+            else:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    pass
+            next_fd = os.open(component, _DIRECTORY_FLAGS, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        os.fchmod(current_fd, 0o700)
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _copy_regular_file(source_fd: int, destination_fd: int, name: str, expected: os.stat_result) -> None:
+    input_fd = os.open(name, _READ_FLAGS, dir_fd=source_fd)
+    output_fd = -1
+    try:
+        opened = os.fstat(input_fd)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+            raise UnsafeTokensFlowConfiguration("Source is not a safe TokensFlow profile")
+        output_fd = os.open(name, _WRITE_FLAGS, 0o600, dir_fd=destination_fd)
+        while chunk := os.read(input_fd, 1024 * 1024):
+            view = memoryview(chunk)
+            written = 0
+            while written < len(view):
+                count = os.write(output_fd, view[written:])
+                if count <= 0:
+                    raise OSError("TokensFlow snapshot copy made no progress")
+                written += count
+        os.fchmod(output_fd, 0o600)
+        os.fsync(output_fd)
+    finally:
+        if output_fd >= 0:
+            os.close(output_fd)
+        os.close(input_fd)
+
+
+def _copy_directory(source_fd: int, destination_fd: int) -> None:
+    for name in sorted(os.listdir(source_fd)):
+        if name in {"", ".", ".."} or "/" in name or "\x00" in name:
+            raise UnsafeTokensFlowConfiguration("Source is not a safe TokensFlow profile")
+        metadata = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+        if stat.S_ISDIR(metadata.st_mode):
+            os.mkdir(name, 0o700, dir_fd=destination_fd)
+            child_source = os.open(name, _DIRECTORY_FLAGS, dir_fd=source_fd)
+            child_destination = os.open(name, _DIRECTORY_FLAGS, dir_fd=destination_fd)
+            try:
+                opened = os.fstat(child_source)
+                if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                    raise UnsafeTokensFlowConfiguration("Source is not a safe TokensFlow profile")
+                _copy_directory(child_source, child_destination)
+                os.fchmod(child_destination, 0o700)
+                os.fsync(child_destination)
+            finally:
+                os.close(child_destination)
+                os.close(child_source)
+        elif stat.S_ISREG(metadata.st_mode):
+            _copy_regular_file(source_fd, destination_fd, name, metadata)
+        else:
+            raise UnsafeTokensFlowConfiguration("Source is not a safe TokensFlow profile")
+
+
+def _create_private_state_tree(destination_fd: int) -> None:
+    current_fd = os.dup(destination_fd)
+    try:
+        for component in (".local", "share", "tokensflow"):
+            os.mkdir(component, 0o700, dir_fd=current_fd)
+            next_fd = os.open(component, _DIRECTORY_FLAGS, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+            os.fchmod(current_fd, 0o700)
+        os.fsync(current_fd)
+    finally:
+        os.close(current_fd)
+
+
+def snapshot_tokensflow_home(source_user_home: Path, destination_user_home: Path) -> TokensFlowSnapshot:
+    """Copy the current TokensFlow profile to a fresh, private arm-owned user home."""
+
+    _require_safe_absolute_path(source_user_home)
+    _require_safe_absolute_path(destination_user_home)
+    source_home_fd = source_config_fd = destination_fd = destination_config_fd = -1
+    created_destination = False
+    try:
+        source_home_fd = _open_directory(source_user_home)
+        source_config_fd = os.open(".tokensflow", _DIRECTORY_FLAGS, dir_fd=source_home_fd)
+        credentials = os.stat("credentials.json", dir_fd=source_config_fd, follow_symlinks=False)
+        if not stat.S_ISREG(credentials.st_mode):
+            raise UnsafeTokensFlowConfiguration("Source is not a safe TokensFlow profile")
+
+        destination_fd = _create_private_destination(destination_user_home)
+        created_destination = True
+        os.mkdir(".tokensflow", 0o700, dir_fd=destination_fd)
+        destination_config_fd = os.open(".tokensflow", _DIRECTORY_FLAGS, dir_fd=destination_fd)
+        _copy_directory(source_config_fd, destination_config_fd)
+        os.fchmod(destination_config_fd, 0o700)
+        os.fsync(destination_config_fd)
+        _create_private_state_tree(destination_fd)
+        os.fsync(destination_fd)
+    except (OSError, UnsafeTokensFlowConfiguration) as error:
+        if created_destination:
+            shutil.rmtree(destination_user_home, ignore_errors=True)
+        if isinstance(error, UnsafeTokensFlowConfiguration):
+            raise
+        raise UnsafeTokensFlowConfiguration("Source is not a safe TokensFlow profile") from error
+    finally:
+        for descriptor in (destination_config_fd, destination_fd, source_config_fd, source_home_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    return TokensFlowSnapshot(
+        user_home=destination_user_home,
+        credentials=destination_user_home / ".tokensflow" / "credentials.json",
+    )
+
+
+def tokensflow_secret_variants(credentials_json: Path) -> tuple[str, ...]:
+    """Return the same conservative nested scalar variants used for Codex credentials."""
+
+    from powercontext_eval.powercontext_sut import auth_secret_variants
+
+    return auth_secret_variants(credentials_json)
