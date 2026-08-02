@@ -207,6 +207,59 @@ stat -c '%U:%G %a' /data/powercontext-eval/codex-home/auth.json | grep -qx 'rong
 
 Never paste authentication contents into terminal output, tickets, or logs.
 
+## Operate TokensFlow telemetry without loss
+
+Set `POWERCONTEXT_EVAL_TOKENSFLOW_BINARY` to the selected absolute TokensFlow executable and
+`POWERCONTEXT_EVAL_TOKENSFLOW_USER_HOME` to the absolute home whose `.tokensflow` directory contains the operator's
+current configuration. The checked-in example uses a generic operator path and contains no credential. Replace it in
+the protected mode-0600 environment file; do not copy credentials into Git or serialize the selected user-home path
+through an API.
+
+There are two different change procedures. A **configuration content replacement** atomically updates content at the
+already configured source path; the next OFF or ON arm takes a fresh private snapshot, while an active arm continues
+with its existing snapshot. A **configured path switch** changes either named environment value. Keep the batch paused,
+wait for the active task boundary, edit the protected environment file, and restart only the Worker. A path switch does
+not authorize work or perform a manual resume.
+
+TokensFlow's existing host user service belongs to the evaluation operator's user manager. Enable linger once, then
+enable the TokensFlow-managed unit as that user; do not create a second root service or an unmanaged background daemon:
+
+```sh
+sudo loginctl enable-linger <evaluation-user>
+sudo -iu <evaluation-user> systemctl --user enable --now tokensflow.service
+sudo -iu <evaluation-user> systemctl --user status tokensflow.service
+sudo -iu <evaluation-user> tokensflow status
+```
+
+Run the final status command interactively because it can display account identity and local paths; do not paste or
+retain its raw output. The evaluation identity gate runs `tokensflow whoami` with the selected host snapshot and inside
+the arm container, compares normalized content, and retains only SHA-256 values and byte length. A mismatch is an
+infrastructure failure before Codex. Each accepted arm starts one detached daemon in the existing task container and
+proves the PID is the mounted TokensFlow executable before inference.
+
+After Codex returns, the arm uses one shared 60-second deadline for all of the following: normal TERM and confirmed
+daemon exit, `tokensflow upload --all`, and queue inspection proving zero pending files, no rejected batches, and a
+closed collector circuit. Successful non-secret provenance is written only after that sequence, and only then may the
+container cleanup run. A replay that reports only duplicate records is acceptable because server-side deduplication is
+part of the upload contract; a missing record is never accepted.
+
+If TERM, upload, or queue verification fails, the task records an infrastructure failure and atomically requests a
+batch pause. The runner does not force-remove that arm container or delete the only recoverable data. It writes the
+fixed, non-sensitive marker
+`work/<run-id>/<arm>/runtime/tokensflow-recovery.json`; the private TokensFlow home and Codex JSONL remain as the
+**preserved private spool** for recovery and are not public report artifacts. Do not delete, rename, publish, or treat a
+marked runtime as a clean attempt. Repair the service, endpoint, or configured path first; replay the preserved spool
+with `upload --all`, confirm the queue is caught up, retain the recovery evidence privately, and only then retry that
+single task. Duplicate replay is safer than loss. Verify the retry created exactly one new immutable attempt and that
+no other child was claimed before an explicit manual resume.
+
+For a controlled rollout, keep every real batch paused, prove zero active task pairs, run one approved single task,
+and verify both arms show identity match, daemon start/stop, upload success, caught-up queue, no recovery marker, and
+normal cleanup. On any failure, leave the batch paused and preserve the spool. Rollback means restoring the previous
+two configured paths and accepted checkout at a task boundary, then restarting only the evaluation services and
+rechecking health. It must not prune Docker, delete the queue or spool, or restart/reconfigure new-api, MySQL, Redis,
+or the proxy.
+
 Verify units before installation:
 
 ```sh

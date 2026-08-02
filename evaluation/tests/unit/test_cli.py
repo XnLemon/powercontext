@@ -22,7 +22,15 @@ def test_codex_contract_smoke_is_an_executable_injectable_cli(monkeypatch) -> No
 
     def fake_contract_smoke(**kwargs: object) -> dict[str, object]:
         calls.append(kwargs)
-        return {"off_prompt_sources": 0, "on_prompt_sources": 1, "status": "passed"}
+        return {
+            "off_prompt_sources": 0,
+            "on_prompt_sources": 1,
+            "status": "passed",
+            "tokensflow": {
+                "off": {"identity_match": True, "queue_caught_up": True},
+                "on": {"identity_match": True, "queue_caught_up": True},
+            },
+        }
 
     monkeypatch.setattr("powercontext_eval.cli.run_codex_contract_smoke", fake_contract_smoke)
     result = CliRunner().invoke(
@@ -54,6 +62,8 @@ def test_codex_contract_smoke_is_an_executable_injectable_cli(monkeypatch) -> No
 
     assert result.exit_code == 0, result.output
     assert '"status": "passed"' in result.output
+    assert '"queue_caught_up": true' in result.output
+    assert "/tokensflow-home" not in result.output
     assert calls == [
         {
             "run_root": "/tmp/contract",

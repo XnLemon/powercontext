@@ -116,7 +116,7 @@ def codex_contract_smoke(
     proxy_url: str = typer.Option(...),
     prompt: str = typer.Option("Reply with exactly OK."),
 ) -> None:
-    """Run the disposable Codex OFF/ON contract smoke."""
+    """Run OFF/ON identity, daemon, bounded-drain, and Codex contract checks."""
 
     outcome = run_codex_contract_smoke(
         run_root=run_root,

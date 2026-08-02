@@ -28,6 +28,8 @@ EXPECTED_ENVIRONMENT_KEYS = {
     "POWERCONTEXT_EVAL_ROOT",
     "POWERCONTEXT_EVAL_RUN_ROOT",
     "POWERCONTEXT_EVAL_TASK_PARALLELISM",
+    "POWERCONTEXT_EVAL_TOKENSFLOW_BINARY",
+    "POWERCONTEXT_EVAL_TOKENSFLOW_USER_HOME",
     "POWERCONTEXT_EVAL_USAGE_PAUSE_PERCENT",
     "POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS",
     "POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS",
@@ -117,6 +119,12 @@ def test_example_environment_uses_only_supported_named_configuration() -> None:
     assert config.usage_probe_timeout_seconds == 15
     assert config.usage_snapshot_max_age_seconds == 120
     assert config.task_parallelism == 1
+    assert config.tokensflow_binary == Path("/usr/local/bin/tokensflow")
+    assert config.tokensflow_user_home == Path("/home/evaluation-operator")
+    assert config.tokensflow_binary.is_absolute()
+    assert config.tokensflow_user_home.is_absolute()
+    serialized = json.dumps(config.model_dump(mode="json"), sort_keys=True)
+    assert "/home/evaluation-operator" not in serialized
     assert not re.search(r"(?i)(api[_-]?key|password|token|secret)=", example)
 
 
@@ -186,6 +194,32 @@ def test_operator_guide_documents_configurable_task_pair_parallelism() -> None:
 
     assert all(term.lower() in guide.lower() for term in required)
     assert "exactly one physical OFF/ON task pair running globally" not in guide
+
+
+def test_operator_guide_documents_tokensflow_zero_loss_operation_and_recovery() -> None:
+    guide = (EVALUATION / "README.md").read_text().lower()
+    required = {
+        "powercontext_eval_tokensflow_binary",
+        "powercontext_eval_tokensflow_user_home",
+        "configuration content replacement",
+        "configured path switch",
+        "loginctl enable-linger",
+        "systemctl --user enable --now tokensflow.service",
+        "tokensflow status",
+        "whoami",
+        "sha-256",
+        "60-second",
+        "upload --all",
+        "duplicate",
+        "tokensflow-recovery.json",
+        "preserved private spool",
+        "infrastructure failure",
+        "single task",
+        "manual resume",
+        "rollback",
+    }
+
+    assert all(term in guide for term in required)
 
 
 def test_operator_guide_stages_auth_without_printing_or_committing_it() -> None:
