@@ -64,6 +64,8 @@ def test_web_config_defaults_match_m0_layout() -> None:
     assert config.harness_python == root / "venvs" / "swebench-pro-ca10a60" / "bin" / "python"
     assert config.dataset_path == root / "cache" / "swebench-pro.git" / "helper_code" / "sweap_eval_full_v2.jsonl"
     assert config.codex_binary == root / "bin" / "codex"
+    assert config.tokensflow_binary == root / "bin" / "tokensflow"
+    assert config.tokensflow_user_home == root / "tokensflow-home"
     assert config.uv_binary == root / "bin" / "uv"
     assert config.auth_json == root / "codex-home" / "auth.json"
     assert config.proxy_url == "http://127.0.0.1:7890"
@@ -111,6 +113,8 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
         "POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS": "20",
         "POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS": "180",
         "POWERCONTEXT_EVAL_TASK_PARALLELISM": "4",
+        "POWERCONTEXT_EVAL_TOKENSFLOW_BINARY": "/opt/tools/tokensflow",
+        "POWERCONTEXT_EVAL_TOKENSFLOW_USER_HOME": "/srv/identities/current",
         "ROOT": "/ignored",
         "PORT": "1",
         "PROXY_URL": "https://ignored.invalid",
@@ -129,6 +133,8 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
     assert config.usage_probe_timeout_seconds == 20
     assert config.usage_snapshot_max_age_seconds == 180
     assert config.task_parallelism == 4
+    assert config.tokensflow_binary == Path("/opt/tools/tokensflow")
+    assert config.tokensflow_user_home == Path("/srv/identities/current")
 
 
 @pytest.mark.parametrize(
@@ -143,6 +149,8 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
         ("POWERCONTEXT_EVAL_HARNESS_PYTHON", "python"),
         ("POWERCONTEXT_EVAL_DATASET_PATH", "sample.jsonl"),
         ("POWERCONTEXT_EVAL_CODEX_BINARY", "codex"),
+        ("POWERCONTEXT_EVAL_TOKENSFLOW_BINARY", "tokensflow"),
+        ("POWERCONTEXT_EVAL_TOKENSFLOW_USER_HOME", "profile"),
         ("POWERCONTEXT_EVAL_UV_BINARY", "uv"),
         ("POWERCONTEXT_EVAL_REGISTRY_BINARY", "regctl"),
         ("POWERCONTEXT_EVAL_AUTH_JSON", "auth.json"),
@@ -212,13 +220,20 @@ def test_web_config_requires_usage_snapshot_to_cover_probe_interval(tmp_path: Pa
 
 def test_web_config_has_no_public_serialization_that_leaks_secrets(tmp_path: Path) -> None:
     secret = "https://user:secret@proxy.invalid"
-    config = WebConfig.for_root(tmp_path, auth_json=tmp_path / "auth-secret.json", proxy_url=secret)
+    config = WebConfig.for_root(
+        tmp_path,
+        auth_json=tmp_path / "auth-secret.json",
+        tokensflow_user_home=tmp_path / "identity-profile",
+        proxy_url=secret,
+    )
 
     assert not hasattr(config, "to_public")
     assert "auth_json" not in config.model_dump()
     assert "proxy_url" not in config.model_dump()
+    assert "tokensflow_user_home" not in config.model_dump()
     assert secret not in repr(config)
     assert "auth-secret.json" not in repr(config)
+    assert "identity-profile" not in repr(config)
 
 
 @pytest.mark.parametrize(

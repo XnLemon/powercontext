@@ -43,6 +43,8 @@ class WebConfig(BaseModel):
     harness_python: Path
     dataset_path: Path
     codex_binary: Path
+    tokensflow_binary: Path
+    tokensflow_user_home: Path = Field(exclude=True, repr=False)
     uv_binary: Path
     registry_binary: Path
     auth_json: Path = Field(exclude=True, repr=False)
@@ -67,6 +69,8 @@ class WebConfig(BaseModel):
         "harness_python",
         "dataset_path",
         "codex_binary",
+        "tokensflow_binary",
+        "tokensflow_user_home",
         "uv_binary",
         "registry_binary",
         "auth_json",
@@ -97,6 +101,8 @@ class WebConfig(BaseModel):
         dataset_path: Path | None = None,
         raw_sample_path: Path | None = None,
         codex_binary: Path | None = None,
+        tokensflow_binary: Path | None = None,
+        tokensflow_user_home: Path | None = None,
         uv_binary: Path | None = None,
         registry_binary: Path | None = None,
         auth_json: Path | None = None,
@@ -123,6 +129,8 @@ class WebConfig(BaseModel):
             or raw_sample_path
             or root / "cache" / "swebench-pro.git" / "helper_code" / "sweap_eval_full_v2.jsonl",
             codex_binary=codex_binary or root / "bin" / "codex",
+            tokensflow_binary=tokensflow_binary or root / "bin" / "tokensflow",
+            tokensflow_user_home=tokensflow_user_home or root / "tokensflow-home",
             uv_binary=uv_binary or root / "bin" / "uv",
             registry_binary=registry_binary or root / "bin" / "regctl",
             auth_json=auth_json or root / "codex-home" / "auth.json",
@@ -170,6 +178,8 @@ class WebConfig(BaseModel):
             harness_python=path("HARNESS_PYTHON"),
             dataset_path=path("DATASET_PATH") or path("RAW_SAMPLE_PATH"),
             codex_binary=path("CODEX_BINARY"),
+            tokensflow_binary=path("TOKENSFLOW_BINARY"),
+            tokensflow_user_home=path("TOKENSFLOW_USER_HOME"),
             uv_binary=path("UV_BINARY"),
             registry_binary=path("REGISTRY_BINARY"),
             auth_json=path("AUTH_JSON"),

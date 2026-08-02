@@ -83,6 +83,8 @@ class RunConfig:
     harness_root: Path
     harness_python: Path
     codex_binary: Path
+    tokensflow_binary: Path
+    tokensflow_user_home: Path
     uv_binary: Path
     registry_binary: Path
     auth_json: Path
@@ -364,6 +366,8 @@ class MinimalRunConfig:
     harness_python: Path
     raw_sample_path: Path
     codex_binary: Path
+    tokensflow_binary: Path
+    tokensflow_user_home: Path
     uv_binary: Path
     registry_binary: Path
     auth_json: Path
@@ -392,6 +396,8 @@ def run_minimal_swebench_pro(
             harness_root=config.harness_root,
             harness_python=config.harness_python,
             codex_binary=config.codex_binary,
+            tokensflow_binary=config.tokensflow_binary,
+            tokensflow_user_home=config.tokensflow_user_home,
             uv_binary=config.uv_binary,
             registry_binary=config.registry_binary,
             auth_json=config.auth_json,

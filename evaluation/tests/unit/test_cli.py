@@ -104,3 +104,5 @@ def test_swebench_pro_run_exposes_the_minimal_m0_command(monkeypatch) -> None:
     assert '"on_resolved": true' in result.output
     assert len(calls) == 1
     assert calls[0][1] is instance
+    assert calls[0][0].tokensflow_binary == Path("/data/powercontext-eval/bin/tokensflow")
+    assert calls[0][0].tokensflow_user_home == Path("/data/powercontext-eval/tokensflow-home")

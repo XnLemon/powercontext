@@ -79,6 +79,8 @@ def _config(
         harness_python=root / "venv/bin/python",
         raw_sample_path=root / "sample.jsonl",
         codex_binary=root / "bin/codex",
+        tokensflow_binary=root / "bin/tokensflow",
+        tokensflow_user_home=root / "tokensflow-profile",
         uv_binary=root / "bin/uv",
         auth_json=root / "codex/auth.json",
         proxy_url="http://127.0.0.1:7890",
@@ -635,6 +637,8 @@ def test_run_once_maps_config_phases_and_success(monkeypatch: pytest.MonkeyPatch
     assert mapped.harness_python == config.harness_python
     assert mapped.raw_sample_path == config.raw_sample_path
     assert mapped.codex_binary == config.codex_binary
+    assert mapped.tokensflow_binary == config.tokensflow_binary
+    assert mapped.tokensflow_user_home == config.tokensflow_user_home
     assert mapped.uv_binary == config.uv_binary
     assert mapped.auth_json == config.auth_json
     assert mapped.proxy_url == config.proxy_url
