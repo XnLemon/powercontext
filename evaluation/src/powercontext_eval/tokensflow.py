@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import shutil
 import stat
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from powercontext_eval.errors import PowerContextEvalError
@@ -13,6 +16,10 @@ from powercontext_eval.errors import PowerContextEvalError
 
 class UnsafeTokensFlowConfiguration(PowerContextEvalError):
     """A TokensFlow profile or destination is missing or unsafe."""
+
+
+class TokensFlowInfrastructureError(PowerContextEvalError):
+    """TokensFlow could not prove a safe pre-inference runtime."""
 
 
 @dataclass(frozen=True)
@@ -23,9 +30,103 @@ class TokensFlowSnapshot:
     credentials: Path
 
 
+@dataclass(frozen=True)
+class TokensFlowEvidence:
+    """Non-secret evidence for one arm's pre-inference TokensFlow gate."""
+
+    host_version: str
+    container_version: str
+    host_identity_sha256: str
+    container_identity_sha256: str
+    identity_bytes: int
+    identity_match: bool
+    identity_checked_at: str
+    daemon_started: bool
+    daemon_started_at: str
+
+    def as_dict(self) -> dict[str, str | int | bool]:
+        return {
+            "host_version": self.host_version,
+            "container_version": self.container_version,
+            "host_identity_sha256": self.host_identity_sha256,
+            "container_identity_sha256": self.container_identity_sha256,
+            "identity_bytes": self.identity_bytes,
+            "identity_match": self.identity_match,
+            "identity_checked_at": self.identity_checked_at,
+            "daemon_started": self.daemon_started,
+            "daemon_started_at": self.daemon_started_at,
+        }
+
+
+@dataclass(frozen=True)
+class TokensFlowDaemonHandle:
+    """Private lifecycle paths reserved for the later bounded drain."""
+
+    pid_file: Path
+    log_file: Path
+    container_pid_file: str
+    container_log_file: str
+
+
+_TOKENSFLOW_VERSION = re.compile(rb"(?i:tokensflow)(?:-cli)?\s+v?([0-9]+\.[0-9]+\.[0-9]+)")
+
+
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 _WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def normalize_tokensflow_identity(raw: bytes) -> bytes:
+    """Normalize only CRLF versus LF and one terminal line ending."""
+
+    normalized = raw.replace(b"\r\n", b"\n")
+    return normalized[:-1] if normalized.endswith(b"\n") else normalized
+
+
+def tokensflow_identity_sha256(raw: bytes) -> str:
+    """Hash normalized identity bytes without retaining their content."""
+
+    return hashlib.sha256(normalize_tokensflow_identity(raw)).hexdigest()
+
+
+def parse_tokensflow_version(raw: bytes) -> str:
+    """Return only the semantic version from a TokensFlow version response."""
+
+    normalized = normalize_tokensflow_identity(raw)
+    match = _TOKENSFLOW_VERSION.fullmatch(normalized)
+    if match is None:
+        raise TokensFlowInfrastructureError("TokensFlow version check failed")
+    return match.group(1).decode("ascii")
+
+
+def matched_tokensflow_evidence(
+    *,
+    host_version: str,
+    container_version: str,
+    host_identity: bytes,
+    container_identity: bytes,
+) -> TokensFlowEvidence:
+    """Build hash-only evidence or reject unequal normalized identities."""
+
+    normalized_host = normalize_tokensflow_identity(host_identity)
+    normalized_container = normalize_tokensflow_identity(container_identity)
+    host_hash = hashlib.sha256(normalized_host).hexdigest()
+    container_hash = hashlib.sha256(normalized_container).hexdigest()
+    if normalized_host != normalized_container:
+        raise TokensFlowInfrastructureError("TokensFlow identity did not match")
+    if host_version != container_version:
+        raise TokensFlowInfrastructureError("TokensFlow version did not match")
+    return TokensFlowEvidence(
+        host_version=host_version,
+        container_version=container_version,
+        host_identity_sha256=host_hash,
+        container_identity_sha256=container_hash,
+        identity_bytes=len(normalized_host),
+        identity_match=True,
+        identity_checked_at=datetime.now(UTC).isoformat(),
+        daemon_started=False,
+        daemon_started_at="",
+    )
 
 
 def _require_safe_absolute_path(path: Path) -> None:

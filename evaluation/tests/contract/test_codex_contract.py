@@ -264,17 +264,49 @@ def make_paths(tmp_path: Path) -> ArmPaths:
     runtime = tmp_path / "ephemeral" / "runtime"
     codex_home = runtime / "codex-home"
     pc_home = runtime / "pc-home"
+    tokensflow_home = runtime / "tokensflow-home"
     for path in (source, auth.parent):
         path.mkdir(parents=True, exist_ok=True)
     auth.write_text('{"token":"fixture-secret"}')
     os.chmod(auth, 0o600)
-    return ArmPaths(source, auth, workspace, runtime, codex_home, pc_home, tmp_path / "results")
+    return ArmPaths(
+        source=source,
+        auth_source=auth,
+        workspace=workspace,
+        runtime=runtime,
+        codex_home=codex_home,
+        pc_home=pc_home,
+        result_root=tmp_path / "results",
+        tokensflow_home=tokensflow_home,
+    )
 
 
 class TranscriptDocker:
-    def __init__(self, *, fail_at: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_at: str | None = None,
+        host_identity: bytes = b"fixture-person\n",
+        container_identity: bytes | None = None,
+        host_tokensflow_version: bytes = b"tokensflow 1.0.16\n",
+        container_tokensflow_version: bytes | None = None,
+    ) -> None:
         self.commands: list[tuple[str, ...]] = []
         self.fail_at = fail_at
+        self.host_identity = host_identity
+        self.container_identity = container_identity if container_identity is not None else host_identity
+        self.host_tokensflow_version = host_tokensflow_version
+        self.container_tokensflow_version = (
+            container_tokensflow_version if container_tokensflow_version is not None else host_tokensflow_version
+        )
+
+    @staticmethod
+    def _output(payload: bytes, kwargs: dict[str, object]) -> CommandResult:
+        sink = kwargs.get("stdout_sink")
+        if sink is not None:
+            cast(BinaryIO, sink).write(payload)
+            return command_result("")
+        return command_result(payload.decode("utf-8"))
 
     def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
         cwd = Path(cast(str | Path, kwargs.get("cwd", "/workspace")))
@@ -285,6 +317,12 @@ class TranscriptDocker:
             return command_result("a" * 40 + "\n")
         if argv[:2] == ("git", "status"):
             return command_result("")
+        if argv[-1:] == ("whoami",) and any(part.endswith("/tokensflow") for part in argv):
+            identity = self.container_identity if argv[0] == "docker" else self.host_identity
+            return self._output(identity, kwargs)
+        if argv[-1:] == ("--version",) and any(part.endswith("/tokensflow") for part in argv):
+            version = self.container_tokensflow_version if argv[0] == "docker" else self.host_tokensflow_version
+            return self._output(version, kwargs)
         if argv[-3:-1] == ("network", "inspect"):
             return command_result('[{"IPAM":{"Config":[{"Gateway":"172.29.0.1"}]}}]')
         if "plugin" in argv and "list" in argv:
@@ -354,6 +392,9 @@ def sut_config(tmp_path: Path) -> SutConfig:
     manifest.write_text(json.dumps({"name": "powercontext", "version": "0.1.0"}))
     lock = tmp_path / "source/integrations/codex/plugins/powercontext/uv.lock"
     lock.write_text("version = 1\n")
+    tokensflow_binary = tmp_path / "tokensflow"
+    tokensflow_binary.write_text("binary")
+    tokensflow_binary.chmod(0o755)
     return SutConfig(
         run_id="run-1",
         task_image="jefzda/sweap-images:fixture",
@@ -363,6 +404,7 @@ def sut_config(tmp_path: Path) -> SutConfig:
         plugin_checkout_sha="a" * 40,
         proxy=ProxyRelayConfig("http://127.0.0.1:7890"),
         limits=ContainerLimits(cpus="2", memory="4g", pids=256),
+        tokensflow_binary=tokensflow_binary,
     )
 
 
@@ -446,6 +488,7 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
                 "/source",
                 "/evaluation",
                 "/tools/codex-dir",
+                "/tools/tokensflow-dir",
                 "/tools/uv-dir",
                 "/auth",
             )
@@ -494,6 +537,218 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
         assert chown[-4:] == ("--recursive", "2950:100", "/workspace", "/runtime")
     else:
         assert all((path.stat().st_uid, path.stat().st_gid) == (2950, 100) for path in (paths.workspace, paths.runtime))
+
+
+def _is_codex_inference(command: tuple[str, ...]) -> bool:
+    return any(
+        index + 1 < len(command) and command[index + 1] == "exec"
+        for index, part in enumerate(command)
+        if part.endswith("/codex")
+    )
+
+
+def _is_tokensflow(command: tuple[str, ...], action: str) -> bool:
+    return any("/tools/tokensflow-dir/tokensflow" in part for part in command) and any(
+        action in part for part in command
+    )
+
+
+def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemon(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    docker = TranscriptDocker(host_identity=b"fixture-person\r\n", container_identity=b"fixture-person\n")
+
+    outcome = DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config,
+        Arm.ON,
+        paths,
+        b"prompt",
+        ArtifactStore(paths.result_root),
+    )
+
+    task = next(command for command in docker.commands if command[:3] == ("docker", "run", "-d"))
+    mounts = [task[index + 1] for index, value in enumerate(task) if value == "--mount"]
+    assert f"type=bind,src={config.tokensflow_binary.resolve().parent},dst=/tools/tokensflow-dir,readonly" in mounts
+    assert "HOME=/runtime/tokensflow-home" in task
+    assert "CODEX_HOME=/runtime/codex-home" in task
+
+    host_whoami_index = next(
+        index
+        for index, command in enumerate(docker.commands)
+        if command == (os.fspath(config.tokensflow_binary), "whoami")
+    )
+    container_whoami_index = next(
+        index
+        for index, command in enumerate(docker.commands)
+        if command[-2:] == ("/tools/tokensflow-dir/tokensflow", "whoami")
+    )
+    daemon_entries = [
+        (index, command)
+        for index, command in enumerate(docker.commands)
+        if command[:3] == ("docker", "exec", "-d") and _is_tokensflow(command, "daemon")
+    ]
+    assert len(daemon_entries) == 1
+    daemon_index, daemon = daemon_entries[0]
+    codex_index = next(index for index, command in enumerate(docker.commands) if _is_codex_inference(command))
+    assert host_whoami_index < container_whoami_index < daemon_index < codex_index
+    assert "HOME=/runtime/tokensflow-home" in daemon
+    assert "CODEX_HOME=/runtime/codex-home" in daemon
+    assert "evaluation-daemon.pid" in " ".join(daemon)
+    assert "evaluation-daemon.log" in " ".join(daemon)
+
+    tokensflow = outcome.tokensflow
+    assert tokensflow.host_version == "1.0.16"
+    assert tokensflow.container_version == "1.0.16"
+    assert tokensflow.identity_match is True
+    assert tokensflow.identity_bytes == len(b"fixture-person")
+    assert tokensflow.host_identity_sha256 == tokensflow.container_identity_sha256
+    assert tokensflow.daemon_started is True
+    retained = (paths.result_root / "tokensflow/provenance.json").read_text()
+    assert "fixture-person" not in retained
+    assert "tokensflow 1.0.16" not in retained
+
+
+@pytest.mark.parametrize(
+    ("host_identity", "container_identity"),
+    [
+        (b"line-one\r\nline-two\r\n", b"line-one\nline-two\n"),
+        (b"same", b"same\n"),
+    ],
+)
+def test_tokensflow_identity_normalizes_only_line_endings_and_terminal_newline(
+    tmp_path: Path,
+    host_identity: bytes,
+    container_identity: bytes,
+) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    outcome = DockerSut(
+        TranscriptDocker(host_identity=host_identity, container_identity=container_identity),
+        relay_factory=FakeRelay,
+    ).run_arm(config, Arm.OFF, paths, b"prompt", ArtifactStore(paths.result_root))
+
+    assert outcome.tokensflow.identity_match is True
+
+
+@pytest.mark.parametrize(
+    ("host_identity", "container_identity"),
+    [
+        (b"person-a\n", b"person-b\n"),
+        (b"same value\n", b"same value \n"),
+        (b"same\rbyte\n", b"same\nbyte\n"),
+    ],
+)
+def test_tokensflow_identity_mismatch_is_sanitized_and_blocks_codex(
+    tmp_path: Path,
+    host_identity: bytes,
+    container_identity: bytes,
+) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    docker = TranscriptDocker(host_identity=host_identity, container_identity=container_identity)
+
+    with pytest.raises(Exception, match="identity did not match") as captured:
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            config,
+            Arm.ON,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root),
+        )
+
+    assert type(captured.value).__name__ == "TokensFlowInfrastructureError"
+    serialized_error = repr(captured.value) + str(captured.value)
+    for identity in (host_identity, container_identity):
+        text_identity = identity.decode("utf-8")
+        assert text_identity.strip() not in serialized_error
+        assert all(identity.strip() not in path.read_bytes() for path in paths.result_root.rglob("*") if path.is_file())
+    assert not any(_is_codex_inference(command) for command in docker.commands)
+    assert not any(_is_tokensflow(command, "daemon") for command in docker.commands)
+
+
+def test_tokensflow_homes_and_daemon_pid_files_are_distinct_across_arms_and_runs(tmp_path: Path) -> None:
+    homes: list[Path] = []
+    pid_files: list[Path] = []
+
+    for run_id in ("parallel-run-a", "parallel-run-b"):
+        root = tmp_path / run_id
+        off_paths = make_paths(root / "off")
+        on_paths = make_paths(root / "on")
+        config = replace(sut_config(root), run_id=run_id)
+        config.codex_binary.write_text("binary")
+        config.uv_binary.write_text("binary")
+        docker = TranscriptDocker()
+
+        outcomes = DockerSut(docker, relay_factory=FakeRelay).run_pair(
+            config,
+            paths={Arm.OFF: off_paths, Arm.ON: on_paths},
+            prompts={Arm.OFF: b"same", Arm.ON: b"same"},
+            stores={
+                Arm.OFF: ArtifactStore(off_paths.result_root),
+                Arm.ON: ArtifactStore(on_paths.result_root),
+            },
+        )
+
+        assert (
+            sum(
+                command[:3] == ("docker", "exec", "-d") and _is_tokensflow(command, "daemon")
+                for command in docker.commands
+            )
+            == 2
+        )
+        for arm, paths in ((Arm.OFF, off_paths), (Arm.ON, on_paths)):
+            homes.append(paths.tokensflow_home)
+            pid_files.append(outcomes[arm].tokensflow_daemon.pid_file)
+
+    assert len({path.resolve(strict=False) for path in homes}) == 4
+    assert len({path.resolve(strict=False) for path in pid_files}) == 4
+    assert all(pid_file.is_relative_to(home) for pid_file, home in zip(pid_files, homes, strict=True))
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["non-executable", "unsafe-name", "unsafe-path", "malformed-version", "version-mismatch", "whoami-failed"],
+)
+def test_tokensflow_configuration_or_execution_failure_blocks_codex(tmp_path: Path, failure: str) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    docker = TranscriptDocker(
+        fail_at="whoami" if failure == "whoami-failed" else None,
+        host_tokensflow_version=b"not-a-version\n" if failure == "malformed-version" else b"tokensflow 1.0.16\n",
+        container_tokensflow_version=b"tokensflow 9.9.9\n" if failure == "version-mismatch" else None,
+    )
+    if failure == "non-executable":
+        config.tokensflow_binary.chmod(0o600)
+    elif failure == "unsafe-name":
+        unexpected = tmp_path / "unexpected-tool"
+        unexpected.write_text("binary")
+        unexpected.chmod(0o755)
+        object.__setattr__(config, "tokensflow_binary", unexpected)
+    elif failure == "unsafe-path":
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        object.__setattr__(config, "tokensflow_binary", nested / ".." / "tokensflow")
+
+    with pytest.raises(Exception) as captured:
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            config,
+            Arm.ON,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root),
+        )
+
+    assert type(captured.value).__name__ in {"TokensFlowInfrastructureError", "UnsafeSutConfiguration"}
+    assert not any(_is_codex_inference(command) for command in docker.commands)
 
 
 def test_distinct_run_ids_derive_distinct_runtime_network_and_scope(tmp_path: Path) -> None:

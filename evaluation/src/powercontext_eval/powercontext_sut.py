@@ -13,10 +13,12 @@ import signal
 import socket
 import stat
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote, quote_plus, urlsplit
@@ -32,6 +34,13 @@ from powercontext_eval.codex import (
 from powercontext_eval.errors import CommandError, CommandFailed, CommandTimedOut, PowerContextEvalError
 from powercontext_eval.models import Arm
 from powercontext_eval.process import CommandResult, ProcessRunner
+from powercontext_eval.tokensflow import (
+    TokensFlowDaemonHandle,
+    TokensFlowEvidence,
+    TokensFlowInfrastructureError,
+    matched_tokensflow_evidence,
+    parse_tokensflow_version,
+)
 
 PLUGIN_ID = "powercontext@powercontext"
 _SAFE_RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
@@ -39,6 +48,7 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 _INVALID_DOCKER_COPY_SYMLINK = re.compile(r'invalid symlink "[^"\r\n]+" -> "[^"\r\n]+"')
 _CONTAINER_UID_GID = "2950:100"
 _CONTAINER_CODEX = "/tools/codex-dir/codex"
+_CONTAINER_TOKENSFLOW = "/tools/tokensflow-dir/tokensflow"
 _CONTAINER_UV = "/tools/uv-dir/uv"
 _CONTAINER_RECORDER = "/evaluation/record_codex_jsonl.py"
 _CONTAINER_UV_PYTHON_INSTALL_DIR = "/runtime/uv-python"
@@ -298,6 +308,7 @@ class SutConfig:
     limits: ContainerLimits = ContainerLimits()
     plugin_version: str = "0.1.0"
     codex_timeout: float = 3600
+    tokensflow_binary: Path | None = None
 
     def __post_init__(self) -> None:
         if _SAFE_RUN_ID.fullmatch(self.run_id) is None:
@@ -313,6 +324,10 @@ class SutConfig:
         for path in (self.codex_binary, self.uv_binary, self.source_checkout, self.recorder_script):
             if not path.is_absolute() or "\0" in os.fspath(path):
                 raise UnsafeSutConfiguration("SUT paths must be absolute")
+        if self.tokensflow_binary is not None and (
+            not self.tokensflow_binary.is_absolute() or "\0" in os.fspath(self.tokensflow_binary)
+        ):
+            raise UnsafeSutConfiguration("SUT paths must be absolute")
         try:
             recorder_metadata = self.recorder_script.stat(follow_symlinks=False)
         except OSError as error:
@@ -334,6 +349,7 @@ class ArmPaths:
     codex_home: Path
     pc_home: Path
     result_root: Path
+    tokensflow_home: Path | None = None
 
     def __post_init__(self) -> None:
         paths = (
@@ -351,15 +367,30 @@ class ArmPaths:
             raise UnsafeSutConfiguration("Private homes must remain outside retained results")
         if not self.codex_home.is_relative_to(self.runtime) or not self.pc_home.is_relative_to(self.runtime):
             raise UnsafeSutConfiguration("Private homes must remain within the ephemeral runtime")
+        if self.tokensflow_home is not None:
+            if not self.tokensflow_home.is_absolute():
+                raise UnsafeSutConfiguration("Arm paths must be absolute")
+            if self.tokensflow_home.is_relative_to(self.result_root):
+                raise UnsafeSutConfiguration("Private homes must remain outside retained results")
+            if not self.tokensflow_home.is_relative_to(self.runtime):
+                raise UnsafeSutConfiguration("Private homes must remain within the ephemeral runtime")
 
     def prepare(self) -> None:
-        for root in (self.workspace, self.runtime):
-            try:
-                root.mkdir(parents=True, exist_ok=False, mode=0o700)
-            except FileExistsError as error:
-                raise UnsafeSutConfiguration("Arm workspace and runtime must be fresh") from error
-            if root.is_symlink():
-                raise UnsafeSutConfiguration("Arm workspace and runtime must be fresh directories")
+        try:
+            self.workspace.mkdir(parents=True, exist_ok=False, mode=0o700)
+        except FileExistsError as error:
+            raise UnsafeSutConfiguration("Arm workspace and runtime must be fresh") from error
+        if self.workspace.is_symlink():
+            raise UnsafeSutConfiguration("Arm workspace and runtime must be fresh directories")
+        try:
+            self.runtime.mkdir(parents=True, exist_ok=False, mode=0o700)
+        except FileExistsError as error:
+            if self.runtime.is_symlink() or not self.runtime.is_dir() or self.tokensflow_home is None:
+                raise UnsafeSutConfiguration("Arm workspace and runtime must be fresh directories") from error
+            if self.tokensflow_home.parent != self.runtime or set(self.runtime.iterdir()) != {self.tokensflow_home}:
+                raise UnsafeSutConfiguration("Arm runtime must be fresh except for the private TokensFlow home")
+        if self.runtime.is_symlink():
+            raise UnsafeSutConfiguration("Arm workspace and runtime must be fresh directories")
         for path in (self.codex_home, self.pc_home):
             path.mkdir(mode=0o700)
 
@@ -471,6 +502,8 @@ class SocatProxyRelay:
 class SutOutcome:
     codex: CodexOutcome
     evidence: TreatmentEvidence
+    tokensflow: TokensFlowEvidence
+    tokensflow_daemon: TokensFlowDaemonHandle
 
 
 class _DockerExecRunner(ProcessRunner):
@@ -574,6 +607,7 @@ class DockerSut:
         store: ArtifactStore,
     ) -> SutOutcome:
         source_provenance = self._verify_source(config)
+        self._validate_tokensflow_inputs(config, paths)
         with self._run_network(config, config.source_checkout) as (network, relay_url):
             return self._execute_arm(config, arm, paths, prompt, store, network, relay_url, source_provenance)
 
@@ -596,6 +630,8 @@ class DockerSut:
         ):
             raise UnsafeSutConfiguration("OFF and ON must use distinct fresh roots")
         source_provenance = self._verify_source(config)
+        for arm in (Arm.OFF, Arm.ON):
+            self._validate_tokensflow_inputs(config, paths[arm])
         with self._run_network(config, config.source_checkout) as (network, relay_url):
             outcomes: dict[Arm, SutOutcome] = {}
             for arm in (Arm.OFF, Arm.ON):
@@ -674,6 +710,14 @@ class DockerSut:
             self._verify_codex_version(container, paths, store)
             self._readiness(container, paths)
             plugin = self._plugin_list(container, paths)
+            tokensflow = self._tokensflow_identity_gate(config, container, paths, relay_url)
+            tokensflow_daemon = self._start_tokensflow_daemon(config, container, paths, relay_url)
+            tokensflow = replace(
+                tokensflow,
+                daemon_started=True,
+                daemon_started_at=datetime.now(UTC).isoformat(),
+            )
+            store.write_json("tokensflow/provenance.json", tokensflow.as_dict())
             codex = CodexRunner(_DockerExecRunner(self._docker, container)).run(
                 CodexInvocation(
                     arm,
@@ -741,7 +785,7 @@ class DockerSut:
             ).encode("utf-8")
             _reject_retained_secrets(provenance_bytes, credential_variants)
             store.write_bytes("powercontext/provenance.json", provenance_bytes)
-            return SutOutcome(codex, evidence)
+            return SutOutcome(codex, evidence, tokensflow, tokensflow_daemon)
         finally:
             if container_started:
                 self._docker.run(
@@ -750,6 +794,172 @@ class DockerSut:
                     timeout=30,
                     check=False,
                 )
+
+    @staticmethod
+    def _validate_tokensflow_inputs(config: SutConfig, paths: ArmPaths) -> tuple[Path, Path]:
+        if config.tokensflow_binary is None or paths.tokensflow_home is None:
+            raise UnsafeSutConfiguration("TokensFlow inputs must be configured")
+        _tool_directory_mount(
+            config.tokensflow_binary,
+            "/tools/tokensflow-dir",
+            expected_name="tokensflow",
+            require_executable=True,
+        )
+        return config.tokensflow_binary, paths.tokensflow_home
+
+    def _capture_tokensflow_output(
+        self,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str] | None = None,
+        timeout: float = 30,
+    ) -> bytes:
+        try:
+            with tempfile.TemporaryFile() as sink:
+                result = self._docker.run(
+                    argv,
+                    cwd=cwd,
+                    timeout=timeout,
+                    env=environment,
+                    check=False,
+                    stdout_sink=sink,
+                )
+                sink.seek(0)
+                output = sink.read()
+        except (CommandError, OSError) as error:
+            del error
+            raise TokensFlowInfrastructureError("TokensFlow command failed") from None
+        if result.returncode != 0:
+            raise TokensFlowInfrastructureError("TokensFlow command failed")
+        return output
+
+    def _tokensflow_identity_gate(
+        self,
+        config: SutConfig,
+        container: str,
+        paths: ArmPaths,
+        relay_url: str,
+    ) -> TokensFlowEvidence:
+        tokensflow_binary, tokensflow_home = self._validate_tokensflow_inputs(config, paths)
+        host_environment = {"HOME": os.fspath(tokensflow_home)}
+        container_environment = {
+            **loopback_proxy_environment(relay_url),
+            "HOME": "/runtime/tokensflow-home",
+            "CODEX_HOME": "/runtime/codex-home",
+        }
+        host_version = parse_tokensflow_version(
+            self._capture_tokensflow_output(
+                (os.fspath(tokensflow_binary), "--version"),
+                cwd=paths.runtime,
+                environment=host_environment,
+            )
+        )
+        container_version = parse_tokensflow_version(
+            self._capture_tokensflow_output(
+                (
+                    "docker",
+                    "exec",
+                    *_docker_env_args(container_environment),
+                    container,
+                    _CONTAINER_TOKENSFLOW,
+                    "--version",
+                ),
+                cwd=paths.runtime,
+            )
+        )
+        host_identity = self._capture_tokensflow_output(
+            (os.fspath(tokensflow_binary), "whoami"),
+            cwd=paths.runtime,
+            environment=host_environment,
+        )
+        container_identity = self._capture_tokensflow_output(
+            (
+                "docker",
+                "exec",
+                *_docker_env_args(container_environment),
+                container,
+                _CONTAINER_TOKENSFLOW,
+                "whoami",
+            ),
+            cwd=paths.runtime,
+        )
+        return matched_tokensflow_evidence(
+            host_version=host_version,
+            container_version=container_version,
+            host_identity=host_identity,
+            container_identity=container_identity,
+        )
+
+    def _start_tokensflow_daemon(
+        self,
+        config: SutConfig,
+        container: str,
+        paths: ArmPaths,
+        relay_url: str,
+    ) -> TokensFlowDaemonHandle:
+        _, tokensflow_home = self._validate_tokensflow_inputs(config, paths)
+        state = "/runtime/tokensflow-home/.local/share/tokensflow"
+        container_pid_file = f"{state}/evaluation-daemon.pid"
+        container_log_file = f"{state}/evaluation-daemon.log"
+        environment = {
+            **loopback_proxy_environment(relay_url),
+            "HOME": "/runtime/tokensflow-home",
+            "CODEX_HOME": "/runtime/codex-home",
+        }
+        script = (
+            f'umask 077; echo "$$" > {container_pid_file}; '
+            f"exec {_CONTAINER_TOKENSFLOW} daemon >> {container_log_file} 2>&1"
+        )
+        try:
+            self._docker.run(
+                (
+                    "docker",
+                    "exec",
+                    "-d",
+                    *_docker_env_args(environment),
+                    container,
+                    "/bin/sh",
+                    "-c",
+                    script,
+                ),
+                cwd=paths.runtime,
+                timeout=30,
+            )
+        except (CommandError, OSError) as error:
+            del error
+            raise TokensFlowInfrastructureError("TokensFlow daemon failed to start") from None
+        readiness_command = (
+            "docker",
+            "exec",
+            container,
+            "/bin/sh",
+            "-c",
+            f'test -s {container_pid_file} && kill -0 "$(cat {container_pid_file})"',
+        )
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                readiness = self._docker.run(
+                    readiness_command,
+                    cwd=paths.runtime,
+                    timeout=min(1.0, max(0.1, deadline - time.monotonic())),
+                    check=False,
+                )
+            except (CommandError, OSError):
+                readiness = None
+            if readiness is not None and readiness.returncode == 0:
+                break
+            if time.monotonic() >= deadline:
+                raise TokensFlowInfrastructureError("TokensFlow daemon failed to start")
+            time.sleep(0.05)
+        host_state = tokensflow_home / ".local/share/tokensflow"
+        return TokensFlowDaemonHandle(
+            pid_file=host_state / "evaluation-daemon.pid",
+            log_file=host_state / "evaluation-daemon.log",
+            container_pid_file=container_pid_file,
+            container_log_file=container_log_file,
+        )
 
     def _initialize_workspace(self, config: SutConfig, arm: Arm, paths: ArmPaths) -> None:
         name = f"powercontext-eval-{config.run_id}-{arm.value}-init"
@@ -934,7 +1144,7 @@ class DockerSut:
             "--mount",
             f"type=bind,src={paths.runtime},dst=/runtime",
             "--mount",
-            _tool_directory_mount(config.uv_binary, "/tools/uv-dir"),
+            _tool_directory_mount(config.uv_binary, "/tools/uv-dir", expected_name="uv"),
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=512m",
             *_docker_env_args({**common_environment, "UV_PROJECT_ENVIRONMENT": "/runtime/pc-env"}),
@@ -976,7 +1186,7 @@ class DockerSut:
                 "--mount",
                 f"type=bind,src={paths.runtime},dst=/runtime",
                 "--mount",
-                _tool_directory_mount(config.uv_binary, "/tools/uv-dir"),
+                _tool_directory_mount(config.uv_binary, "/tools/uv-dir", expected_name="uv"),
                 "--tmpfs",
                 "/tmp:rw,noexec,nosuid,size=256m",
                 *_docker_env_args({**common_environment, "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env"}),
@@ -1016,7 +1226,7 @@ class DockerSut:
             "--mount",
             f"type=bind,src={paths.runtime},dst=/runtime",
             "--mount",
-            _tool_directory_mount(config.codex_binary, "/tools/codex-dir"),
+            _tool_directory_mount(config.codex_binary, "/tools/codex-dir", expected_name="codex"),
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=256m",
             *_docker_env_args(
@@ -1061,6 +1271,7 @@ class DockerSut:
         auth: Path,
     ) -> None:
         scope = f"eval:{config.run_id}:{arm.value}"
+        tokensflow_binary, _tokensflow_home = self._validate_tokensflow_inputs(config, paths)
         command = (
             "docker",
             "run",
@@ -1097,9 +1308,11 @@ class DockerSut:
                 f"dst={_CONTAINER_RECORDER},readonly"
             ),
             "--mount",
-            _tool_directory_mount(config.codex_binary, "/tools/codex-dir"),
+            _tool_directory_mount(config.codex_binary, "/tools/codex-dir", expected_name="codex"),
             "--mount",
-            _tool_directory_mount(config.uv_binary, "/tools/uv-dir"),
+            _tool_directory_mount(tokensflow_binary, "/tools/tokensflow-dir", expected_name="tokensflow"),
+            "--mount",
+            _tool_directory_mount(config.uv_binary, "/tools/uv-dir", expected_name="uv"),
             "--mount",
             f"type=bind,src={auth},dst=/runtime/codex-home/auth.json,readonly",
             "--tmpfs",
@@ -1107,6 +1320,7 @@ class DockerSut:
             *_docker_env_args(
                 {
                     **loopback_proxy_environment(relay_url),
+                    "HOME": "/runtime/tokensflow-home",
                     "CODEX_HOME": "/runtime/codex-home",
                     "POWERCONTEXT_HOME": "/runtime/pc-home",
                     "POWERCONTEXT_CODEX_SCOPE_ID": scope,
@@ -1115,7 +1329,7 @@ class DockerSut:
                     "UV_PYTHON_INSTALL_DIR": _CONTAINER_UV_PYTHON_INSTALL_DIR,
                     "UV_OFFLINE": "1",
                     "PATH": (
-                        "/tools/uv-dir:/tools/codex-dir:/runtime/pc-env/bin:"
+                        "/tools/uv-dir:/tools/codex-dir:/tools/tokensflow-dir:/runtime/pc-env/bin:"
                         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                     ),
                 }
@@ -1273,10 +1487,25 @@ def _docker_env_args(environment: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(part for key, value in environment.items() for part in ("-e", f"{key}={value}"))
 
 
-def _tool_directory_mount(binary: Path, destination: str) -> str:
-    resolved = binary.resolve(strict=True)
-    if resolved.name not in {"codex", "uv"}:
-        raise UnsafeSutConfiguration("Tool binary has an unexpected name")
+def _tool_directory_mount(
+    binary: Path,
+    destination: str,
+    *,
+    expected_name: str,
+    require_executable: bool = False,
+) -> str:
+    raw = os.fspath(binary)
+    if not binary.is_absolute() or "\0" in raw or ".." in binary.parts:
+        raise UnsafeSutConfiguration("Tool binary path is unsafe")
+    try:
+        resolved = binary.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as error:
+        raise UnsafeSutConfiguration("Tool binary path is unsafe") from error
+    if resolved.name != expected_name or not stat.S_ISREG(metadata.st_mode):
+        raise UnsafeSutConfiguration("Tool binary has an unexpected name or type")
+    if require_executable and not os.access(resolved, os.X_OK):
+        raise UnsafeSutConfiguration("Tool binary is not executable")
     return f"type=bind,src={resolved.parent},dst={destination},readonly"
 
 

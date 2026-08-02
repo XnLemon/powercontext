@@ -245,6 +245,7 @@ def _run_swebench_pro_instance(
                 codex_home=runtime / "codex-home",
                 pc_home=runtime / "pc-home",
                 result_root=layout.arm_artifacts(arm),
+                tokensflow_home=tokensflow.user_home,
             )
             secrets = codex_secrets + tokensflow_secret_variants(tokensflow.credentials)
             stores[arm] = ArtifactStore(layout.arm_artifacts(arm), forbidden_values=secrets)
@@ -258,6 +259,7 @@ def _run_swebench_pro_instance(
                 source_checkout=materialized,
                 plugin_checkout_sha=resolved.sha,
                 proxy=ProxyRelayConfig(config.proxy_url),
+                tokensflow_binary=config.tokensflow_binary,
             ),
             paths=arm_paths,
             prompts={Arm.OFF: prompt, Arm.ON: prompt},
