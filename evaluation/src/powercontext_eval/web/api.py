@@ -446,9 +446,7 @@ def create_app(
     @app.post("/api/batches")
     def create_batch(request: BatchCreate) -> Response:
         try:
-            replay = task_store.find_batch_replay(request, admit_model=config.accepts_codex_model)
-        except TaskAdmissionRejected:
-            return _error(422, "invalid_request", "The evaluation request is invalid.")
+            replay = task_store.find_batch_replay(request)
         except TaskConflict:
             return _error(409, "idempotency_conflict", "The idempotency key belongs to a different request.")
         if replay is not None:
@@ -844,9 +842,7 @@ def create_app(
     @app.post("/api/tasks")
     def create_task(task: TaskCreate) -> Response:
         try:
-            replay = task_store.find_task_replay(task, admit_model=config.accepts_codex_model)
-        except TaskAdmissionRejected:
-            return _error(422, "invalid_request", "The evaluation request is invalid.")
+            replay = task_store.find_task_replay(task)
         except TaskConflict:
             return _error(409, "idempotency_conflict", "The idempotency key belongs to a different request.")
         if replay is not None:

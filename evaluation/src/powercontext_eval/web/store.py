@@ -423,23 +423,16 @@ class TaskStore:
             )
             return self._batch_record(connection, self._select_batch(connection, batch_id)), True
 
-    def find_batch_replay(
-        self,
-        request: BatchCreate,
-        *,
-        admit_model: Callable[[str], bool] | None = None,
-    ) -> BatchRecord | None:
-        """Serialize replay lookup and admission before expensive batch preparation."""
+    def find_batch_replay(self, request: BatchCreate) -> BatchRecord | None:
+        """Return only an existing exact replay before expensive batch preparation."""
 
         request_json = request.model_dump_json()
-        with self._write() as connection:
+        with self._connection() as connection:
             existing = connection.execute(
                 "SELECT * FROM batches WHERE idempotency_key = ?",
                 (request.idempotency_key,),
             ).fetchone()
             if existing is None:
-                if admit_model is not None and not admit_model(request.model):
-                    raise TaskAdmissionRejected("The requested model is not admitted for new work")
                 return None
             self._require_idempotent_request(existing["request_json"], request_json)
             return self._batch_record(connection, existing)
@@ -860,23 +853,16 @@ class TaskStore:
             row = self._select_task(connection, task_id)
             return self._record(connection, row), True
 
-    def find_task_replay(
-        self,
-        request: TaskCreate,
-        *,
-        admit_model: Callable[[str], bool] | None = None,
-    ) -> TaskRecord | None:
-        """Serialize replay lookup and admission before creating a task."""
+    def find_task_replay(self, request: TaskCreate) -> TaskRecord | None:
+        """Return only an existing exact replay before creating a task."""
 
         request_json = request.model_dump_json()
-        with self._write() as connection:
+        with self._connection() as connection:
             existing = connection.execute(
                 "SELECT * FROM tasks WHERE idempotency_key = ?",
                 (request.idempotency_key,),
             ).fetchone()
             if existing is None:
-                if admit_model is not None and not admit_model(request.model):
-                    raise TaskAdmissionRejected("The requested model is not admitted for new work")
                 return None
             self._require_idempotent_request(existing["request_json"], request_json)
             return self._record(connection, existing)

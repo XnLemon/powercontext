@@ -132,7 +132,37 @@ def test_capabilities_and_new_task_inputs_share_the_configured_model_allowlist(
     assert task.status_code == 201
 
 
-def test_unconfigured_and_malicious_models_are_rejected_for_all_new_api_inputs(client: TestClient) -> None:
+@pytest.mark.parametrize("endpoint", ["/api/batches", "/api/tasks"])
+def test_new_api_submission_runs_model_admission_exactly_once(
+    endpoint: str,
+    config: WebConfig,
+    store: TaskStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admission_calls = 0
+
+    def accept(_config: WebConfig, model: str) -> bool:
+        nonlocal admission_calls
+        admission_calls += 1
+        return model == "gpt-5.6-sol"
+
+    monkeypatch.setattr(WebConfig, "accepts_codex_model", accept)
+    client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
+    request = (
+        _batch_payload("single-admission-batch") if endpoint.endswith("batches") else payload("single-admission-task")
+    )
+
+    response = client.post(endpoint, json=request)
+
+    assert response.status_code == 201
+    assert admission_calls == 1
+
+
+def test_unconfigured_and_malicious_models_are_rejected_for_all_new_api_inputs(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
     for model in ("gpt-5.6-luna", "unsafe model"):
         assert (
             client.post(
