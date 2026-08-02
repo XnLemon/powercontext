@@ -828,6 +828,31 @@ def test_tokensflow_dynamic_environment_reaches_every_lifecycle_command_without_
         ArtifactStore(paths.result_root),
     )
 
+    container_argv, container_kwargs = next(
+        (argv, kwargs) for argv, kwargs in docker.calls if argv[:3] == ("docker", "run", "-d")
+    )
+    inherited_names = {
+        container_argv[index + 1]
+        for index, part in enumerate(container_argv[:-1])
+        if part == "--env" and "=" not in container_argv[index + 1]
+    }
+    assert {"TOKENSFLOW_API_URL", "TOKENSFLOW_PROFILE"} <= inherited_names
+    container_process_environment = cast(dict[str, str], container_kwargs["env"])
+    assert container_process_environment["TOKENSFLOW_API_URL"] == endpoint
+    assert container_process_environment["TOKENSFLOW_PROFILE"] == profile
+    assert "TOKENSFLOW_ACCESS_TOKEN" not in container_process_environment
+    container_secrets = cast(Sequence[str], container_kwargs["secrets"])
+    assert endpoint in container_secrets
+    assert profile in container_secrets
+    serialized_container_argv = "\n".join(container_argv)
+    assert endpoint not in serialized_container_argv
+    assert profile not in serialized_container_argv
+    assert blocked not in serialized_container_argv
+    assert "TOKENSFLOW_ACCESS_TOKEN" not in serialized_container_argv
+    assert "HOME=/runtime/tokensflow-home" in container_argv
+    assert "POWERCONTEXT_EVAL_TOKENSFLOW_REAL_BINARY=/tools/tokensflow-dir/tokensflow" in container_argv
+    assert "HTTP_PROXY=http://172.29.0.1:17890" in container_argv
+
     lifecycle_calls = [
         (argv, kwargs)
         for argv, kwargs in docker.calls
@@ -871,6 +896,119 @@ def test_tokensflow_dynamic_environment_reaches_every_lifecycle_command_without_
     assert endpoint.encode() not in retained
     assert profile.encode() not in retained
     assert blocked.encode() not in retained
+
+    switched_endpoint = "tf-runtime-endpoint-switched"
+    switched_profile = "tf-runtime-profile-switched"
+    monkeypatch.setenv("TOKENSFLOW_API_URL", switched_endpoint)
+    monkeypatch.setenv("TOKENSFLOW_PROFILE", switched_profile)
+    switched_paths = make_paths(tmp_path / "switched")
+    switched_config = sut_config(tmp_path / "switched")
+    switched_config.codex_binary.write_text("binary")
+    switched_config.uv_binary.write_text("binary")
+    switched_docker = EnvironmentCapturingDocker()
+    DockerSut(switched_docker, relay_factory=FakeRelay).run_arm(
+        switched_config,
+        Arm.ON,
+        switched_paths,
+        b"prompt",
+        ArtifactStore(switched_paths.result_root),
+    )
+    _switched_argv, switched_kwargs = next(
+        (argv, kwargs) for argv, kwargs in switched_docker.calls if argv[:3] == ("docker", "run", "-d")
+    )
+    switched_environment = cast(dict[str, str], switched_kwargs["env"])
+    assert switched_environment["TOKENSFLOW_API_URL"] == switched_endpoint
+    assert switched_environment["TOKENSFLOW_PROFILE"] == switched_profile
+    assert endpoint not in json.dumps(switched_environment, sort_keys=True)
+
+
+def test_tokensflow_wrapper_staging_never_follows_a_preexisting_control_symlink(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    paths.prepare()
+    external = tmp_path / "external-owner"
+    external_wrapper = external / "tokensflow-wrapper"
+    external_wrapper.mkdir(parents=True)
+    sentinel = external_wrapper / "sentinel"
+    sentinel.write_text("outside-owned")
+    external.chmod(0o755)
+    external_wrapper.chmod(0o751)
+    control = paths.runtime.parent / "evaluation-control"
+    control.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(UnsafeSutConfiguration, match="cannot be staged safely"):
+        DockerSut(TranscriptDocker())._stage_tokensflow_wrapper(paths)
+
+    assert control.is_symlink()
+    assert sentinel.read_text() == "outside-owned"
+    assert stat.S_IMODE(external.stat().st_mode) == 0o755
+    assert stat.S_IMODE(external_wrapper.stat().st_mode) == 0o751
+
+
+@pytest.mark.parametrize(
+    ("inspect_state", "cleanup_allowed"),
+    [
+        pytest.param("removed", True, id="rm-succeeded"),
+        pytest.param("exists", False, id="rm-failed-container-still-exists"),
+        pytest.param("unknown", False, id="rm-failed-inspect-inconclusive"),
+        pytest.param("not-found", True, id="rm-failed-inspect-proves-absence"),
+    ],
+)
+def test_tokensflow_wrapper_cleanup_requires_proven_container_removal(
+    tmp_path: Path,
+    inspect_state: str,
+    cleanup_allowed: bool,
+) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class RemovalFailureDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if argv == ("docker", "rm", "-f", "powercontext-eval-run-1-on"):
+                if inspect_state == "removed":
+                    return super().run(argv, **kwargs)
+                self.commands.append(argv)
+                return command_result("", returncode=1, stderr="remove failed")
+            if argv == ("docker", "container", "inspect", "powercontext-eval-run-1-on"):
+                self.commands.append(argv)
+                if inspect_state == "exists":
+                    return command_result("container metadata\n")
+                if inspect_state == "not-found":
+                    return command_result(
+                        "",
+                        returncode=1,
+                        stderr="Error: No such container: powercontext-eval-run-1-on",
+                    )
+                return command_result("", returncode=1, stderr="inspect unavailable")
+            return super().run(argv, **kwargs)
+
+    docker = RemovalFailureDocker()
+    wrapper = paths.runtime.parent / "evaluation-control" / "tokensflow-wrapper" / "tokensflow"
+    if cleanup_allowed:
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            config,
+            Arm.ON,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root),
+        )
+        assert not wrapper.parent.parent.exists()
+        assert not (paths.runtime / "tokensflow-recovery.json").exists()
+    else:
+        with pytest.raises(TokensFlowInfrastructureError, match="container cleanup failed"):
+            DockerSut(docker, relay_factory=FakeRelay).run_arm(
+                config,
+                Arm.ON,
+                paths,
+                b"prompt",
+                ArtifactStore(paths.result_root),
+            )
+        assert wrapper.is_file()
+        assert json.loads((paths.runtime / "tokensflow-recovery.json").read_text()) == {
+            "reason": "tokensflow_container_cleanup_failed",
+            "recovery_required": True,
+        }
 
 
 def test_tokensflow_drain_obeys_zero_loss_order_and_accepts_duplicate_replay(tmp_path: Path) -> None:
@@ -1000,6 +1138,7 @@ def test_tokensflow_drain_failure_preserves_runtime_and_writes_safe_recovery_mar
         command[:3] == ("docker", "rm", "-f") and command[-1] == "powercontext-eval-run-1-on"
         for command in docker.commands
     )
+    assert (paths.runtime.parent / "evaluation-control" / "tokensflow-wrapper" / "tokensflow").is_file()
     assert ("docker", "network", "disconnect", "bridge", "powercontext-eval-run-1-on") in docker.commands
     retry_paths = make_paths(tmp_path / "retry")
     shutil.copy2(marker, retry_paths.runtime / marker.name)

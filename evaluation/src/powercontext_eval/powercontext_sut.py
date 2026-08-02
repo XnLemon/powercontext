@@ -765,7 +765,17 @@ class DockerSut:
             self._initialize_workspace(config, arm, paths)
             self._assign_arm_ownership(config, paths)
             self._prewarm(config, arm, paths, network, relay_url, auth)
-            self._start_container(config, arm, paths, network, container, relay_url, auth)
+            self._start_container(
+                config,
+                arm,
+                paths,
+                network,
+                container,
+                relay_url,
+                auth,
+                tokensflow_environment,
+                tokensflow_command_secrets,
+            )
             container_started = True
             self._verify_codex_version(container, paths, store)
             self._readiness(container, paths)
@@ -833,7 +843,7 @@ class DockerSut:
                 preserve_after_drain_failure = True
                 tokensflow_drain_failed = True
             if tokensflow_drain_failed:
-                self._write_tokensflow_recovery_marker(paths)
+                self._write_tokensflow_recovery_marker(paths, "tokensflow_drain_failed")
                 raise TokensFlowInfrastructureError("TokensFlow drain failed") from None
             store.write_json("tokensflow/provenance.json", tokensflow.as_dict())
             _retain_private_trace(
@@ -883,17 +893,15 @@ class DockerSut:
                 if tokensflow_egress_attached:
                     self._detach_tokensflow_egress(config, container, paths)
             finally:
-                try:
-                    if container_started and not preserve_after_drain_failure:
-                        self._docker.run(
-                            ("docker", "rm", "-f", container),
-                            cwd=paths.runtime,
-                            timeout=30,
-                            check=False,
-                        )
-                finally:
-                    if tokensflow_wrapper_staged and not preserve_after_drain_failure:
-                        self._cleanup_tokensflow_wrapper(paths)
+                container_removed = not container_started
+                if container_started and not preserve_after_drain_failure:
+                    container_removed = self._remove_container_for_cleanup(container, paths)
+                    if not container_removed:
+                        self._write_tokensflow_recovery_marker(paths, "tokensflow_container_cleanup_failed")
+                if tokensflow_wrapper_staged and not preserve_after_drain_failure and container_removed:
+                    self._cleanup_tokensflow_wrapper(paths)
+                if container_started and not preserve_after_drain_failure and not container_removed:
+                    raise TokensFlowInfrastructureError("TokensFlow container cleanup failed") from None
 
     @staticmethod
     def _validate_tokensflow_inputs(config: SutConfig, paths: ArmPaths) -> tuple[Path, Path]:
@@ -1359,9 +1367,18 @@ class DockerSut:
             raise TokensFlowInfrastructureError("TokensFlow daemon failed to stop") from None
 
     @staticmethod
-    def _write_tokensflow_recovery_marker(paths: ArmPaths) -> None:
+    def _write_tokensflow_recovery_marker(paths: ArmPaths, reason: str) -> None:
+        payloads = {
+            "tokensflow_drain_failed": b'{"reason":"tokensflow_drain_failed","recovery_required":true}\n',
+            "tokensflow_container_cleanup_failed": (
+                b'{"reason":"tokensflow_container_cleanup_failed","recovery_required":true}\n'
+            ),
+        }
+        try:
+            payload = payloads[reason]
+        except KeyError:
+            raise ValueError("unsupported TokensFlow recovery reason") from None
         marker = paths.runtime / "tokensflow-recovery.json"
-        payload = b'{"reason":"tokensflow_drain_failed","recovery_required":true}\n'
         descriptor = -1
         try:
             descriptor = os.open(
@@ -1373,10 +1390,38 @@ class DockerSut:
             os.fchmod(descriptor, 0o600)
             os.fsync(descriptor)
         except OSError:
-            raise TokensFlowInfrastructureError("TokensFlow drain failed") from None
+            raise TokensFlowInfrastructureError("TokensFlow recovery marker failed") from None
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
+
+    def _remove_container_for_cleanup(self, container: str, paths: ArmPaths) -> bool:
+        """Return true only after removal succeeds or inspect proves absence."""
+
+        try:
+            removal = self._docker.run(
+                ("docker", "rm", "-f", container),
+                cwd=paths.runtime,
+                timeout=30,
+                check=False,
+            )
+        except (CommandError, OSError):
+            removal = None
+        if removal is not None and removal.returncode == 0:
+            return True
+        try:
+            inspection = self._docker.run(
+                ("docker", "container", "inspect", container),
+                cwd=paths.runtime,
+                timeout=30,
+                check=False,
+            )
+        except (CommandError, OSError):
+            return False
+        return inspection.returncode != 0 and inspection.stderr.strip() in {
+            f"Error: No such container: {container}",
+            f"Error response from daemon: No such container: {container}",
+        }
 
     def _initialize_workspace(self, config: SutConfig, arm: Arm, paths: ArmPaths) -> None:
         name = f"powercontext-eval-{config.run_id}-{arm.value}-init"
@@ -1486,67 +1531,130 @@ class DockerSut:
     def _stage_tokensflow_wrapper(paths: ArmPaths) -> None:
         """Stage the evaluator-owned wrapper outside container-writable mounts."""
 
-        control = paths.runtime.parent / "evaluation-control"
-        wrapper_directory = control / "tokensflow-wrapper"
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        root_fd = -1
+        control_fd = -1
+        wrapper_fd = -1
+        destination_fd = -1
+        control_created = False
+        wrapper_created = False
+        file_created = False
         try:
-            control.mkdir(mode=0o700)
-            wrapper_directory.mkdir(mode=0o700)
+            root_fd = os.open(paths.runtime.parent, directory_flags)
+            os.mkdir("evaluation-control", mode=0o700, dir_fd=root_fd)
+            control_created = True
+            control_fd = os.open("evaluation-control", directory_flags, dir_fd=root_fd)
+            os.mkdir("tokensflow-wrapper", mode=0o700, dir_fd=control_fd)
+            wrapper_created = True
+            wrapper_fd = os.open("tokensflow-wrapper", directory_flags, dir_fd=control_fd)
             destination_fd = os.open(
-                wrapper_directory / "tokensflow",
+                "tokensflow",
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
                 0o555,
+                dir_fd=wrapper_fd,
             )
-            try:
-                view = memoryview(_TOKENSFLOW_WRAPPER)
-                written = 0
-                while written < len(view):
-                    count = os.write(destination_fd, view[written:])
-                    if count <= 0:
-                        raise OSError("TokensFlow wrapper staging made no progress")
-                    written += count
-                os.fchmod(destination_fd, 0o555)
-                os.fsync(destination_fd)
-            finally:
-                os.close(destination_fd)
-            directory_fd = os.open(
-                wrapper_directory,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-            )
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-            os.chmod(wrapper_directory, 0o555)
-            os.chmod(control, 0o555)
+            file_created = True
+            view = memoryview(_TOKENSFLOW_WRAPPER)
+            written = 0
+            while written < len(view):
+                count = os.write(destination_fd, view[written:])
+                if count <= 0:
+                    raise OSError("TokensFlow wrapper staging made no progress")
+                written += count
+            os.fchmod(destination_fd, 0o555)
+            os.fsync(destination_fd)
+            os.close(destination_fd)
+            destination_fd = -1
+            os.fchmod(wrapper_fd, 0o555)
+            os.fsync(wrapper_fd)
+            os.fchmod(control_fd, 0o555)
+            os.fsync(control_fd)
         except OSError as error:
             try:
-                os.chmod(control, 0o700)
-                os.chmod(wrapper_directory, 0o700)
+                if destination_fd >= 0:
+                    os.close(destination_fd)
+                    destination_fd = -1
+                if wrapper_fd >= 0:
+                    os.fchmod(wrapper_fd, 0o700)
+                    if file_created:
+                        os.unlink("tokensflow", dir_fd=wrapper_fd)
+                if control_fd >= 0:
+                    os.fchmod(control_fd, 0o700)
+                    if (
+                        wrapper_created
+                        and wrapper_fd >= 0
+                        and _directory_entry_matches(control_fd, "tokensflow-wrapper", wrapper_fd)
+                    ):
+                        os.rmdir("tokensflow-wrapper", dir_fd=control_fd)
+                if (
+                    root_fd >= 0
+                    and control_created
+                    and control_fd >= 0
+                    and _directory_entry_matches(root_fd, "evaluation-control", control_fd)
+                ):
+                    os.rmdir("evaluation-control", dir_fd=root_fd)
             except OSError:
                 pass
-            shutil.rmtree(control, ignore_errors=True)
             raise UnsafeSutConfiguration("TokensFlow wrapper cannot be staged safely") from error
+        finally:
+            if destination_fd >= 0:
+                os.close(destination_fd)
+            if wrapper_fd >= 0:
+                os.close(wrapper_fd)
+            if control_fd >= 0:
+                os.close(control_fd)
+            if root_fd >= 0:
+                os.close(root_fd)
 
     @staticmethod
     def _cleanup_tokensflow_wrapper(paths: ArmPaths) -> None:
         """Remove the per-arm wrapper after its container is gone."""
 
-        control = paths.runtime.parent / "evaluation-control"
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        read_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        root_fd = -1
+        control_fd = -1
+        wrapper_fd = -1
+        wrapper_file_fd = -1
         try:
-            metadata = control.lstat()
-            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            root_fd = os.open(paths.runtime.parent, directory_flags)
+            try:
+                control_fd = os.open("evaluation-control", directory_flags, dir_fd=root_fd)
+            except FileNotFoundError:
+                return
+            wrapper_fd = os.open("tokensflow-wrapper", directory_flags, dir_fd=control_fd)
+            wrapper_file_fd = os.open("tokensflow", read_flags, dir_fd=wrapper_fd)
+            control_metadata = os.fstat(control_fd)
+            wrapper_metadata = os.fstat(wrapper_fd)
+            file_metadata = os.fstat(wrapper_file_fd)
+            if (
+                not stat.S_ISDIR(control_metadata.st_mode)
+                or not stat.S_ISDIR(wrapper_metadata.st_mode)
+                or not stat.S_ISREG(file_metadata.st_mode)
+                or stat.S_IMODE(control_metadata.st_mode) != 0o555
+                or stat.S_IMODE(wrapper_metadata.st_mode) != 0o555
+                or stat.S_IMODE(file_metadata.st_mode) != 0o555
+                or _read_all(wrapper_file_fd) != _TOKENSFLOW_WRAPPER
+            ):
                 raise UnsafeSutConfiguration("TokensFlow wrapper cleanup path is unsafe")
-            os.chmod(control, 0o700)
-            wrapper_directory = control / "tokensflow-wrapper"
-            wrapper_metadata = wrapper_directory.lstat()
-            if not stat.S_ISDIR(wrapper_metadata.st_mode) or stat.S_ISLNK(wrapper_metadata.st_mode):
-                raise UnsafeSutConfiguration("TokensFlow wrapper cleanup path is unsafe")
-            os.chmod(wrapper_directory, 0o700)
-            shutil.rmtree(control)
-        except FileNotFoundError:
-            return
+            os.close(wrapper_file_fd)
+            wrapper_file_fd = -1
+            os.fchmod(wrapper_fd, 0o700)
+            os.unlink("tokensflow", dir_fd=wrapper_fd)
+            os.fchmod(control_fd, 0o700)
+            os.rmdir("tokensflow-wrapper", dir_fd=control_fd)
+            os.rmdir("evaluation-control", dir_fd=root_fd)
         except OSError as error:
             raise UnsafeSutConfiguration("TokensFlow wrapper cleanup failed") from error
+        finally:
+            if wrapper_file_fd >= 0:
+                os.close(wrapper_file_fd)
+            if wrapper_fd >= 0:
+                os.close(wrapper_fd)
+            if control_fd >= 0:
+                os.close(control_fd)
+            if root_fd >= 0:
+                os.close(root_fd)
 
     def _assign_arm_ownership(self, config: SutConfig, paths: ArmPaths) -> None:
         """Use a networkless, capability-minimal helper for exact owned mounts."""
@@ -1752,6 +1860,8 @@ class DockerSut:
         container: str,
         relay_url: str,
         auth: Path,
+        tokensflow_environment: Mapping[str, str],
+        tokensflow_command_secrets: Sequence[str],
     ) -> None:
         scope = f"eval:{config.run_id}:{arm.value}"
         tokensflow_binary, _tokensflow_home = self._validate_tokensflow_inputs(config, paths)
@@ -1824,6 +1934,7 @@ class DockerSut:
                     ),
                 }
             ),
+            *_docker_inherited_env_args(tokensflow_environment),
             "--entrypoint",
             "/runtime/pc-env/bin/powercontext",
             config.task_image,
@@ -1834,7 +1945,13 @@ class DockerSut:
             "--port",
             "8000",
         )
-        self._docker.run(command, cwd=paths.runtime, timeout=60)
+        self._docker.run(
+            command,
+            cwd=paths.runtime,
+            timeout=60,
+            env=tokensflow_environment,
+            secrets=tokensflow_command_secrets,
+        )
 
     def _readiness(self, container: str, paths: ArmPaths) -> None:
         command = (
@@ -1975,6 +2092,27 @@ def _reserve_port(address: str) -> int:
 
 def _docker_env_args(environment: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(part for key, value in environment.items() for part in ("-e", f"{key}={value}"))
+
+
+def _docker_inherited_env_args(environment: Mapping[str, str]) -> tuple[str, ...]:
+    """Ask Docker to inherit selected values without placing them in argv."""
+
+    return tuple(part for key in environment for part in ("--env", key))
+
+
+def _directory_entry_matches(parent_fd: int, name: str, opened_fd: int) -> bool:
+    """Confirm a directory name still identifies the descriptor-opened object."""
+
+    named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    opened = os.fstat(opened_fd)
+    return stat.S_ISDIR(named.st_mode) and (named.st_dev, named.st_ino) == (opened.st_dev, opened.st_ino)
+
+
+def _read_all(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    while chunk := os.read(descriptor, 64 * 1024):
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _tool_directory_mount(
