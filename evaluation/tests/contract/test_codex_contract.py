@@ -517,6 +517,7 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
     ) in transcript
     run = next(command for command in transcript if command[:3] == ("docker", "run", "-d"))
     joined = " ".join(run)
+    assert "--init" in run
     assert "--read-only" in run
     assert ("--cap-drop", "ALL") == run[run.index("--cap-drop") : run.index("--cap-drop") + 2]
     assert "no-new-privileges" in joined

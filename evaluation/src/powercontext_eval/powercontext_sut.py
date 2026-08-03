@@ -1918,6 +1918,7 @@ class DockerSut:
             "docker",
             "run",
             "-d",
+            "--init",
             "--name",
             container,
             "--label",
