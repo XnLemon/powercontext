@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
 from collections.abc import Callable
@@ -839,6 +840,49 @@ def test_heartbeat_keeps_lease_alive_during_blocking_runner(tmp_path: Path) -> N
     time.sleep(1.2)
     assert store.recover_expired(now=datetime.now(UTC)) == []
     assert store.get(task.task_id).status is TaskStatus.RUNNING
+    release.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+
+
+def test_heartbeat_retries_transient_sqlite_failure_without_losing_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, lease_seconds=1)
+    store = _store(config)
+    task = _create(store, now=datetime.now(UTC))
+    entered = threading.Event()
+    release = threading.Event()
+    heartbeat_calls = 0
+    heartbeat = store.heartbeat
+
+    def transient_heartbeat(task_id: str, worker_id: str, *, now: datetime) -> Any:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        if heartbeat_calls == 1:
+            raise sqlite3.OperationalError("database is locked leaked-secret")
+        return heartbeat(task_id, worker_id, now=now)
+
+    def runner(run_config: Any, *, on_phase: Any) -> MinimalRunResult:
+        entered.set()
+        assert release.wait(timeout=3)
+        raise RuntimeError("done")
+
+    monkeypatch.setattr(store, "heartbeat", transient_heartbeat)
+    worker = EvaluationWorker(config, store, runner=runner)
+    thread = threading.Thread(target=worker.run_once)
+    thread.start()
+    assert entered.wait(timeout=2)
+    time.sleep(1.2)
+
+    assert store.recover_expired(now=datetime.now(UTC)) == []
+    assert store.get(task.task_id).status is TaskStatus.RUNNING
+    assert heartbeat_calls >= 2
+    assert "OperationalError" in caplog.text
+    assert "leaked-secret" not in caplog.text
+
     release.set()
     thread.join(timeout=2)
     assert not thread.is_alive()

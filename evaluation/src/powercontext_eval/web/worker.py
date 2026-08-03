@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
+import sqlite3
 import stat
 import threading
 from collections.abc import Callable, Iterator
@@ -45,6 +47,7 @@ from powercontext_eval.web.usage import CodexUsageProbe, UsageSnapshot
 
 _INTERNAL_SUMMARY = "The evaluation worker failed unexpectedly. Inspect the retained m0 logs."
 _REPORT_SUMMARY = "Evaluation report validation failed."
+_LOGGER = logging.getLogger(__name__)
 
 
 class ThreadLike(Protocol):
@@ -278,10 +281,23 @@ class TaskPairWorker:
         while not stop.wait(interval):
             try:
                 self._store.heartbeat(task_id, self._worker_id, now=self._clock())
-            except (TaskOwnershipError, TaskConflict):
+            except (TaskOwnershipError, TaskConflict) as error:
+                _LOGGER.warning(
+                    "Evaluation heartbeat lost ownership (error_type=%s)",
+                    type(error).__name__,
+                )
                 ownership_lost.set()
                 return
-            except Exception:  # noqa: BLE001 - a failed renewal makes later task mutation unsafe
+            except sqlite3.OperationalError as error:
+                _LOGGER.warning(
+                    "Evaluation heartbeat database operation failed transiently; retrying (error_type=%s)",
+                    type(error).__name__,
+                )
+            except Exception as error:  # noqa: BLE001 - unexpected renewal failures must fail closed
+                _LOGGER.warning(
+                    "Evaluation heartbeat failed closed (error_type=%s)",
+                    type(error).__name__,
+                )
                 ownership_lost.set()
                 return
 
