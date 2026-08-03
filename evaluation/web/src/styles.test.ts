@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import styles from "./styles.css?raw";
 
-function declarations(selector: string): string {
-  const start = styles.indexOf(`${selector} {`);
+function declarations(selector: string, from = 0): string {
+  const start = styles.indexOf(`${selector} {`, from);
   expect(start, `missing CSS rule for ${selector}`).toBeGreaterThanOrEqual(0);
   const end = styles.indexOf("}", start);
   expect(end, `unterminated CSS rule for ${selector}`).toBeGreaterThan(start);
@@ -28,5 +28,27 @@ describe("interactive target sizing", () => {
     const rule = declarations(selector);
     expect(rule).toMatch(/display:\s*inline-flex/);
     expect(rule).toMatch(/align-items:\s*center/);
+  });
+});
+
+describe("report batch list layout", () => {
+  it("keeps the report action on one line while long batch metadata owns the flexible column", () => {
+    const row = declarations(".report-index li");
+    expect(row).toMatch(/display:\s*grid/);
+    expect(row).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/);
+
+    const content = declarations(".report-index li > div");
+    expect(content).toMatch(/min-width:\s*0/);
+
+    const action = declarations(".report-index \.primary-link");
+    expect(action).toMatch(/white-space:\s*nowrap/);
+  });
+
+  it("moves the whole report action below the metadata at narrow widths", () => {
+    const narrowLayout = styles.indexOf("@media (max-width: 620px)");
+    expect(narrowLayout).toBeGreaterThanOrEqual(0);
+    expect(declarations(".report-index li", narrowLayout)).toMatch(
+      /grid-template-columns:\s*minmax\(0,\s*1fr\)/,
+    );
   });
 });

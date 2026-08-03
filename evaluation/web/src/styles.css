@@ -734,12 +734,20 @@ td small {
 }
 
 .report-index li {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 20px;
   padding: 14px 0;
   border-top: 1px solid var(--line);
+}
+
+.report-index li > div {
+  min-width: 0;
+}
+
+.report-index .primary-link {
+  white-space: nowrap;
 }
 
 .report-index strong,
@@ -1744,10 +1752,13 @@ td small {
   }
 
   .report-identity,
-  .report-index li,
   .report-page-head {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .report-index li {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .filter-field {
