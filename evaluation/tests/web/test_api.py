@@ -19,7 +19,7 @@ from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, TestGro
 from powercontext_eval.web.api import TaskEventStream, create_app
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskCreate, TaskPhase, TaskRecord, TaskResult
-from powercontext_eval.web.store import TaskStore
+from powercontext_eval.web.store import FinalizationState, TaskStore, TokensFlowFinalizationCreate
 from powercontext_eval.web.usage import UsageSnapshot
 
 NOW = datetime(2026, 7, 29, 1, 2, 3, tzinfo=UTC)
@@ -437,14 +437,17 @@ def _write_report(run_root: Path, task_id: str) -> None:
                 }
             )
         )
-    arm = lambda name: ArmReport(
-        arm=name,
-        state=ArmState.TREATMENT_VALIDATED,
-        resolved=True,
-        passed=True,
-        treatment_valid=True,
-        metrics=MetricSet(input_tokens=10, output_tokens=5, elapsed_seconds=1.5, patch_bytes=20),
-    )
+
+    def arm(name: Literal["off", "on"]) -> ArmReport:
+        return ArmReport(
+            arm=name,
+            state=ArmState.TREATMENT_VALIDATED,
+            resolved=True,
+            passed=True,
+            treatment_valid=True,
+            metrics=MetricSet(input_tokens=10, output_tokens=5, elapsed_seconds=1.5, patch_bytes=20),
+        )
+
     bundle = ReportBundle(
         title="Evaluation",
         revisions={"powercontext": "a" * 40},
@@ -1227,6 +1230,73 @@ def test_luna_preview_batch_tasks_detail_and_report_keep_the_requested_model(
     assert tasks.json()["items"][0]["reasoning_effort"] == "medium"
     assert detail.json()["task"]["model"] == "gpt-5.6-luna"
     assert report.json()["configuration"]["model"] == "gpt-5.6-luna"
+
+
+def test_batch_task_detail_exposes_only_selected_attempt_finalization_summary(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    client = TestClient(create_app(config, store, catalog=_BatchCatalog()))
+    created = client.post("/api/batches", json=_batch_payload("finalization-detail"))
+    batch_id = created.json()["batch_id"]
+    task = store.list_batch_tasks(batch_id)[0]
+    assert task.attempt_id is not None
+
+    jobs = {}
+    for arm in ("off", "on"):
+        jobs[arm] = store.register_tokensflow_finalization(
+            TokensFlowFinalizationCreate(
+                attempt_id=task.attempt_id,
+                task_id=task.task_id,
+                batch_id=batch_id,
+                arm=arm,
+                run_id=task.task_id,
+                container_name=f"powercontext-eval-{task.task_id}-{arm}",
+                runtime_path=f"work/{task.task_id}/{arm}/runtime",
+                wrapper_path=f"work/{task.task_id}/{arm}/evaluation-control/tokensflow-wrapper",
+                egress_network="tokensflow-egress",
+                daemon_pid_file="/runtime/tokensflow-home/.local/share/tokensflow/evaluation-daemon.pid",
+                evidence_sha256=("b" if arm == "off" else "c") * 64,
+                evidence_bytes=456,
+            ),
+            now=NOW,
+            timeout_seconds=600,
+        )[0]
+    claimed = store.claim_tokensflow_finalization(
+        "api-test-finalizer",
+        now=NOW + timedelta(seconds=1),
+        lease_seconds=300,
+        job_id=jobs["off"].job_id,
+    )
+    assert claimed is not None
+    store.finish_tokensflow_finalization(
+        claimed.job_id,
+        "api-test-finalizer",
+        state=FinalizationState.PASSED,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    response = client.get(f"/api/batches/{batch_id}/tasks/{task.task_id}")
+
+    assert response.status_code == 200
+    finalization = response.json()["tokensflow_finalization"]
+    assert finalization["off"]["state"] == "passed"
+    assert finalization["on"]["state"] == "pending"
+    expected_keys = {
+        "state",
+        "registered_at",
+        "deadline_at",
+        "finished_at",
+        "attempts",
+        "queue_passed",
+        "doctor_rc",
+        "error_category",
+        "reason",
+    }
+    assert set(finalization["off"]) == set(finalization["on"]) == expected_keys
+    serialized = json.dumps(finalization).casefold()
+    for forbidden in ("container", "runtime", "wrapper", "home", "credential", "token", "doctor_output"):
+        assert forbidden not in serialized
 
 
 @pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-5.6-luna"])

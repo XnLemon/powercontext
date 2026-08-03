@@ -28,6 +28,10 @@ class CommandTimedOut(CommandError):
     """The child process exceeded its deadline."""
 
 
+class CommandCancelled(CommandError):
+    """The child process was cancelled by its owner."""
+
+
 class CommandFailed(CommandError):
     """The child process exited unsuccessfully."""
 

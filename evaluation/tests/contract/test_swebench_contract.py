@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import stat
 import sys
+import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -198,6 +199,7 @@ class _InspectingProcess(ProcessRunner):
         *,
         cwd: str | Path,
         timeout: float | None = None,
+        cancel_event: threading.Event | None = None,
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
@@ -221,6 +223,7 @@ class _InspectingProcess(ProcessRunner):
             argv,
             cwd=cwd,
             timeout=timeout,
+            cancel_event=cancel_event,
             env=env,
             check=check,
             secrets=secrets,

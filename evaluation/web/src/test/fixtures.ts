@@ -284,6 +284,7 @@ export const batchTaskDetail: BatchTaskDetail = {
     output_tokens: 15,
     total_tokens: 135,
   },
+  tokensflow_finalization: { off: null, on: null },
 };
 
 export const contextEventPage: ContextEventPage = {

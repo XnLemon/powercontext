@@ -7,7 +7,9 @@ import sqlite3
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from re import fullmatch
 from typing import Any, Literal, TypedDict
@@ -21,7 +23,7 @@ from powercontext_eval.web.batches import (
     BatchRecord,
     BatchStatus,
 )
-from powercontext_eval.web.config import MAX_TASK_PARALLELISM
+from powercontext_eval.web.config import MAX_TASK_PARALLELISM, MAX_TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS
 from powercontext_eval.web.controls import (
     BatchControlIntent,
     BatchControlState,
@@ -73,6 +75,90 @@ class HealthSnapshot(TypedDict):
     task_parallelism: int
     queued_tasks: int
     running_tasks: int
+
+
+class FinalizationState(StrEnum):
+    """Durable TokensFlow resource-owner lifecycle exposed as sanitized telemetry."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    CLEANUP_PENDING = "cleanup_pending"
+    PASSED = "passed"
+    TIMED_OUT = "timed_out"
+    CAPACITY_EVICTED = "capacity_evicted"
+    CLEANUP_FAILED = "cleanup_failed"
+
+
+_TERMINAL_FINALIZATION_STATES = frozenset(
+    {
+        FinalizationState.PASSED,
+        FinalizationState.TIMED_OUT,
+        FinalizationState.CAPACITY_EVICTED,
+        FinalizationState.CLEANUP_FAILED,
+    }
+)
+
+
+@dataclass(frozen=True)
+class TokensFlowFinalizationCreate:
+    """Allowlisted, credential-free resource descriptor transferred by one arm."""
+
+    attempt_id: str
+    task_id: str
+    batch_id: str | None
+    arm: str
+    run_id: str
+    container_name: str
+    runtime_path: str
+    wrapper_path: str
+    egress_network: str
+    daemon_pid_file: str
+    evidence_sha256: str
+    evidence_bytes: int
+
+    def __post_init__(self) -> None:
+        safe_id = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}"
+        safe_network = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"
+        if self.arm not in {"off", "on"}:
+            raise ValueError("TokensFlow finalization arm is invalid")
+        for value in (self.attempt_id, self.task_id, self.run_id, self.container_name):
+            if fullmatch(safe_id, value) is None:
+                raise ValueError("TokensFlow finalization identifier is unsafe")
+        if self.batch_id is not None and fullmatch(safe_id, self.batch_id) is None:
+            raise ValueError("TokensFlow finalization batch identifier is unsafe")
+        if fullmatch(safe_network, self.egress_network) is None:
+            raise ValueError("TokensFlow finalization network is unsafe")
+        for value in (self.runtime_path, self.wrapper_path):
+            path = Path(value)
+            if path.is_absolute() or not path.parts or ".." in path.parts or "\x00" in value:
+                raise ValueError("TokensFlow finalization path is unsafe")
+        if (
+            not self.daemon_pid_file.startswith("/runtime/")
+            or ".." in Path(self.daemon_pid_file).parts
+            or "\x00" in self.daemon_pid_file
+        ):
+            raise ValueError("TokensFlow daemon path is unsafe")
+        if fullmatch(r"[0-9a-f]{64}", self.evidence_sha256) is None:
+            raise ValueError("TokensFlow evidence hash is invalid")
+        if isinstance(self.evidence_bytes, bool) or not isinstance(self.evidence_bytes, int) or self.evidence_bytes < 0:
+            raise ValueError("TokensFlow evidence byte count is invalid")
+
+
+@dataclass(frozen=True)
+class TokensFlowFinalizationRecord(TokensFlowFinalizationCreate):
+    job_id: str
+    registered_at: datetime
+    deadline_at: datetime
+    state: FinalizationState
+    attempts: int
+    queue_passed: bool
+    doctor_rc: int | None
+    checked_at: datetime | None
+    finished_at: datetime | None
+    error_category: str | None
+    reason: str | None
+    lease_owner: str | None
+    lease_expires_at: datetime | None
 
 
 class TaskStore:
@@ -188,6 +274,35 @@ class TaskStore:
                     actor TEXT NOT NULL,
                     details_json TEXT NOT NULL,
                     occurred_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS tokensflow_finalizations (
+                    finalization_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL UNIQUE,
+                    attempt_id TEXT NOT NULL REFERENCES task_attempts(attempt_id),
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    batch_id TEXT REFERENCES batches(batch_id),
+                    arm TEXT NOT NULL CHECK (arm IN ('off', 'on')),
+                    run_id TEXT NOT NULL,
+                    container_name TEXT NOT NULL,
+                    runtime_path TEXT NOT NULL,
+                    wrapper_path TEXT NOT NULL,
+                    egress_network TEXT NOT NULL,
+                    daemon_pid_file TEXT NOT NULL,
+                    evidence_sha256 TEXT NOT NULL,
+                    evidence_bytes INTEGER NOT NULL CHECK (evidence_bytes >= 0),
+                    registered_at TEXT NOT NULL,
+                    deadline_at TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                    queue_passed INTEGER NOT NULL DEFAULT 0 CHECK (queue_passed IN (0, 1)),
+                    doctor_rc INTEGER,
+                    checked_at TEXT,
+                    finished_at TEXT,
+                    error_category TEXT,
+                    reason TEXT,
+                    lease_owner TEXT,
+                    lease_expires_at TEXT,
+                    UNIQUE(attempt_id, arm)
                 );
                 """,
             )
@@ -308,6 +423,12 @@ class TaskStore:
                     ON task_attempts(status, attempt_seq);
                 CREATE INDEX IF NOT EXISTS worker_leases_expiry
                     ON worker_leases(expires_at);
+                CREATE INDEX IF NOT EXISTS tokensflow_finalizations_open_sequence
+                    ON tokensflow_finalizations(state, registered_at, finalization_seq);
+                CREATE INDEX IF NOT EXISTS tokensflow_finalizations_lease
+                    ON tokensflow_finalizations(lease_expires_at);
+                CREATE INDEX IF NOT EXISTS tokensflow_finalizations_attempt
+                    ON tokensflow_finalizations(attempt_id, arm);
                 """,
             )
 
@@ -965,6 +1086,332 @@ class TaskStore:
                 """,
                 (1, task_parallelism, observed_at),
             )
+
+    def register_tokensflow_finalization(
+        self,
+        create: TokensFlowFinalizationCreate,
+        *,
+        now: datetime,
+        timeout_seconds: int,
+    ) -> tuple[TokensFlowFinalizationRecord, bool]:
+        """Durably transfer one arm's credential-free resource descriptor."""
+
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
+            raise ValueError("TokensFlow finalization timeout must be a positive integer")
+        if timeout_seconds > MAX_TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS:
+            raise ValueError("TokensFlow finalization timeout must not exceed 600 seconds")
+        registered_at = _timestamp(now)
+        deadline_at = _timestamp(now + timedelta(seconds=timeout_seconds))
+        with self._write() as connection:
+            attempt = connection.execute(
+                "SELECT task_id FROM task_attempts WHERE attempt_id = ?",
+                (create.attempt_id,),
+            ).fetchone()
+            if attempt is None or attempt["task_id"] != create.task_id:
+                raise TaskConflict("TokensFlow finalization attempt does not match its task")
+            task = self._select_task(connection, create.task_id)
+            if task["batch_id"] != create.batch_id:
+                raise TaskConflict("TokensFlow finalization batch does not match its task")
+            existing = connection.execute(
+                "SELECT * FROM tokensflow_finalizations WHERE attempt_id = ? AND arm = ?",
+                (create.attempt_id, create.arm),
+            ).fetchone()
+            if existing is not None:
+                stored = self._finalization_record(existing)
+                if any(
+                    getattr(stored, field) != getattr(create, field)
+                    for field in TokensFlowFinalizationCreate.__dataclass_fields__
+                ):
+                    raise TaskConflict("TokensFlow finalization registration conflicts with its durable descriptor")
+                return stored, False
+            job_id = f"tokensflow-finalization-{uuid.uuid4().hex}"
+            connection.execute(
+                """
+                INSERT INTO tokensflow_finalizations(
+                    job_id, attempt_id, task_id, batch_id, arm, run_id, container_name,
+                    runtime_path, wrapper_path, egress_network, daemon_pid_file,
+                    evidence_sha256, evidence_bytes, registered_at, deadline_at, state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    create.attempt_id,
+                    create.task_id,
+                    create.batch_id,
+                    create.arm,
+                    create.run_id,
+                    create.container_name,
+                    create.runtime_path,
+                    create.wrapper_path,
+                    create.egress_network,
+                    create.daemon_pid_file,
+                    create.evidence_sha256,
+                    create.evidence_bytes,
+                    registered_at,
+                    deadline_at,
+                    FinalizationState.PENDING.value,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM tokensflow_finalizations WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            assert row is not None
+            return self._finalization_record(row), True
+
+    def list_open_tokensflow_finalizations(self) -> list[TokensFlowFinalizationRecord]:
+        """Return resumable jobs oldest first, independent from task leases."""
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM tokensflow_finalizations
+                WHERE state IN (?, ?, ?)
+                ORDER BY registered_at ASC, finalization_seq ASC
+                """,
+                (
+                    FinalizationState.PENDING.value,
+                    FinalizationState.RUNNING.value,
+                    FinalizationState.CLEANUP_PENDING.value,
+                ),
+            ).fetchall()
+            return [self._finalization_record(row) for row in rows]
+
+    def tokensflow_finalizations_for_attempt(self, attempt_id: str) -> list[TokensFlowFinalizationRecord]:
+        """Return OFF/ON finalization telemetry for one exact attempt."""
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM tokensflow_finalizations
+                WHERE attempt_id = ?
+                ORDER BY CASE arm WHEN 'off' THEN 0 ELSE 1 END
+                """,
+                (attempt_id,),
+            ).fetchall()
+            return [self._finalization_record(row) for row in rows]
+
+    def claim_tokensflow_finalization(
+        self,
+        worker_id: str,
+        *,
+        now: datetime,
+        lease_seconds: int,
+        process_lock_recovery_at: datetime | None = None,
+        job_id: str | None = None,
+    ) -> TokensFlowFinalizationRecord | None:
+        """Claim a resumable job; threshold recovery requires the caller to hold the unique Worker process lock."""
+
+        if fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", worker_id) is None:
+            raise ValueError("TokensFlow finalizer worker ID is unsafe")
+        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
+            raise ValueError("TokensFlow finalizer lease must be a positive integer")
+        if process_lock_recovery_at is not None and job_id is None:
+            raise ValueError("TokensFlow process-lock recovery requires an exact job ID")
+        now_text = _timestamp(now)
+        recovery_at_text = _timestamp(process_lock_recovery_at) if process_lock_recovery_at is not None else None
+        expires_at = _timestamp(now + timedelta(seconds=lease_seconds))
+        with self._write() as connection:
+            job_filter = "" if job_id is None else "AND job_id = ?"
+            recovery_filter = "" if recovery_at_text is None else "OR (state = ? AND ? <= ?)"
+            parameters: tuple[object, ...] = (
+                FinalizationState.PENDING.value,
+                FinalizationState.RUNNING.value,
+                FinalizationState.CLEANUP_PENDING.value,
+                now_text,
+                *(() if recovery_at_text is None else (FinalizationState.RUNNING.value, recovery_at_text, now_text)),
+                *((job_id,) if job_id is not None else ()),
+            )
+            row = connection.execute(
+                f"""
+                SELECT * FROM tokensflow_finalizations
+                WHERE (state = ? OR (state IN (?, ?) AND lease_expires_at <= ?) {recovery_filter})
+                {job_filter}
+                ORDER BY registered_at ASC, finalization_seq ASC
+                LIMIT 1
+                """,
+                parameters,
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                """
+                UPDATE tokensflow_finalizations
+                SET state = CASE WHEN state = ? THEN ? ELSE ? END,
+                    attempts = attempts + 1, lease_owner = ?, lease_expires_at = ?
+                WHERE job_id = ?
+                """,
+                (
+                    FinalizationState.CLEANUP_PENDING.value,
+                    FinalizationState.CLEANUP_PENDING.value,
+                    FinalizationState.RUNNING.value,
+                    worker_id,
+                    expires_at,
+                    row["job_id"],
+                ),
+            )
+            claimed = connection.execute(
+                "SELECT * FROM tokensflow_finalizations WHERE job_id = ?",
+                (row["job_id"],),
+            ).fetchone()
+            assert claimed is not None
+            return self._finalization_record(claimed)
+
+    def release_tokensflow_finalization(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        now: datetime,
+        error_category: str | None = None,
+    ) -> TokensFlowFinalizationRecord:
+        """Release a retryable job promptly without waiting for its lease to expire."""
+
+        with self._write() as connection:
+            self._require_finalization_owner(connection, job_id, worker_id, now=now)
+            connection.execute(
+                """
+                UPDATE tokensflow_finalizations
+                SET state = ?, error_category = ?, lease_owner = NULL, lease_expires_at = NULL
+                WHERE job_id = ?
+                """,
+                (FinalizationState.PENDING.value, error_category, job_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM tokensflow_finalizations WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            assert updated is not None
+            return self._finalization_record(updated)
+
+    def defer_tokensflow_finalization_cleanup(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        now: datetime,
+        retry_seconds: float,
+        reason: str,
+    ) -> TokensFlowFinalizationRecord:
+        """Keep failed resource removal durable and retryable without owning a task slot."""
+
+        if isinstance(retry_seconds, bool) or not isinstance(retry_seconds, (int, float)) or retry_seconds <= 0:
+            raise ValueError("TokensFlow cleanup retry interval must be positive")
+        retry_at = _timestamp(now + timedelta(seconds=retry_seconds))
+        with self._write() as connection:
+            self._require_finalization_owner(connection, job_id, worker_id, now=now)
+            connection.execute(
+                """
+                UPDATE tokensflow_finalizations
+                SET state = ?, finished_at = NULL, reason = ?, error_category = ?,
+                    lease_owner = NULL, lease_expires_at = ?
+                WHERE job_id = ?
+                """,
+                (
+                    FinalizationState.CLEANUP_PENDING.value,
+                    reason,
+                    "resource_removal_failed",
+                    retry_at,
+                    job_id,
+                ),
+            )
+            updated = connection.execute(
+                "SELECT * FROM tokensflow_finalizations WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            assert updated is not None
+            return self._finalization_record(updated)
+
+    def record_tokensflow_finalization_check(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        queue_passed: bool,
+        doctor_rc: int | None,
+        now: datetime,
+        error_category: str | None = None,
+    ) -> TokensFlowFinalizationRecord:
+        """Persist allowlisted poll evidence while retaining finalizer ownership."""
+
+        if type(queue_passed) is not bool:
+            raise TypeError("queue_passed must be an exact bool")
+        if doctor_rc is not None and (isinstance(doctor_rc, bool) or not isinstance(doctor_rc, int)):
+            raise TypeError("doctor_rc must be an integer or None")
+        checked_at = _timestamp(now)
+        with self._write() as connection:
+            row = self._require_finalization_owner(connection, job_id, worker_id, now=now)
+            persisted_queue_passed = bool(row["queue_passed"]) or queue_passed
+            connection.execute(
+                """
+                UPDATE tokensflow_finalizations
+                SET queue_passed = ?, doctor_rc = ?, checked_at = ?, error_category = ?
+                WHERE job_id = ?
+                """,
+                (int(persisted_queue_passed), doctor_rc, checked_at, error_category, job_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM tokensflow_finalizations WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            assert updated is not None
+            return self._finalization_record(updated)
+
+    def finish_tokensflow_finalization(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        state: FinalizationState,
+        now: datetime,
+        reason: str | None = None,
+        error_category: str | None = None,
+    ) -> TokensFlowFinalizationRecord:
+        """Finish cleanup without mutating any evaluation task or batch row."""
+
+        if state not in _TERMINAL_FINALIZATION_STATES:
+            raise ValueError("TokensFlow finalization terminal state is invalid")
+        finished_at = _timestamp(now)
+        with self._write() as connection:
+            self._require_finalization_owner(connection, job_id, worker_id, now=now)
+            connection.execute(
+                """
+                UPDATE tokensflow_finalizations
+                SET state = ?, finished_at = ?, reason = ?, error_category = ?,
+                    lease_owner = NULL, lease_expires_at = NULL
+                WHERE job_id = ?
+                """,
+                (state.value, finished_at, reason, error_category, job_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM tokensflow_finalizations WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            assert updated is not None
+            return self._finalization_record(updated)
+
+    @staticmethod
+    def _require_finalization_owner(
+        connection: sqlite3.Connection,
+        job_id: str,
+        worker_id: str,
+        *,
+        now: datetime,
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT * FROM tokensflow_finalizations WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise TaskNotFound(f"TokensFlow finalization not found: {job_id}")
+        if (
+            row["state"] not in {FinalizationState.RUNNING.value, FinalizationState.CLEANUP_PENDING.value}
+            or row["lease_owner"] != worker_id
+            or row["lease_expires_at"] is None
+            or _parse_timestamp(row["lease_expires_at"]) < now
+        ):
+            raise TaskOwnershipError("TokensFlow finalization lease is not owned")
+        return row
 
     def cancel_queued(self, task_id: str, *, now: datetime) -> TaskRecord:
         """Cancel a queued task."""
@@ -1883,6 +2330,40 @@ class TaskStore:
                 "retryable": (status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED} and category in RETRYABLE_FAILURES),
             },
             strict=True,
+        )
+
+    @staticmethod
+    def _finalization_record(row: sqlite3.Row) -> TokensFlowFinalizationRecord:
+        return TokensFlowFinalizationRecord(
+            job_id=str(row["job_id"]),
+            attempt_id=str(row["attempt_id"]),
+            task_id=str(row["task_id"]),
+            batch_id=str(row["batch_id"]) if row["batch_id"] is not None else None,
+            arm=str(row["arm"]),
+            run_id=str(row["run_id"]),
+            container_name=str(row["container_name"]),
+            runtime_path=str(row["runtime_path"]),
+            wrapper_path=str(row["wrapper_path"]),
+            egress_network=str(row["egress_network"]),
+            daemon_pid_file=str(row["daemon_pid_file"]),
+            evidence_sha256=str(row["evidence_sha256"]),
+            evidence_bytes=_stored_int(row["evidence_bytes"], name="TokensFlow evidence byte count"),
+            registered_at=_parse_timestamp(row["registered_at"]),
+            deadline_at=_parse_timestamp(row["deadline_at"]),
+            state=FinalizationState(row["state"]),
+            attempts=_stored_int(row["attempts"], name="TokensFlow finalization attempt count"),
+            queue_passed=bool(_stored_int(row["queue_passed"], name="TokensFlow queue evidence")),
+            doctor_rc=(
+                _stored_int(row["doctor_rc"], name="TokensFlow doctor return code")
+                if row["doctor_rc"] is not None
+                else None
+            ),
+            checked_at=_parse_optional_timestamp(row["checked_at"]),
+            finished_at=_parse_optional_timestamp(row["finished_at"]),
+            error_category=str(row["error_category"]) if row["error_category"] is not None else None,
+            reason=str(row["reason"]) if row["reason"] is not None else None,
+            lease_owner=str(row["lease_owner"]) if row["lease_owner"] is not None else None,
+            lease_expires_at=_parse_optional_timestamp(row["lease_expires_at"]),
         )
 
     @staticmethod

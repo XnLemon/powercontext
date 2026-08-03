@@ -11,6 +11,7 @@ WorkingDirectory=/data/powercontext-eval/deploy/powercontext
 EnvironmentFile=/data/powercontext-eval/config/evaluation-console.env
 Environment=UV_CACHE_DIR=/data/powercontext-eval/cache/uv
 ExecStart=/data/powercontext-eval/bin/uv run --project evaluation powercontext-eval worker
+KillMode=mixed
 Restart=on-failure
 RestartSec=5s
 UMask=0077

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import FrozenInstanceError
@@ -230,6 +232,52 @@ def test_timeout_kills_grandchild_process_group_and_reaps_launcher(tmp_path: Pat
                 os.kill(grandchild_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group behavior")
+def test_cancel_terminates_only_the_process_group_created_by_this_run(tmp_path: Path) -> None:
+    ready = tmp_path / "cancel-ready"
+    cancel = threading.Event()
+    failures: list[BaseException] = []
+    sentinel = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+
+    def run() -> None:
+        try:
+            ProcessRunner().run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); time.sleep(30)",
+                    str(ready),
+                ],
+                cwd=tmp_path,
+                cancel_event=cancel,
+            )
+        except BaseException as error:  # noqa: BLE001 - the thread boundary returns the exact runner failure
+            failures.append(error)
+
+    runner = threading.Thread(target=run)
+    runner.start()
+    try:
+        deadline = time.monotonic() + 2
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        cancel.set()
+        runner.join(timeout=2)
+
+        assert not runner.is_alive()
+        assert [type(error).__name__ for error in failures] == ["CommandCancelled"]
+        assert sentinel.poll() is None
+    finally:
+        cancel.set()
+        runner.join(timeout=2)
+        if sentinel.poll() is None:
+            os.killpg(sentinel.pid, signal.SIGKILL)
+        sentinel.wait(timeout=2)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX descendant discovery behavior")

@@ -768,6 +768,11 @@ def create_app(
                 task,
                 runs_root=config.run_root / "runs",
                 catalog=get_catalog(),
+                finalizations=(
+                    task_store.tokensflow_finalizations_for_attempt(task.attempt_id)
+                    if task.attempt_id is not None
+                    else ()
+                ),
             )
         except (CatalogError, ReportingError, OSError, ValueError):
             return _error(409, "report_unavailable", "The task detail report is not available.")

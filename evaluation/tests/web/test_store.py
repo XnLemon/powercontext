@@ -3,7 +3,7 @@ import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -18,7 +18,15 @@ from powercontext_eval.web.models import (
     TaskResult,
     TaskStatus,
 )
-from powercontext_eval.web.store import TaskAdmissionRejected, TaskConflict, TaskNotFound, TaskOwnershipError, TaskStore
+from powercontext_eval.web.store import (
+    FinalizationState,
+    TaskAdmissionRejected,
+    TaskConflict,
+    TaskNotFound,
+    TaskOwnershipError,
+    TaskStore,
+    TokensFlowFinalizationCreate,
+)
 from powercontext_eval.web.usage import UsageSnapshot
 
 NOW = datetime(2026, 7, 29, 1, 2, 3, tzinfo=UTC)
@@ -71,6 +79,200 @@ def store(database: Path) -> TaskStore:
     task_store = TaskStore(database, lease_duration=timedelta(seconds=60))
     task_store.initialize()
     return task_store
+
+
+def finalization_create(
+    task_id: str, attempt_id: str, *, arm: str = "off", run_id: str | None = None
+) -> TokensFlowFinalizationCreate:
+    selected_run_id = run_id or task_id
+    return TokensFlowFinalizationCreate(
+        attempt_id=attempt_id,
+        task_id=task_id,
+        batch_id=None,
+        arm=arm,
+        run_id=selected_run_id,
+        container_name=f"powercontext-eval-{selected_run_id}-{arm}",
+        runtime_path=f"work/{selected_run_id}/{arm}/runtime",
+        wrapper_path=f"work/{selected_run_id}/{arm}/evaluation-control/tokensflow-wrapper",
+        egress_network="tokensflow-egress",
+        daemon_pid_file="/runtime/tokensflow-home/.local/share/tokensflow/evaluation-daemon.pid",
+        evidence_sha256="a" * 64,
+        evidence_bytes=123,
+    )
+
+
+def _queued_task_with_attempt(store: TaskStore, key: str = "finalization") -> tuple[str, str]:
+    task, _ = store.create(request(key), now=NOW)
+    assert task.attempt_id is not None
+    return task.task_id, task.attempt_id
+
+
+def test_tokensflow_finalization_registration_is_unique_and_deadline_is_immutable(store: TaskStore) -> None:
+    task_id, attempt_id = _queued_task_with_attempt(store)
+    create = finalization_create(task_id, attempt_id)
+
+    first, created = store.register_tokensflow_finalization(create, now=NOW, timeout_seconds=600)
+    replay, replay_created = store.register_tokensflow_finalization(
+        create,
+        now=NOW + timedelta(minutes=5),
+        timeout_seconds=1,
+    )
+
+    assert created is True
+    assert replay_created is False
+    assert replay == first
+    assert first.state is FinalizationState.PENDING
+    assert first.registered_at == NOW
+    assert first.deadline_at == NOW + timedelta(minutes=10)
+    assert first.attempts == 0
+    assert first.queue_passed is False
+    assert first.finished_at is None
+    assert first.evidence_sha256 == "a" * 64
+    assert first.evidence_bytes == 123
+
+
+@pytest.mark.parametrize("timeout_seconds", [601, 3600])
+def test_tokensflow_finalization_registration_rejects_deadline_beyond_hard_limit(
+    store: TaskStore,
+    timeout_seconds: int,
+) -> None:
+    task_id, attempt_id = _queued_task_with_attempt(store, f"finalization-timeout-{timeout_seconds}")
+
+    with pytest.raises(ValueError, match="must not exceed 600 seconds"):
+        store.register_tokensflow_finalization(
+            finalization_create(task_id, attempt_id),
+            now=NOW,
+            timeout_seconds=timeout_seconds,
+        )
+
+    assert store.tokensflow_finalizations_for_attempt(attempt_id) == []
+
+
+def test_tokensflow_finalization_claim_is_oldest_first_and_recovers_expired_running_job(store: TaskStore) -> None:
+    first_task, first_attempt = _queued_task_with_attempt(store, "finalization-first")
+    second_task, second_attempt = _queued_task_with_attempt(store, "finalization-second")
+    first = store.register_tokensflow_finalization(
+        finalization_create(first_task, first_attempt), now=NOW, timeout_seconds=600
+    )[0]
+    second = store.register_tokensflow_finalization(
+        finalization_create(second_task, second_attempt, run_id=second_task),
+        now=NOW + timedelta(seconds=1),
+        timeout_seconds=600,
+    )[0]
+
+    claimed = store.claim_tokensflow_finalization("finalizer-a", now=NOW + timedelta(seconds=2), lease_seconds=30)
+    assert claimed is not None
+    assert claimed.job_id == first.job_id
+    assert claimed.state is FinalizationState.RUNNING
+    assert claimed.attempts == 1
+    second_claimed = store.claim_tokensflow_finalization(
+        "finalizer-b", now=NOW + timedelta(seconds=3), lease_seconds=30
+    )
+    assert second_claimed is not None and second_claimed.job_id == second.job_id
+
+    recovered = store.claim_tokensflow_finalization("finalizer-c", now=NOW + timedelta(seconds=33), lease_seconds=30)
+    assert recovered is not None
+    assert recovered.job_id == first.job_id
+    assert recovered.attempts == 2
+
+
+def test_tokensflow_cleanup_retry_survives_reopen_and_honors_retry_time(tmp_path: Path) -> None:
+    database = tmp_path / "tasks.sqlite3"
+    store = TaskStore(database, lease_duration=timedelta(seconds=60))
+    store.initialize()
+    task_id, attempt_id = _queued_task_with_attempt(store, "cleanup-retry-reopen")
+    job = store.register_tokensflow_finalization(
+        finalization_create(task_id, attempt_id),
+        now=NOW,
+        timeout_seconds=600,
+    )[0]
+    claimed = store.claim_tokensflow_finalization("finalizer-a", now=NOW, lease_seconds=300)
+    assert claimed is not None
+    deferred = store.defer_tokensflow_finalization_cleanup(
+        job.job_id,
+        "finalizer-a",
+        now=NOW,
+        retry_seconds=5,
+        reason="deadline",
+    )
+    assert deferred.state is FinalizationState.CLEANUP_PENDING
+
+    reopened = TaskStore(database, lease_duration=timedelta(seconds=60))
+    reopened.initialize()
+    assert reopened.list_open_tokensflow_finalizations()[0].state is FinalizationState.CLEANUP_PENDING
+    assert (
+        reopened.claim_tokensflow_finalization(
+            "finalizer-b",
+            now=NOW + timedelta(seconds=4),
+            lease_seconds=300,
+        )
+        is None
+    )
+    retried = reopened.claim_tokensflow_finalization(
+        "finalizer-b",
+        now=NOW + timedelta(seconds=5),
+        lease_seconds=300,
+    )
+    assert retried is not None
+    assert retried.state is FinalizationState.CLEANUP_PENDING
+    assert retried.attempts == 2
+
+
+def test_tokensflow_finalization_progress_and_terminal_states_survive_store_restart(
+    database: Path,
+) -> None:
+    store = TaskStore(database, lease_duration=timedelta(seconds=60))
+    store.initialize()
+    task_id, attempt_id = _queued_task_with_attempt(store, "finalization-restart")
+    registered = store.register_tokensflow_finalization(
+        finalization_create(task_id, attempt_id), now=NOW, timeout_seconds=600
+    )[0]
+    claimed = store.claim_tokensflow_finalization("finalizer-a", now=NOW, lease_seconds=30)
+    assert claimed is not None
+    checked = store.record_tokensflow_finalization_check(
+        registered.job_id,
+        "finalizer-a",
+        queue_passed=True,
+        doctor_rc=0,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    restarted = TaskStore(database, lease_duration=timedelta(seconds=60))
+    restarted.initialize()
+    restored = restarted.tokensflow_finalizations_for_attempt(attempt_id)
+    assert len(restored) == 1
+    assert restored[0].state is FinalizationState.RUNNING
+    assert restored[0].queue_passed is True
+    assert restored[0].doctor_rc == 0
+    assert checked == restored[0]
+
+    finished = restarted.finish_tokensflow_finalization(
+        registered.job_id,
+        "finalizer-a",
+        state=FinalizationState.PASSED,
+        now=NOW + timedelta(seconds=2),
+    )
+    assert finished.state is FinalizationState.PASSED
+    assert finished.finished_at == NOW + timedelta(seconds=2)
+    assert restarted.list_open_tokensflow_finalizations() == []
+
+
+def test_tokensflow_finalization_rejects_secret_or_unsafe_persisted_values(store: TaskStore) -> None:
+    task_id, attempt_id = _queued_task_with_attempt(store, "finalization-secret")
+    create = finalization_create(task_id, attempt_id)
+
+    for changed in (
+        {"runtime_path": "/tmp/private"},
+        {"wrapper_path": "../private"},
+        {"egress_network": "network;rm"},
+        {"evidence_sha256": "not-a-hash"},
+    ):
+        with pytest.raises(ValueError):
+            store.register_tokensflow_finalization(
+                TokensFlowFinalizationCreate(**cast(Any, {**create.__dict__, **changed})),
+                now=NOW,
+                timeout_seconds=600,
+            )
 
 
 def test_initialize_is_idempotent_and_creates_expected_schema(database: Path) -> None:

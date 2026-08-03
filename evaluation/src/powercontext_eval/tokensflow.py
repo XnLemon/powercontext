@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import quote, quote_plus
 
 from powercontext_eval.errors import PowerContextEvalError
+from powercontext_eval.models import Arm
 
 
 class UnsafeTokensFlowConfiguration(PowerContextEvalError):
@@ -105,11 +106,29 @@ class TokensFlowDaemonHandle:
     container_log_file: str
 
 
+@dataclass(frozen=True)
+class TokensFlowFinalizationDescriptor:
+    """Credential-free resources durably transferred after arm artifacts are complete."""
+
+    arm: Arm
+    run_id: str
+    container_name: str
+    runtime: Path
+    wrapper: Path
+    egress_network: str
+    daemon_pid_file: str
+    evidence_sha256: str
+    evidence_bytes: int
+
+
+TokensFlowFinalizationRegistrar = Callable[[TokensFlowFinalizationDescriptor], None]
+
+
 _TOKENSFLOW_VERSION = re.compile(
     rb"(?i:tokensflow) ([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})"
     rb"(?: \([A-Za-z0-9][A-Za-z0-9 .,_:+/@=-]{0,63}\))?"
 )
-_TOKENSFLOW_CAUGHT_UP = b"caught up (0 pending files)"
+_TOKENSFLOW_CAUGHT_UP = b"[PASS] queue: caught up (0 pending files)"
 _TOKENSFLOW_NEGATIVE_WORDS = (b"pending", b"rejected", b"failed", b"blocked")
 _TOKENSFLOW_QUEUE_SCOPE = re.compile(rb"\b(?:queue|accounting)\b")
 _TOKENSFLOW_ENVIRONMENT_NAME = re.compile(r"TOKENSFLOW_[A-Z0-9_]+")
@@ -180,10 +199,11 @@ def parse_tokensflow_version(raw: bytes) -> str:
 
 
 def tokensflow_queue_caught_up(raw: bytes) -> bool:
-    """Require the exact 1.0.16 caught-up marker and reject explicit negative state."""
+    """Require one exact, complete TokensFlow queue PASS line."""
 
-    normalized = raw.lower().replace(b"\r\n", b"\n")
-    return _TOKENSFLOW_CAUGHT_UP in normalized and not tokensflow_queue_negative_detected(normalized)
+    normalized = raw.replace(b"\r\n", b"\n")
+    queue_lines = [line for line in normalized.splitlines() if re.search(rb"\bqueue\b", line.lower())]
+    return queue_lines == [_TOKENSFLOW_CAUGHT_UP]
 
 
 def tokensflow_queue_negative_detected(raw: bytes) -> bool:

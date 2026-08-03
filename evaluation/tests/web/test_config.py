@@ -77,6 +77,8 @@ def test_web_config_defaults_match_m0_layout() -> None:
     assert config.usage_probe_timeout_seconds == 15
     assert config.usage_snapshot_max_age_seconds == 120
     assert config.task_parallelism == 1
+    assert config.tokensflow_finalizer_timeout_seconds == 600
+    assert config.tokensflow_finalizer_poll_seconds == 5
     assert config.codex_models == ("gpt-5.6-sol",)
 
 
@@ -122,6 +124,7 @@ def test_web_config_rejects_codex_allowlists_without_default_or_with_unsafe_entr
         ("task_parallelism", 0),
         ("task_parallelism", 11),
         ("task_parallelism", "1"),
+        ("tokensflow_finalizer_timeout_seconds", 601),
     ],
 )
 def test_web_config_direct_construction_rejects_invalid_values(tmp_path: Path, field: str, value: object) -> None:
@@ -146,6 +149,8 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
         "POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS": "20",
         "POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS": "180",
         "POWERCONTEXT_EVAL_TASK_PARALLELISM": "10",
+        "POWERCONTEXT_EVAL_TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS": "600",
+        "POWERCONTEXT_EVAL_TOKENSFLOW_FINALIZER_POLL_SECONDS": "5",
         "POWERCONTEXT_EVAL_TOKENSFLOW_BINARY": "/opt/tools/tokensflow",
         "POWERCONTEXT_EVAL_TOKENSFLOW_USER_HOME": "/srv/identities/current",
         "POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK": "egress-net",
@@ -167,6 +172,8 @@ def test_web_config_from_environment_reads_only_named_variables(tmp_path: Path) 
     assert config.usage_probe_timeout_seconds == 20
     assert config.usage_snapshot_max_age_seconds == 180
     assert config.task_parallelism == 10
+    assert config.tokensflow_finalizer_timeout_seconds == 600
+    assert config.tokensflow_finalizer_poll_seconds == 5
     assert config.tokensflow_binary == Path("/opt/tools/tokensflow")
     assert config.tokensflow_user_home == Path("/srv/identities/current")
     assert config.tokensflow_egress_network == "egress-net"
@@ -231,6 +238,8 @@ def test_web_config_rejects_relative_paths(tmp_path: Path, name: str, value: str
         ("POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS", "7201"),
         ("POWERCONTEXT_EVAL_TASK_PARALLELISM", "0"),
         ("POWERCONTEXT_EVAL_TASK_PARALLELISM", "11"),
+        ("POWERCONTEXT_EVAL_TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS", "601"),
+        ("POWERCONTEXT_EVAL_TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS", "3600"),
     ],
 )
 def test_web_config_rejects_invalid_numeric_settings(tmp_path: Path, name: str, value: str) -> None:

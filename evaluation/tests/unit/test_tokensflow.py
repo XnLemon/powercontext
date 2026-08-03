@@ -87,21 +87,19 @@ def test_drain_deadline_rejects_nonpositive_timeout_without_calling_clock() -> N
 
 
 @pytest.mark.parametrize(
-    "status",
+    ("status", "expected"),
     [
-        b"[PASS] queue: caught up (0 pending files) (within collection window)\n",
-        b"caught up (0 pending files)\nrejected batches: none\n",
-        b"caught up (0 pending files)\ncollector circuit: closed\nblocked batches: 0\n",
-        (
-            b"[FAIL] daemon: not running (expected after TERM)\n"
-            b"[PASS] queue: caught up (0 pending files) (within collection window)\n"
-            b"[FAIL] auth: login probe unavailable\n"
-        ),
+        (b"[PASS] queue: caught up (0 pending files)\n", True),
+        (b"header\r\n[PASS] queue: caught up (0 pending files)\r\nfooter\r\n", True),
+        (b"[WARN] queue: caught up (0 pending files)\n", False),
+        (b"[PASS] queue: caught up (2 pending files)\n", False),
+        (b"queue: caught up (0 pending files)\n", False),
+        (b"[PASS] queue: caught up (0 pending files) extra\n", False),
+        (b"[PASS] recent uploads: caught up (0 pending files)\n", False),
     ],
 )
-def test_tokensflow_queue_requires_only_exact_caught_up_without_negative_state(status: bytes) -> None:
-    assert tokensflow_queue_caught_up(status) is True
-    assert tokensflow_queue_negative_detected(status) is False
+def test_tokensflow_queue_requires_one_exact_complete_pass_line(status: bytes, expected: bool) -> None:
+    assert tokensflow_queue_caught_up(status) is expected
 
 
 @pytest.mark.parametrize(
@@ -133,7 +131,7 @@ def test_tokensflow_queue_fails_closed_without_exact_caught_up_marker() -> None:
 def test_tokensflow_queue_ignores_nonqueue_failures_but_rejects_queue_scoped_failures() -> None:
     real_shape = (
         b"[FAIL] daemon: not running after graceful TERM\n"
-        b"[PASS] queue: caught up (0 pending files) (within collection window)\n"
+        b"[PASS] queue: caught up (0 pending files)\n"
         b"[FAIL] runtime: service manager unavailable\n"
         b"[FAIL] auth: optional identity refresh failed\n"
         b"[FAIL] config: optional update metadata failed\n"

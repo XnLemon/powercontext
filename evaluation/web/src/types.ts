@@ -488,12 +488,28 @@ export interface RequiredTests {
   test_patch: string;
 }
 
+export interface TokensFlowFinalizationSummary {
+  state: "pending" | "passed" | "timed_out" | "capacity_evicted" | "cleanup_failed";
+  registered_at: string;
+  deadline_at: string;
+  finished_at: string | null;
+  attempts: number;
+  queue_passed: boolean;
+  doctor_rc: number | null;
+  error_category: string | null;
+  reason: string | null;
+}
+
 export interface BatchTaskDetail {
   task: BatchTaskItem;
   problem_statement: string;
   required_tests: RequiredTests;
   off: TaskDetailArm | null;
   on: TaskDetailArm | null;
+  tokensflow_finalization: {
+    off: TokensFlowFinalizationSummary | null;
+    on: TokensFlowFinalizationSummary | null;
+  };
 }
 
 export interface ContextEvent {

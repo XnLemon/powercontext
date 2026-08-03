@@ -41,6 +41,8 @@ from powercontext_eval.tokensflow import (
     DrainDeadline,
     TokensFlowDaemonHandle,
     TokensFlowEvidence,
+    TokensFlowFinalizationDescriptor,
+    TokensFlowFinalizationRegistrar,
     TokensFlowInfrastructureError,
     UnsafeTokensFlowConfiguration,
     matched_tokensflow_evidence,
@@ -351,6 +353,7 @@ class SutConfig:
     limits: ContainerLimits = ContainerLimits()
     plugin_version: str = "0.1.0"
     codex_timeout: float = 3600
+    finalization_registrar: TokensFlowFinalizationRegistrar | None = None
 
     def __post_init__(self) -> None:
         if _SAFE_RUN_ID.fullmatch(self.run_id) is None:
@@ -747,6 +750,7 @@ class DockerSut:
         container = f"{network}-{arm.value}"
         container_started = False
         tokensflow_egress_attached = False
+        handed_off = False
         preserve_after_drain_failure = False
         tokensflow_wrapper_staged = False
         tokensflow_environment = tokensflow_runtime_environment()
@@ -831,23 +835,24 @@ class DockerSut:
                 },
                 secrets=credential_variants,
             )
-            tokensflow_drain_failed = False
-            try:
-                tokensflow = self._drain_tokensflow(
-                    container,
-                    paths,
-                    tokensflow_daemon,
-                    tokensflow,
-                    tokensflow_environment,
-                    tokensflow_command_secrets,
-                )
-            except TokensFlowInfrastructureError:
-                preserve_after_drain_failure = True
-                tokensflow_drain_failed = True
-            if tokensflow_drain_failed:
-                self._write_tokensflow_recovery_marker(paths, "tokensflow_drain_failed")
-                raise TokensFlowInfrastructureError("TokensFlow drain failed") from None
-            store.write_json("tokensflow/provenance.json", tokensflow.as_dict())
+            if config.finalization_registrar is None:
+                tokensflow_drain_failed = False
+                try:
+                    tokensflow = self._drain_tokensflow(
+                        container,
+                        paths,
+                        tokensflow_daemon,
+                        tokensflow,
+                        tokensflow_environment,
+                        tokensflow_command_secrets,
+                    )
+                except TokensFlowInfrastructureError:
+                    preserve_after_drain_failure = True
+                    tokensflow_drain_failed = True
+                if tokensflow_drain_failed:
+                    self._write_tokensflow_recovery_marker(paths, "tokensflow_drain_failed")
+                    raise TokensFlowInfrastructureError("TokensFlow drain failed") from None
+            tokensflow_provenance = store.write_json("tokensflow/provenance.json", tokensflow.as_dict())
             _retain_private_trace(
                 paths.pc_home / "codex-observed.jsonl",
                 store,
@@ -889,21 +894,55 @@ class DockerSut:
             ).encode("utf-8")
             _reject_retained_secrets(provenance_bytes, credential_variants)
             store.write_bytes("powercontext/provenance.json", provenance_bytes)
+            patch = self._docker.run(
+                ("git", "diff", "--binary", "--full-index", "HEAD", "--"),
+                cwd=paths.workspace,
+                timeout=120,
+            ).stdout
+            store.write_text("workspace.patch", patch)
+            if config.finalization_registrar is not None:
+                provenance_raw = tokensflow_provenance.read_bytes()
+                descriptor = TokensFlowFinalizationDescriptor(
+                    arm=arm,
+                    run_id=config.run_id,
+                    container_name=container,
+                    runtime=paths.runtime,
+                    wrapper=paths.runtime.parent / "evaluation-control/tokensflow-wrapper",
+                    egress_network=config.tokensflow_egress_network,
+                    daemon_pid_file=tokensflow_daemon.container_pid_file,
+                    evidence_sha256=hashlib.sha256(provenance_raw).hexdigest(),
+                    evidence_bytes=len(provenance_raw),
+                )
+                try:
+                    config.finalization_registrar(descriptor)
+                except Exception:  # noqa: BLE001 - ownership transfers only after the durable callback returns
+                    raise TokensFlowInfrastructureError("TokensFlow finalization handoff failed") from None
+                handed_off = True
+                try:
+                    self._docker.run(
+                        ("docker", "network", "disconnect", network, container),
+                        cwd=paths.runtime,
+                        timeout=30,
+                        check=False,
+                    )
+                except (CommandError, OSError):
+                    pass
             return SutOutcome(codex, evidence, tokensflow, tokensflow_daemon)
         finally:
-            try:
-                if tokensflow_egress_attached:
-                    self._detach_tokensflow_egress(config, container, paths)
-            finally:
-                container_removed = not container_started
-                if container_started and not preserve_after_drain_failure:
-                    container_removed = self._remove_container_for_cleanup(container, paths)
-                    if not container_removed:
-                        self._write_tokensflow_recovery_marker(paths, "tokensflow_container_cleanup_failed")
-                if tokensflow_wrapper_staged and not preserve_after_drain_failure and container_removed:
-                    self._cleanup_tokensflow_wrapper(paths)
-                if container_started and not preserve_after_drain_failure and not container_removed:
-                    raise TokensFlowInfrastructureError("TokensFlow container cleanup failed") from None
+            if not handed_off:
+                try:
+                    if tokensflow_egress_attached:
+                        self._detach_tokensflow_egress(config, container, paths)
+                finally:
+                    container_removed = not container_started
+                    if container_started and not preserve_after_drain_failure:
+                        container_removed = self._remove_container_for_cleanup(container, paths)
+                        if not container_removed:
+                            self._write_tokensflow_recovery_marker(paths, "tokensflow_container_cleanup_failed")
+                    if tokensflow_wrapper_staged and not preserve_after_drain_failure and container_removed:
+                        self._cleanup_tokensflow_wrapper(paths)
+                    if container_started and not preserve_after_drain_failure and not container_removed:
+                        raise TokensFlowInfrastructureError("TokensFlow container cleanup failed") from None
 
     @staticmethod
     def _validate_tokensflow_inputs(config: SutConfig, paths: ArmPaths) -> tuple[Path, Path]:

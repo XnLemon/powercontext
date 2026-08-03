@@ -506,6 +506,17 @@ const taskDetailArmSchema = z.strictObject({
   output_tokens: nonnegativeIntegerSchema.nullable(),
   total_tokens: nonnegativeIntegerSchema.nullable(),
 });
+const tokensflowFinalizationSchema = z.strictObject({
+  state: z.enum(["pending", "passed", "timed_out", "capacity_evicted", "cleanup_failed"]),
+  registered_at: timestampSchema,
+  deadline_at: timestampSchema,
+  finished_at: timestampSchema.nullable(),
+  attempts: nonnegativeIntegerSchema,
+  queue_passed: z.boolean(),
+  doctor_rc: z.number().int().nullable(),
+  error_category: z.string().nullable(),
+  reason: z.string().nullable(),
+});
 const batchTaskDetailSchema = z.strictObject({
   task: batchTaskItemSchema,
   problem_statement: z.string(),
@@ -517,6 +528,10 @@ const batchTaskDetailSchema = z.strictObject({
   }),
   off: taskDetailArmSchema.nullable(),
   on: taskDetailArmSchema.nullable(),
+  tokensflow_finalization: z.strictObject({
+    off: tokensflowFinalizationSchema.nullable(),
+    on: tokensflowFinalizationSchema.nullable(),
+  }),
 });
 const contextEventSchema = z.strictObject({
   sequence: z.number().int().positive(),

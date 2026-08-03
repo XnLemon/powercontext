@@ -45,7 +45,12 @@ from powercontext_eval.powercontext_sut import (
     validate_treatment,
 )
 from powercontext_eval.process import CommandFailed, CommandResult, CommandTimedOut, ProcessRunner
-from powercontext_eval.tokensflow import DrainDeadline, TokensFlowDaemonHandle, TokensFlowInfrastructureError
+from powercontext_eval.tokensflow import (
+    DrainDeadline,
+    TokensFlowDaemonHandle,
+    TokensFlowFinalizationDescriptor,
+    TokensFlowInfrastructureError,
+)
 
 EXPECTED_COMMON = (
     "codex",
@@ -352,8 +357,7 @@ class TranscriptDocker:
             return self._output(b"uploaded=1 duplicates=0\n", kwargs)
         if _is_tokensflow(argv, "doctor"):
             return self._output(
-                b"[FAIL] daemon: not running after graceful TERM\n"
-                b"[PASS] queue: caught up (0 pending files) (within collection window)\n",
+                b"[FAIL] daemon: not running after graceful TERM\n[PASS] queue: caught up (0 pending files)\n",
                 kwargs,
                 returncode=1,
             )
@@ -690,6 +694,95 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
     assert raw_host_identity not in retained
     assert raw_container_identity not in retained
     assert raw_version not in retained
+
+
+def test_artifact_complete_arm_hands_off_without_waiting_for_tokensflow_drain(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    registrations: list[TokensFlowFinalizationDescriptor] = []
+    docker = TranscriptDocker()
+
+    def register_before_disconnect(descriptor: TokensFlowFinalizationDescriptor) -> None:
+        disconnect = ("docker", "network", "disconnect", "powercontext-eval-run-1", descriptor.container_name)
+        assert disconnect not in docker.commands
+        registrations.append(descriptor)
+
+    config = replace(config, finalization_registrar=register_before_disconnect)
+
+    DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        config,
+        Arm.OFF,
+        paths,
+        b"prompt",
+        ArtifactStore(paths.result_root),
+    )
+
+    assert len(registrations) == 1
+    descriptor = registrations[0]
+    assert descriptor.arm is Arm.OFF
+    assert descriptor.container_name == "powercontext-eval-run-1-off"
+    assert descriptor.runtime == paths.runtime
+    assert descriptor.wrapper == paths.runtime.parent / "evaluation-control/tokensflow-wrapper"
+    assert descriptor.evidence_bytes > 0
+    assert len(descriptor.evidence_sha256) == 64
+    assert not any(_is_tokensflow(command, "upload") for command in docker.commands)
+    assert not any(_is_tokensflow(command, "doctor") for command in docker.commands)
+    assert ("docker", "network", "disconnect", "powercontext-eval-run-1", descriptor.container_name) in docker.commands
+    assert ("docker", "rm", "-f", descriptor.container_name) not in docker.commands
+    for artifact in (
+        "codex/events.jsonl",
+        "codex/usage.json",
+        "context/codex-observed.jsonl",
+        "powercontext/treatment.json",
+        "tokensflow/provenance.json",
+        "workspace.patch",
+    ):
+        assert (paths.result_root / artifact).is_file()
+
+
+def test_durable_handoff_survives_disconnect_failure_without_local_container_cleanup(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    registrations: list[TokensFlowFinalizationDescriptor] = []
+    docker = TranscriptDocker(fail_at="disconnect")
+
+    DockerSut(docker, relay_factory=FakeRelay).run_arm(
+        replace(config, finalization_registrar=registrations.append),
+        Arm.OFF,
+        paths,
+        b"prompt",
+        ArtifactStore(paths.result_root),
+    )
+
+    assert len(registrations) == 1
+    assert ("docker", "rm", "-f", registrations[0].container_name) not in docker.commands
+
+
+def test_failed_handoff_registration_cleans_locally_without_an_untracked_container(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    def fail_registration(_descriptor: TokensFlowFinalizationDescriptor) -> None:
+        raise RuntimeError("private registration failure")
+
+    docker = TranscriptDocker()
+    with pytest.raises(TokensFlowInfrastructureError, match="finalization handoff failed"):
+        DockerSut(docker, relay_factory=FakeRelay).run_arm(
+            replace(config, finalization_registrar=fail_registration),
+            Arm.OFF,
+            paths,
+            b"prompt",
+            ArtifactStore(paths.result_root),
+        )
+
+    assert ("docker", "rm", "-f", "powercontext-eval-run-1-off") in docker.commands
+    assert not (paths.runtime.parent / "evaluation-control/tokensflow-wrapper").exists()
 
 
 def test_tokensflow_path_wrapper_clears_only_proxy_environment_and_preserves_arguments(tmp_path: Path) -> None:

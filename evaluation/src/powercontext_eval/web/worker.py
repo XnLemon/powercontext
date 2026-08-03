@@ -37,12 +37,19 @@ from powercontext_eval.runner import (
     run_minimal_swebench_pro,
     run_swebench_pro_instance,
 )
+from powercontext_eval.tokensflow import TokensFlowFinalizationDescriptor, TokensFlowFinalizationRegistrar
 from powercontext_eval.web.claiming import ClaimCoordinator
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.controls import BatchPauseReason
+from powercontext_eval.web.finalization import DockerFinalizationRuntime, TokensFlowFinalizer
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskPhase, TaskRecord, TaskResult
 from powercontext_eval.web.reporting import ReportingError, load_report
-from powercontext_eval.web.store import TaskConflict, TaskOwnershipError, TaskStore
+from powercontext_eval.web.store import (
+    TaskConflict,
+    TaskOwnershipError,
+    TaskStore,
+    TokensFlowFinalizationCreate,
+)
 from powercontext_eval.web.usage import CodexUsageProbe, UsageSnapshot
 
 _INTERNAL_SUMMARY = "The evaluation worker failed unexpectedly. Inspect the retained m0 logs."
@@ -70,6 +77,10 @@ class Catalog(Protocol):
 
 class UsageProbe(Protocol):
     def read(self, *, now: datetime) -> UsageSnapshot: ...
+
+
+class FinalizerSupervisor(Protocol):
+    def run_forever(self, stop: threading.Event, poll_seconds: float) -> None: ...
 
 
 class TaskPairWorker:
@@ -228,6 +239,7 @@ class TaskPairWorker:
             run_id=_execution_run_id(task),
             model=task.request.model,
             reasoning_effort=task.request.reasoning_effort,
+            finalization_registrar=self._finalization_registrar(task),
         )
 
     def _legacy_run_config(self, task: TaskRecord) -> MinimalRunConfig:
@@ -249,7 +261,40 @@ class TaskPairWorker:
             run_id=_execution_run_id(task),
             model=task.request.model,
             reasoning_effort=task.request.reasoning_effort,
+            finalization_registrar=self._finalization_registrar(task),
         )
+
+    def _finalization_registrar(self, task: TaskRecord) -> TokensFlowFinalizationRegistrar:
+        attempt_id = task.attempt_id
+        if attempt_id is None:
+            raise ValueError("TokensFlow finalization requires an attempt ID")
+
+        def register(descriptor: TokensFlowFinalizationDescriptor) -> None:
+            try:
+                runtime_path = descriptor.runtime.relative_to(self._config.run_root)
+                wrapper_path = descriptor.wrapper.relative_to(self._config.run_root)
+            except ValueError:
+                raise ValueError("TokensFlow finalization paths escaped the run root") from None
+            self._store.register_tokensflow_finalization(
+                TokensFlowFinalizationCreate(
+                    attempt_id=attempt_id,
+                    task_id=task.task_id,
+                    batch_id=task.batch_id,
+                    arm=descriptor.arm.value,
+                    run_id=descriptor.run_id,
+                    container_name=descriptor.container_name,
+                    runtime_path=os.fspath(runtime_path),
+                    wrapper_path=os.fspath(wrapper_path),
+                    egress_network=descriptor.egress_network,
+                    daemon_pid_file=descriptor.daemon_pid_file,
+                    evidence_sha256=descriptor.evidence_sha256,
+                    evidence_bytes=descriptor.evidence_bytes,
+                ),
+                now=self._clock(),
+                timeout_seconds=self._config.tokensflow_finalizer_timeout_seconds,
+            )
+
+        return register
 
     def _pinned_batch_ref(self, batch_id: str) -> str:
         batch = self._store.get_batch(batch_id)
@@ -360,6 +405,7 @@ class EvaluationWorker:
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] | None = None,
         thread_factory: ThreadFactory = threading.Thread,
+        finalizer: FinalizerSupervisor | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -378,6 +424,12 @@ class EvaluationWorker:
             clock=self._clock,
         )
         self._coordinator = coordinator
+        self._finalizer = finalizer or TokensFlowFinalizer(
+            store,
+            DockerFinalizationRuntime(config.run_root, cancel_event=self._stop),
+            clock=self._clock,
+            task_parallelism=config.task_parallelism,
+        )
         base_worker_id = worker_id or f"worker-{uuid4().hex}"
 
         def default_sleep(seconds: float) -> None:
@@ -453,6 +505,7 @@ class EvaluationWorker:
                 for index, slot in enumerate(self._slots)
             )
             started: list[threading.Thread] = []
+            finalizer_thread: threading.Thread | None = None
             try:
                 for thread in threads:
                     thread.start()
@@ -463,8 +516,24 @@ class EvaluationWorker:
                 for thread in started:
                     thread.join()
                 raise RuntimeError("Evaluation worker slot failed") from None
+            try:
+                finalizer_thread = threading.Thread(
+                    target=self._finalizer.run_forever,
+                    args=(self._stop, self._config.tokensflow_finalizer_poll_seconds),
+                    daemon=False,
+                    name="tokensflow-finalizer",
+                )
+                finalizer_thread.start()
+            except Exception as error:  # noqa: BLE001 - durable rows remain recoverable while evaluation continues
+                finalizer_thread = None
+                _LOGGER.warning(
+                    "TokensFlow finalizer supervisor failed to start (error_type=%s)",
+                    type(error).__name__,
+                )
             for thread in started:
                 thread.join()
+            if finalizer_thread is not None:
+                finalizer_thread.join()
             if failures:
                 raise RuntimeError("Evaluation worker slot failed") from None
 

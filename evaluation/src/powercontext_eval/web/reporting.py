@@ -33,6 +33,8 @@ from powercontext_eval.web.batches import (
     TaskTokenDelta,
     TokenAggregate,
     TokenMetricAggregate,
+    TokensFlowFinalizationPair,
+    TokensFlowFinalizationSummary,
 )
 from powercontext_eval.web.estimation import BatchEstimate, EstimateBasis, EstimateSample, estimate_batch
 from powercontext_eval.web.models import (
@@ -45,6 +47,7 @@ from powercontext_eval.web.models import (
     TaskStatus,
     TreatmentEvidence,
 )
+from powercontext_eval.web.store import FinalizationState, TokensFlowFinalizationRecord
 from powercontext_eval.web.usage import UsageSnapshot
 
 _REPORT_JSON_LIMIT = 1024 * 1024
@@ -672,12 +675,44 @@ def _detail_arm(arm: ArmReport) -> TaskDetailArm:
     )
 
 
+def tokensflow_finalization_summary(record: TokensFlowFinalizationRecord) -> TokensFlowFinalizationSummary:
+    """Project one durable job through an explicit non-secret allowlist."""
+
+    public_state: Literal["pending", "passed", "timed_out", "capacity_evicted", "cleanup_failed"]
+    if record.state in {
+        FinalizationState.PENDING,
+        FinalizationState.RUNNING,
+        FinalizationState.CLEANUP_PENDING,
+    }:
+        public_state = "pending"
+    elif record.state is FinalizationState.PASSED:
+        public_state = "passed"
+    elif record.state is FinalizationState.TIMED_OUT:
+        public_state = "timed_out"
+    elif record.state is FinalizationState.CAPACITY_EVICTED:
+        public_state = "capacity_evicted"
+    else:
+        public_state = "cleanup_failed"
+    return TokensFlowFinalizationSummary(
+        state=public_state,
+        registered_at=record.registered_at,
+        deadline_at=record.deadline_at,
+        finished_at=record.finished_at,
+        attempts=record.attempts,
+        queue_passed=record.queue_passed,
+        doctor_rc=record.doctor_rc,
+        error_category=record.error_category,
+        reason=record.reason,
+    )
+
+
 def load_batch_task_detail(
     batch: BatchRecord,
     task: TaskRecord,
     *,
     runs_root: Path,
     catalog: BenchmarkCatalog,
+    finalizations: Sequence[TokensFlowFinalizationRecord] = (),
 ) -> BatchTaskDetailResponse:
     """Return full benchmark and official result detail for one batch child."""
 
@@ -691,6 +726,7 @@ def load_batch_task_detail(
         bundle = _bundle_for_task(task, runs_root)
         off = _detail_arm(bundle.off)
         on = _detail_arm(bundle.on)
+    finalization_by_arm = {record.arm: tokensflow_finalization_summary(record) for record in finalizations}
     return BatchTaskDetailResponse(
         task=item,
         problem_statement=instance.problem_statement,
@@ -702,6 +738,10 @@ def load_batch_task_detail(
         ),
         off=off,
         on=on,
+        tokensflow_finalization=TokensFlowFinalizationPair(
+            off=finalization_by_arm.get("off"),
+            on=finalization_by_arm.get("on"),
+        ),
     )
 
 

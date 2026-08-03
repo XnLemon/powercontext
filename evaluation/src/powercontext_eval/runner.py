@@ -41,6 +41,7 @@ from powercontext_eval.powercontext_sut import (
 from powercontext_eval.process import ProcessRunner
 from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, TestGroupReport, render_report
 from powercontext_eval.tokensflow import (
+    TokensFlowFinalizationRegistrar,
     TokensFlowInfrastructureError,
     UnsafeTokensFlowConfiguration,
     snapshot_tokensflow_home,
@@ -96,6 +97,7 @@ class RunConfig:
     run_id: str
     model: str = DEFAULT_CODEX_MODEL
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
+    finalization_registrar: TokensFlowFinalizationRegistrar | None = None
 
     def __post_init__(self) -> None:
         if not is_safe_codex_model(self.model):
@@ -277,6 +279,7 @@ def _run_swebench_pro_instance(
                 tokensflow_egress_network=config.tokensflow_egress_network,
                 model=config.model,
                 reasoning_effort=config.reasoning_effort,
+                finalization_registrar=config.finalization_registrar,
             ),
             paths=arm_paths,
             prompts={Arm.OFF: prompt, Arm.ON: prompt},
@@ -395,6 +398,7 @@ class MinimalRunConfig:
     run_id: str | None = None
     model: str = DEFAULT_CODEX_MODEL
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
+    finalization_registrar: TokensFlowFinalizationRegistrar | None = None
 
     def __post_init__(self) -> None:
         if not is_safe_codex_model(self.model):
@@ -434,6 +438,7 @@ def run_minimal_swebench_pro(
             run_id=run_id,
             model=config.model,
             reasoning_effort=config.reasoning_effort,
+            finalization_registrar=config.finalization_registrar,
         ),
         instance=instance,
         on_phase=on_phase,

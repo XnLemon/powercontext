@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -61,7 +61,15 @@ def _web_config(root_path: Path | None) -> WebConfig:
 @contextmanager
 def _worker_signal_handlers(worker: _Stoppable) -> Iterator[None]:
     previous: dict[signal.Signals, Any] = {}
-    handler: Callable[[int, FrameType | None], None] = lambda signum, frame: _request_worker_stop(worker, signum, frame)
+    stop_requested = False
+
+    def handler(signum: int, frame: FrameType | None) -> None:
+        nonlocal stop_requested
+        if stop_requested:
+            return
+        stop_requested = True
+        _request_worker_stop(worker, signum, frame)
+
     try:
         for signum in (signal.SIGTERM, signal.SIGINT):
             previous[signum] = signal.getsignal(signum)

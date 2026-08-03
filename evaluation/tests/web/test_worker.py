@@ -16,9 +16,10 @@ from powercontext_eval.benchmarks.swebench_pro.adapter import DatasetSchemaError
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialResultError
 from powercontext_eval.codex import CodexInfrastructureError
 from powercontext_eval.errors import GitSourceError
+from powercontext_eval.models import Arm
 from powercontext_eval.powercontext_sut import InvalidTreatment, UnsafeSutConfiguration
 from powercontext_eval.runner import MinimalRunConfig, MinimalRunResult, RunConfig, RunPhase
-from powercontext_eval.tokensflow import TokensFlowInfrastructureError
+from powercontext_eval.tokensflow import TokensFlowFinalizationDescriptor, TokensFlowInfrastructureError
 from powercontext_eval.web.batches import BatchCreate, BatchStatus
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.controls import BatchControlIntent, BatchPauseReason
@@ -1146,6 +1147,33 @@ def test_run_forever_recovers_once_and_waits_only_when_idle(
     assert waits == [config.poll_seconds]
 
 
+def test_finalizer_supervisor_is_independent_from_task_pair_slots_and_stops_promptly(tmp_path: Path) -> None:
+    config = _config(tmp_path, task_parallelism=4)
+    store = _store(config)
+    entered = threading.Event()
+    observed_stop: list[threading.Event] = []
+
+    class FakeFinalizer:
+        def run_forever(self, stop: threading.Event, poll_seconds: float) -> None:
+            assert poll_seconds == config.tokensflow_finalizer_poll_seconds
+            observed_stop.append(stop)
+            entered.set()
+            stop.wait(timeout=2)
+
+    worker = EvaluationWorker(config, store, finalizer=FakeFinalizer(), clock=lambda: NOW)
+    supervisor = threading.Thread(target=worker.run_forever)
+    supervisor.start()
+    assert entered.wait(timeout=2)
+
+    worker.stop()
+    supervisor.join(timeout=2)
+
+    assert not supervisor.is_alive()
+    assert len(worker._slots) == 4
+    assert observed_stop == [worker._stop]
+    assert worker._stop.is_set()
+
+
 @pytest.mark.parametrize("parallelism", [4, 10])
 def test_supervisor_respects_configured_isolated_task_pair_capacity_and_stop_prevents_replacement(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, parallelism: int
@@ -1230,6 +1258,41 @@ def test_task_pair_worker_directly_preserves_phase_order_and_report_boundary(
     completed = store.get(task.task_id)
     assert completed.status is TaskStatus.SUCCEEDED
     assert completed.phase is TaskPhase.OFFICIAL_EVALUATION
+
+
+def test_worker_run_config_registers_arm_handoff_in_store(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    batch = _create_batch(store, key="handoff-config", instance_ids=("instance_owner__repo-a",))
+    task = store.list_batch_tasks(batch.batch_id)[0]
+    assert task.instance_id is not None
+    worker = TaskPairWorker(
+        config, store, source=FakeSource(), catalog=FakeCatalog((task.instance_id,)), clock=lambda: NOW
+    )
+
+    run_config = worker._batch_run_config(task)
+    assert run_config.finalization_registrar is not None
+    runtime = config.run_root / "work" / task.task_id / "off" / "runtime"
+    run_config.finalization_registrar(
+        TokensFlowFinalizationDescriptor(
+            arm=Arm.OFF,
+            run_id=task.task_id,
+            container_name=f"powercontext-eval-{task.task_id}-off",
+            runtime=runtime,
+            wrapper=runtime.parent / "evaluation-control/tokensflow-wrapper",
+            egress_network="bridge",
+            daemon_pid_file="/runtime/tokensflow-home/.local/share/tokensflow/evaluation-daemon.pid",
+            evidence_sha256="c" * 64,
+            evidence_bytes=78,
+        )
+    )
+
+    assert task.attempt_id is not None
+    jobs = store.tokensflow_finalizations_for_attempt(task.attempt_id)
+    assert len(jobs) == 1
+    assert jobs[0].task_id == task.task_id
+    assert jobs[0].arm == "off"
+    assert jobs[0].deadline_at == NOW + timedelta(seconds=config.tokensflow_finalizer_timeout_seconds)
 
 
 def test_second_full_supervisor_cannot_start_slots_while_process_lock_is_owned(tmp_path: Path) -> None:

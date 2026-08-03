@@ -13,6 +13,7 @@ from powercontext_eval.codex import DEFAULT_CODEX_MODEL, is_safe_codex_model
 
 _SAFE_DOCKER_NETWORK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 MAX_TASK_PARALLELISM = 10
+MAX_TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS = 600
 
 
 class _EnvironmentNumbers(BaseModel):
@@ -26,6 +27,10 @@ class _EnvironmentNumbers(BaseModel):
     usage_probe_timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 15
     usage_snapshot_max_age_seconds: Annotated[int, Field(ge=10, le=7200)] = 120
     task_parallelism: Annotated[int, Field(ge=1, le=MAX_TASK_PARALLELISM)] = 1
+    tokensflow_finalizer_timeout_seconds: Annotated[int, Field(ge=60, le=MAX_TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS)] = (
+        600
+    )
+    tokensflow_finalizer_poll_seconds: Annotated[float, Field(gt=0, le=60)] = 5.0
 
     @field_validator("task_parallelism", mode="before")
     @classmethod
@@ -65,6 +70,10 @@ class WebConfig(BaseModel):
     usage_probe_timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 15
     usage_snapshot_max_age_seconds: Annotated[int, Field(ge=10, le=7200)] = 120
     task_parallelism: Annotated[int, Field(ge=1, le=MAX_TASK_PARALLELISM)] = 1
+    tokensflow_finalizer_timeout_seconds: Annotated[int, Field(ge=60, le=MAX_TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS)] = (
+        600
+    )
+    tokensflow_finalizer_poll_seconds: Annotated[float, Field(gt=0, le=60)] = 5.0
     codex_models: tuple[str, ...] = (DEFAULT_CODEX_MODEL,)
 
     @field_validator(
@@ -142,6 +151,8 @@ class WebConfig(BaseModel):
         usage_probe_timeout_seconds: int = 15,
         usage_snapshot_max_age_seconds: int = 120,
         task_parallelism: int = 1,
+        tokensflow_finalizer_timeout_seconds: int = 600,
+        tokensflow_finalizer_poll_seconds: float = 5.0,
         codex_models: tuple[str, ...] = (DEFAULT_CODEX_MODEL,),
     ) -> Self:
         return cls(
@@ -172,6 +183,8 @@ class WebConfig(BaseModel):
             usage_probe_timeout_seconds=usage_probe_timeout_seconds,
             usage_snapshot_max_age_seconds=usage_snapshot_max_age_seconds,
             task_parallelism=task_parallelism,
+            tokensflow_finalizer_timeout_seconds=tokensflow_finalizer_timeout_seconds,
+            tokensflow_finalizer_poll_seconds=tokensflow_finalizer_poll_seconds,
             codex_models=codex_models,
         )
 
@@ -194,6 +207,10 @@ class WebConfig(BaseModel):
                 "usage_probe_timeout_seconds": environ.get(f"{prefix}USAGE_PROBE_TIMEOUT_SECONDS", "15"),
                 "usage_snapshot_max_age_seconds": environ.get(f"{prefix}USAGE_SNAPSHOT_MAX_AGE_SECONDS", "120"),
                 "task_parallelism": environ.get(f"{prefix}TASK_PARALLELISM", "1"),
+                "tokensflow_finalizer_timeout_seconds": environ.get(
+                    f"{prefix}TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS", "600"
+                ),
+                "tokensflow_finalizer_poll_seconds": environ.get(f"{prefix}TOKENSFLOW_FINALIZER_POLL_SECONDS", "5"),
             }
         )
 
@@ -223,6 +240,8 @@ class WebConfig(BaseModel):
             usage_probe_timeout_seconds=numbers.usage_probe_timeout_seconds,
             usage_snapshot_max_age_seconds=numbers.usage_snapshot_max_age_seconds,
             task_parallelism=numbers.task_parallelism,
+            tokensflow_finalizer_timeout_seconds=numbers.tokensflow_finalizer_timeout_seconds,
+            tokensflow_finalizer_poll_seconds=numbers.tokensflow_finalizer_poll_seconds,
             codex_models=tuple(environ.get(f"{prefix}CODEX_MODELS", DEFAULT_CODEX_MODEL).split(",")),
         )
 

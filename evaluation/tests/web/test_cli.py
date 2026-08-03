@@ -1,4 +1,7 @@
 import signal
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -21,6 +24,7 @@ def test_web_builds_config_from_cli_root_and_environment(monkeypatch, tmp_path: 
 
     monkeypatch.setenv("POWERCONTEXT_EVAL_PORT", "8123")
     monkeypatch.setenv("POWERCONTEXT_EVAL_HOST", "127.0.0.2")
+    monkeypatch.setenv("POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK", "tokensflow-egress")
 
     def fake_create_app(config: object) -> object:
         calls["config"] = config
@@ -64,6 +68,7 @@ def test_worker_initializes_store_and_runs_with_configured_poll(monkeypatch, tmp
 
     monkeypatch.setenv("POWERCONTEXT_EVAL_POLL_SECONDS", "2.5")
     monkeypatch.setenv("POWERCONTEXT_EVAL_LEASE_SECONDS", "90")
+    monkeypatch.setenv("POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK", "tokensflow-egress")
     monkeypatch.setattr("powercontext_eval.web.store.TaskStore", FakeStore)
     monkeypatch.setattr("powercontext_eval.web.worker.EvaluationWorker", FakeWorker)
     monkeypatch.setattr("signal.getsignal", lambda _signal: signal.SIG_DFL)
@@ -91,6 +96,60 @@ def test_signal_callback_requests_graceful_worker_stop() -> None:
     _request_worker_stop(Worker(), signal.SIGTERM, None)
 
     assert calls == ["stop"]
+
+
+def test_worker_signal_handler_ignores_reentrant_sigterm_while_first_stop_is_running() -> None:
+    program = textwrap.dedent(
+        """
+        import os
+        import signal
+        import threading
+
+        from powercontext_eval.cli import _worker_signal_handlers
+
+
+        class Worker:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.lock = threading.Lock()
+                self.first_stop_entered = threading.Event()
+                self.second_signal_sent = threading.Event()
+
+            def stop(self) -> None:
+                self.calls += 1
+                with self.lock:
+                    self.first_stop_entered.set()
+                    assert self.second_signal_sent.wait(timeout=1)
+
+
+        worker = Worker()
+
+
+        def send_second_signal() -> None:
+            assert worker.first_stop_entered.wait(timeout=1)
+            os.kill(os.getpid(), signal.SIGTERM)
+            worker.second_signal_sent.set()
+
+
+        sender = threading.Thread(target=send_second_signal, daemon=True)
+        with _worker_signal_handlers(worker):
+            sender.start()
+            os.kill(os.getpid(), signal.SIGTERM)
+        sender.join(timeout=1)
+        print(f"stops={worker.calls}")
+        """
+    )
+
+    completed = subprocess.run(
+        (sys.executable, "-c", program),
+        capture_output=True,
+        text=True,
+        timeout=1,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "stops=1\n"
 
 
 def test_invalid_configuration_is_concise_and_does_not_print_secrets(monkeypatch) -> None:

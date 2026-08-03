@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import platform
 import re
+import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from multiprocessing.connection import Connection
@@ -762,13 +763,14 @@ class FailIfProcessRuns(ProcessRunner):
         *,
         cwd: str | Path,
         timeout: float | None = None,
+        cancel_event: threading.Event | None = None,
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
         input_bytes: bytes | None = None,
         stdout_sink: BinaryIO | None = None,
     ) -> CommandResult:
-        del input_bytes, stdout_sink
+        del cancel_event, input_bytes, stdout_sink
         raise AssertionError("normalization and cache key calculation must not access the network")
 
 
@@ -783,13 +785,14 @@ class RecordingProcessRunner(ProcessRunner):
         *,
         cwd: str | Path,
         timeout: float | None = None,
+        cancel_event: threading.Event | None = None,
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
         input_bytes: bytes | None = None,
         stdout_sink: BinaryIO | None = None,
     ) -> CommandResult:
-        del input_bytes
+        del cancel_event, input_bytes
         self.calls.append((timeout, dict(env or {})))
         self.commands.append(tuple(argv))
         return super().run(
@@ -810,6 +813,7 @@ class RejectFetchRunner(RecordingProcessRunner):
         *,
         cwd: str | Path,
         timeout: float | None = None,
+        cancel_event: threading.Event | None = None,
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
@@ -823,6 +827,7 @@ class RejectFetchRunner(RecordingProcessRunner):
             argv,
             cwd=cwd,
             timeout=timeout,
+            cancel_event=cancel_event,
             env=env,
             check=check,
             secrets=secrets,
@@ -862,13 +867,14 @@ class ControlledGitRunner(ProcessRunner):
         *,
         cwd: str | Path,
         timeout: float | None = None,
+        cancel_event: threading.Event | None = None,
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
         input_bytes: bytes | None = None,
         stdout_sink: BinaryIO | None = None,
     ) -> CommandResult:
-        del input_bytes, stdout_sink
+        del cancel_event, input_bytes, stdout_sink
         command = tuple(argv)
         self.calls.append((command, tuple(secrets)))
         if "clone" in command:
@@ -891,6 +897,7 @@ class FailCheckoutOnceRunner(ProcessRunner):
         *,
         cwd: str | Path,
         timeout: float | None = None,
+        cancel_event: threading.Event | None = None,
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
@@ -905,6 +912,7 @@ class FailCheckoutOnceRunner(ProcessRunner):
             argv,
             cwd=cwd,
             timeout=timeout,
+            cancel_event=cancel_event,
             env=env,
             check=check,
             secrets=secrets,

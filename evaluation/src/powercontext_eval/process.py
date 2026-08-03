@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import BinaryIO
 from urllib.parse import unquote, urlsplit
 
-from powercontext_eval.errors import CommandFailed, CommandNotFound, CommandTimedOut
+from powercontext_eval.errors import CommandCancelled, CommandFailed, CommandNotFound, CommandTimedOut
 
 _INHERITED_ENVIRONMENT_KEYS = frozenset(
     {
@@ -35,6 +36,8 @@ _INHERITED_ENVIRONMENT_KEYS = frozenset(
 )
 _NOT_FOUND_RETURN_CODE = 127
 _TIMEOUT_RETURN_CODE = 124
+_CANCELLED_RETURN_CODE = 130
+_CANCELLATION_POLL_SECONDS = 0.05
 _TERMINATION_GRACE_SECONDS = 1.5
 _DESCENDANT_SCAN_ATTEMPTS = 3
 _PROXY_ENVIRONMENT_KEYS = frozenset(
@@ -69,6 +72,7 @@ class ProcessRunner:
         *,
         cwd: str | Path,
         timeout: float | None = None,
+        cancel_event: threading.Event | None = None,
         env: Mapping[str, str] | None = None,
         check: bool = True,
         secrets: Sequence[str] = (),
@@ -120,19 +124,46 @@ class ProcessRunner:
             )
             raise CommandNotFound(_failure_message("Command could not be started", result, redactor), result) from None
 
-        try:
-            stdout, stderr = process.communicate(input=input_bytes, timeout=timeout)
-        except subprocess.TimeoutExpired as error:
-            final_stdout, final_stderr = _terminate_timed_out_process(process)
-            result = _result(
-                redactor,
-                validated_argv,
-                cwd_text,
-                _TIMEOUT_RETURN_CODE,
-                final_stdout or error.stdout,
-                final_stderr or error.stderr,
-            )
-            raise CommandTimedOut(_failure_message("Command timed out", result, redactor), result) from None
+        deadline = None if timeout is None else time.monotonic() + timeout
+        communicate_input = input_bytes
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                final_stdout, final_stderr = _terminate_owned_process(process)
+                result = _result(
+                    redactor,
+                    validated_argv,
+                    cwd_text,
+                    _CANCELLED_RETURN_CODE,
+                    final_stdout,
+                    final_stderr,
+                )
+                raise CommandCancelled(_failure_message("Command cancelled", result, redactor), result) from None
+            wait_timeout = None
+            if deadline is not None:
+                wait_timeout = max(deadline - time.monotonic(), 0.0)
+            if cancel_event is not None:
+                wait_timeout = (
+                    _CANCELLATION_POLL_SECONDS
+                    if wait_timeout is None
+                    else min(wait_timeout, _CANCELLATION_POLL_SECONDS)
+                )
+            try:
+                stdout, stderr = process.communicate(input=communicate_input, timeout=wait_timeout)
+                break
+            except subprocess.TimeoutExpired as error:
+                communicate_input = None
+                if deadline is None or time.monotonic() < deadline:
+                    continue
+                final_stdout, final_stderr = _terminate_owned_process(process)
+                result = _result(
+                    redactor,
+                    validated_argv,
+                    cwd_text,
+                    _TIMEOUT_RETURN_CODE,
+                    final_stdout or error.stdout,
+                    final_stderr or error.stderr,
+                )
+                raise CommandTimedOut(_failure_message("Command timed out", result, redactor), result) from None
 
         result = _result(
             redactor,
@@ -147,9 +178,19 @@ class ProcessRunner:
         return result
 
 
-def _terminate_timed_out_process(process: subprocess.Popen[bytes]) -> tuple[bytes | None, bytes | None]:
+def _terminate_owned_process(process: subprocess.Popen[bytes]) -> tuple[bytes | None, bytes | None]:
     deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
+    if process.poll() is not None:
+        return _bounded_communicate(process, deadline)
     if os.name != "posix":
+        process.kill()
+        return _bounded_communicate(process, deadline)
+
+    try:
+        process_group = os.getpgid(process.pid)
+    except ProcessLookupError:
+        return _bounded_communicate(process, deadline)
+    if process_group != process.pid:
         process.kill()
         return _bounded_communicate(process, deadline)
 
@@ -375,6 +416,7 @@ def _failure_message(prefix: str, result: CommandResult, redactor: _Redactor) ->
 
 
 __all__ = [
+    "CommandCancelled",
     "CommandFailed",
     "CommandNotFound",
     "CommandResult",

@@ -241,12 +241,30 @@ class RequiredTests(_FrozenModel):
     test_patch: str
 
 
+class TokensFlowFinalizationSummary(_FrozenModel):
+    state: Literal["pending", "passed", "timed_out", "capacity_evicted", "cleanup_failed"]
+    registered_at: datetime
+    deadline_at: datetime
+    finished_at: datetime | None = None
+    attempts: Annotated[int, Field(ge=0)]
+    queue_passed: bool
+    doctor_rc: int | None = None
+    error_category: str | None = None
+    reason: str | None = None
+
+
+class TokensFlowFinalizationPair(_FrozenModel):
+    off: TokensFlowFinalizationSummary | None = None
+    on: TokensFlowFinalizationSummary | None = None
+
+
 class BatchTaskDetailResponse(_FrozenModel):
     task: BatchTaskItem
     problem_statement: str
     required_tests: RequiredTests
     off: TaskDetailArm | None = None
     on: TaskDetailArm | None = None
+    tokensflow_finalization: TokensFlowFinalizationPair = TokensFlowFinalizationPair()
 
 
 class ContextEventResponse(_FrozenModel):

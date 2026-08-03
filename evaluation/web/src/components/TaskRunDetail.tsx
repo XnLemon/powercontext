@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 
 import type { EvaluationApi } from "../api";
-import type { BatchRecord, BatchTaskDetail, TaskDetailArm } from "../types";
+import type {
+  BatchRecord,
+  BatchTaskDetail,
+  TaskDetailArm,
+  TokensFlowFinalizationSummary,
+} from "../types";
 import { AttemptHistory } from "./AttemptHistory";
 import { ContextTimeline } from "./ContextTimeline";
 
@@ -156,6 +161,25 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
         }}
       />
 
+      {(detail.tokensflow_finalization.off !== null || detail.tokensflow_finalization.on !== null) && (
+        <section className="report-section" aria-label="TokensFlow 收尾状态">
+          <div className="section-heading">
+            <div>
+              <h2>TokensFlow 收尾</h2>
+              <p>独立于官方评测结果；超时或清理告警不会改变任务成功状态。</p>
+            </div>
+          </div>
+          <div className="official-grid">
+            {detail.tokensflow_finalization.off !== null && (
+              <p>OFF {tokensflowFinalizationLabel(detail.tokensflow_finalization.off)}</p>
+            )}
+            {detail.tokensflow_finalization.on !== null && (
+              <p>ON {tokensflowFinalizationLabel(detail.tokensflow_finalization.on)}</p>
+            )}
+          </div>
+        </section>
+      )}
+
       <section className="report-section task-problem">
         <div className="section-heading">
           <div>
@@ -230,6 +254,16 @@ export function TaskRunDetail({ api, batchId, taskId, search, navigate }: TaskRu
       )}
     </div>
   );
+}
+
+function tokensflowFinalizationLabel(value: TokensFlowFinalizationSummary): string {
+  return {
+    pending: "TokensFlow 收尾中",
+    passed: "TokensFlow 收尾完成",
+    timed_out: "TokensFlow 收尾超时",
+    capacity_evicted: "TokensFlow 容量回收",
+    cleanup_failed: "TokensFlow 清理失败",
+  }[value.state];
 }
 
 function OfficialArm({ label, arm }: { label: "OFF" | "ON"; arm: TaskDetailArm }) {

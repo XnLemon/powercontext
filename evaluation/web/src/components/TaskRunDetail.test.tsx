@@ -5,6 +5,54 @@ import { TaskRunDetail } from "./TaskRunDetail";
 import { apiStub, batchRecord, batchTaskDetail } from "../test/fixtures";
 
 describe("TaskRunDetail", () => {
+  it("shows independent per-arm TokensFlow finalization without overriding evaluation success", async () => {
+    const api = apiStub({
+      getBatch: vi.fn().mockResolvedValue(batchRecord({ status: "completed" })),
+      getBatchTask: vi.fn().mockResolvedValue({
+        ...batchTaskDetail,
+        tokensflow_finalization: {
+          off: {
+            state: "passed",
+            registered_at: "2026-08-03T01:00:00Z",
+            deadline_at: "2026-08-03T01:10:00Z",
+            finished_at: "2026-08-03T01:01:00Z",
+            attempts: 1,
+            queue_passed: true,
+            doctor_rc: 0,
+            error_category: null,
+            reason: null,
+          },
+          on: {
+            state: "timed_out",
+            registered_at: "2026-08-03T01:02:00Z",
+            deadline_at: "2026-08-03T01:12:00Z",
+            finished_at: "2026-08-03T01:12:00Z",
+            attempts: 8,
+            queue_passed: false,
+            doctor_rc: 1,
+            error_category: null,
+            reason: "deadline",
+          },
+        },
+      }),
+    });
+
+    render(
+      <TaskRunDetail
+        api={api}
+        batchId="batch-001"
+        taskId="task-001"
+        search=""
+        navigate={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "单任务详情" })).toBeVisible();
+    expect(screen.getByLabelText("任务对比汇总")).toHaveTextContent("OFF 通过");
+    expect(screen.getByText("OFF TokensFlow 收尾完成")).toBeVisible();
+    expect(screen.getByText("ON TokensFlow 收尾超时")).toBeVisible();
+  });
+
   it("does not request a complete timeline for an infrastructure-failed attempt", async () => {
     const listContextEvents = vi.fn();
     const api = apiStub({

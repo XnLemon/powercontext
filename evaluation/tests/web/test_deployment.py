@@ -30,8 +30,10 @@ EXPECTED_ENVIRONMENT_KEYS = {
     "POWERCONTEXT_EVAL_RUN_ROOT",
     "POWERCONTEXT_EVAL_TASK_PARALLELISM",
     "POWERCONTEXT_EVAL_TOKENSFLOW_BINARY",
-    "POWERCONTEXT_EVAL_TOKENSFLOW_USER_HOME",
     "POWERCONTEXT_EVAL_TOKENSFLOW_EGRESS_NETWORK",
+    "POWERCONTEXT_EVAL_TOKENSFLOW_FINALIZER_POLL_SECONDS",
+    "POWERCONTEXT_EVAL_TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS",
+    "POWERCONTEXT_EVAL_TOKENSFLOW_USER_HOME",
     "POWERCONTEXT_EVAL_USAGE_PAUSE_PERCENT",
     "POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS",
     "POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS",
@@ -65,6 +67,19 @@ def test_systemd_units_keep_uv_cache_inside_the_writable_evaluation_root() -> No
     for unit_name in ("powercontext-eval-web.service", "powercontext-eval-worker.service"):
         unit = (DEPLOY / unit_name).read_text()
         assert "Environment=UV_CACHE_DIR=/data/powercontext-eval/cache/uv" in unit.splitlines()
+
+
+def test_systemd_units_deliver_one_graceful_term_and_only_web_accepts_uv_sigterm_status() -> None:
+    web = set(_unit("powercontext-eval-web.service").splitlines())
+    worker = set(_unit("powercontext-eval-worker.service").splitlines())
+
+    assert "KillMode=mixed" in web
+    assert "KillMode=mixed" in worker
+    assert "SuccessExitStatus=143" in web
+    assert not {line for line in worker if line.startswith("SuccessExitStatus=")}
+    assert not {
+        line for line in web | worker if line.startswith("SuccessExitStatus=") and "137" in line.split("=", 1)[1]
+    }
 
 
 def test_systemd_units_enforce_role_appropriate_security_boundaries() -> None:
