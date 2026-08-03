@@ -254,7 +254,12 @@ export type BatchStatus =
   | "cancelled";
 
 export type BatchControlIntent = "run" | "pause" | "cancel";
-export type BatchPauseReason = "user" | "usage_threshold" | "usage_unavailable" | "quota_limit";
+export type BatchPauseReason =
+  | "user"
+  | "usage_threshold"
+  | "usage_unavailable"
+  | "quota_limit"
+  | "infrastructure_failure";
 
 export interface UsageSnapshot {
   limit_id: "codex";

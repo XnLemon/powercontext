@@ -331,7 +331,9 @@ const usageSnapshotSchema = z.strictObject({
 const batchControlSchema = z.strictObject({
   intent: z.enum(["run", "pause", "cancel"]),
   usage_pause_percent: z.number().int().min(1).max(100),
-  pause_reason: z.enum(["user", "usage_threshold", "usage_unavailable", "quota_limit"]).nullable(),
+  pause_reason: z
+    .enum(["user", "usage_threshold", "usage_unavailable", "quota_limit", "infrastructure_failure"])
+    .nullable(),
   updated_at: timestampSchema,
   version: nonnegativeIntegerSchema,
 });

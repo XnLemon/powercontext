@@ -58,4 +58,26 @@ describe("BatchControls", () => {
 
     expect(await screen.findByText(label)).toBeVisible();
   });
+
+  it("labels an infrastructure-failure pause", async () => {
+    render(
+      <BatchControls
+        api={apiStub()}
+        batch={batchRecord({
+          status: "paused",
+          control: {
+            intent: "pause",
+            usage_pause_percent: 80,
+            pause_reason: "infrastructure_failure",
+            updated_at: "2026-08-03T00:00:00Z",
+            version: 1,
+          },
+        })}
+        report={batchReport}
+        onUpdated={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("暂停原因：基础设施失败")).toBeVisible();
+  });
 });
