@@ -354,9 +354,13 @@ def _bundle_for_task(task: TaskRecord, runs_root: Path) -> ReportBundle:
 def _task_run_dir(task: TaskRecord, runs_root: Path) -> Path:
     if task.result is None:
         raise InvalidReportArtifact
-    expected_run_id = task.task_id if task.attempt_number == 1 else task.attempt_id
-    if expected_run_id is None:
-        raise InvalidReportArtifact
+    if task.attempt_number == 1:
+        expected_run_id = task.task_id
+    else:
+        expected_attempt_id = f"{task.task_id}.attempt-{task.attempt_number:04d}"
+        if task.attempt_id != expected_attempt_id:
+            raise InvalidReportArtifact
+        expected_run_id = f"{task.task_id}-attempt-{task.attempt_number:04d}"
     artifact_dir = Path(task.result.artifact_dir)
     if artifact_dir.parts != ("runs", expected_run_id):
         raise InvalidReportArtifact

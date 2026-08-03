@@ -1579,16 +1579,17 @@ def test_batch_report_uses_the_successful_retry_once_and_reads_its_attempt_artif
     )
     claimed_retry = store.claim_next("batch-worker", now=started + timedelta(seconds=3))
     assert claimed_retry is not None and claimed_retry.attempt_id == retry.attempt_id
+    retry_run_id = f"{task.task_id}-attempt-{retry.attempt_number:04d}"
     _write_batch_artifacts(
         config,
-        retry.attempt_id,
+        retry_run_id,
         task.request.instance_id,
         off_resolved=False,
         on_resolved=True,
         off_tokens=(100, 10),
         on_tokens=(80, 8),
     )
-    run_dir = config.run_root / "runs" / retry.attempt_id
+    run_dir = config.run_root / "runs" / retry_run_id
     store.succeed(
         task.task_id,
         "batch-worker",
