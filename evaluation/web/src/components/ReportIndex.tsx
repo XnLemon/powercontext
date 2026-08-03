@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 
 import type { EvaluationApi } from "../api";
+import { batchStatusLabel } from "../batchStatus";
 import type { BatchRecord } from "../types";
 
 export function ReportIndex({ api, navigate }: { api: EvaluationApi; navigate(path: string): void }) {
@@ -16,7 +17,12 @@ export function ReportIndex({ api, navigate }: { api: EvaluationApi; navigate(pa
     setError(false);
     api.listBatches(nextController.signal)
       .then((nextBatches) => {
-        if (!nextController.signal.aborted && currentGeneration === generation.current) setBatches(nextBatches);
+        if (!nextController.signal.aborted && currentGeneration === generation.current) {
+          setBatches([...nextBatches].sort(
+            (left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)
+              || right.batch_id.localeCompare(left.batch_id),
+          ));
+        }
       })
       .catch(() => {
         if (!nextController.signal.aborted && currentGeneration === generation.current) setError(true);
@@ -60,7 +66,7 @@ export function ReportIndex({ api, navigate }: { api: EvaluationApi; navigate(pa
                 <strong>{batch.batch_id}{index === 0 && <span className="latest-label">最新批次</span>}</strong>
                 <span>
                   {batch.total_tasks} 个任务 · {batch.request.powercontext_ref} · {batch.request.model} ·{" "}
-                  {batch.status === "completed" ? "已完成" : batch.status === "cancelled" ? "已取消" : "进行中"}
+                  {batchStatusLabel[batch.status]}
                 </span>
               </div>
               <a

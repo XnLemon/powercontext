@@ -5,6 +5,17 @@ import { BatchOverview } from "./BatchOverview";
 import { apiStub, batchRecord, batchReport } from "../test/fixtures";
 
 describe("BatchOverview", () => {
+  it("labels a paused batch as paused", async () => {
+    const api = apiStub({
+      getBatch: vi.fn().mockResolvedValue(batchRecord({ status: "paused" })),
+      getBatchReport: vi.fn().mockResolvedValue(batchReport),
+    });
+
+    render(<BatchOverview api={api} batchId="batch-001" navigate={() => undefined} />);
+
+    expect(await screen.findByText("已暂停 · 100 / 100")).toBeVisible();
+  });
+
   it("renders reconciled objective facts without authored conclusions", async () => {
     const api = apiStub({
       getBatch: vi.fn().mockResolvedValue(

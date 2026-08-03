@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 
 import type { EvaluationApi } from "../api";
+import { batchStatusLabel } from "../batchStatus";
 import type { BatchRecord, BatchReport, PairCategory, TokenMetricAggregate } from "../types";
 import { BatchControls } from "./BatchControls";
 
@@ -86,7 +87,7 @@ export function BatchOverview({ api, batchId, navigate }: BatchOverviewProps) {
   const categories = Object.entries(pairLabels) as [Exclude<PairCategory, "execution_failure">, string][];
   const taskListPath = `/report/${encodedBatchId}/tasks`;
   const progress = `${report.terminal_tasks} / ${report.total_tasks}`;
-  const status = batch.status === "completed" ? "已完成" : batch.status === "cancelled" ? "已取消" : "进行中";
+  const status = batchStatusLabel[batch.status];
 
   return (
     <div className="batch-overview">
