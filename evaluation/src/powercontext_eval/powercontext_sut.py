@@ -65,6 +65,8 @@ _CONTAINER_UV = "/tools/uv-dir/uv"
 _CONTAINER_RECORDER = "/evaluation/record_codex_jsonl.py"
 _CONTAINER_UV_PYTHON_INSTALL_DIR = "/runtime/uv-python"
 _DEFAULT_RECORDER_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "record_codex_jsonl.py"
+_TIMED_OUT_CONTAINER_REMOVAL_SETTLE_SECONDS = 90.0
+_TIMED_OUT_CONTAINER_REMOVAL_POLL_SECONDS = 0.25
 LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
 _PLUGIN_RELATIVE = Path("integrations/codex/plugins/powercontext")
 _TOKENSFLOW_WRAPPER = b"""#!/bin/sh
@@ -1405,6 +1407,8 @@ class DockerSut:
                 timeout=30,
                 check=False,
             )
+        except CommandTimedOut:
+            return self._await_timed_out_container_removal(container, paths)
         except (CommandError, OSError):
             removal = None
         if removal is not None and removal.returncode == 0:
@@ -1422,6 +1426,51 @@ class DockerSut:
             f"Error: No such container: {container}",
             f"Error response from daemon: No such container: {container}",
         }
+
+    def _await_timed_out_container_removal(self, container: str, paths: ArmPaths) -> bool:
+        """Wait for Docker's asynchronous forced stop, then finish removing the container."""
+
+        deadline = self._clock() + _TIMED_OUT_CONTAINER_REMOVAL_SETTLE_SECONDS
+        while self._clock() < deadline:
+            try:
+                inspection = self._docker.run(
+                    (
+                        "docker",
+                        "container",
+                        "inspect",
+                        "--format={{.State.Status}}",
+                        container,
+                    ),
+                    cwd=paths.runtime,
+                    timeout=min(5.0, max(0.1, deadline - self._clock())),
+                    check=False,
+                )
+            except (CommandError, OSError):
+                return False
+            if inspection.returncode != 0:
+                return inspection.stderr.strip() in {
+                    f"Error: No such container: {container}",
+                    f"Error response from daemon: No such container: {container}",
+                }
+            state = inspection.stdout.strip()
+            if state in {"created", "dead", "exited"}:
+                try:
+                    removal = self._docker.run(
+                        ("docker", "rm", "-f", container),
+                        cwd=paths.runtime,
+                        timeout=min(30.0, max(0.1, deadline - self._clock())),
+                        check=False,
+                    )
+                except (CommandError, OSError):
+                    return False
+                return removal.returncode == 0
+            if state not in {"paused", "restarting", "running"}:
+                return False
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                break
+            self._sleeper(min(_TIMED_OUT_CONTAINER_REMOVAL_POLL_SECONDS, remaining))
+        return False
 
     def _initialize_workspace(self, config: SutConfig, arm: Arm, paths: ArmPaths) -> None:
         name = f"powercontext-eval-{config.run_id}-{arm.value}-init"

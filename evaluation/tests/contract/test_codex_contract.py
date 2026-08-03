@@ -1011,6 +1011,75 @@ def test_tokensflow_wrapper_cleanup_requires_proven_container_removal(
         }
 
 
+def test_tokensflow_cleanup_waits_for_an_async_forced_removal_to_finish(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class DelayedForcedRemovalDocker(TranscriptDocker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.removal_attempts = 0
+            self.inspection_attempts = 0
+
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            container = "powercontext-eval-run-1-on"
+            if argv == ("docker", "rm", "-f", container):
+                self.removal_attempts += 1
+                self.commands.append(argv)
+                if self.removal_attempts == 1:
+                    raise CommandTimedOut("injected delayed removal", command_result("", returncode=124))
+                return command_result(container + "\n")
+            if argv[:3] == ("docker", "container", "inspect") and argv[-1] == container:
+                self.inspection_attempts += 1
+                self.commands.append(argv)
+                state = "running" if self.inspection_attempts == 1 else "exited"
+                return command_result(state + "\n")
+            return super().run(argv, **kwargs)
+
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    docker = DelayedForcedRemovalDocker()
+    DockerSut(docker, relay_factory=FakeRelay, clock=lambda: now[0], sleeper=sleep).run_arm(
+        config,
+        Arm.ON,
+        paths,
+        b"prompt",
+        ArtifactStore(paths.result_root),
+    )
+
+    assert docker.removal_attempts == 2
+    assert docker.inspection_attempts == 2
+    assert not (paths.runtime / "tokensflow-recovery.json").exists()
+    assert not (paths.runtime.parent / "evaluation-control").exists()
+
+
+def test_tokensflow_cleanup_timeout_never_sleeps_past_its_deadline(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    now = [0.0]
+
+    class DeadlineDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if argv[:4] == ("docker", "container", "inspect", "--format={{.State.Status}}"):
+                now[0] = 91.0
+                return command_result("running\n")
+            return super().run(argv, **kwargs)
+
+    def sleep(seconds: float) -> None:
+        assert seconds >= 0
+
+    removed = DockerSut(DeadlineDocker(), clock=lambda: now[0], sleeper=sleep)._await_timed_out_container_removal(
+        "powercontext-eval-run-1-on",
+        paths,
+    )
+
+    assert removed is False
+
+
 def test_tokensflow_drain_obeys_zero_loss_order_and_accepts_duplicate_replay(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     config = sut_config(tmp_path)
