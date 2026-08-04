@@ -47,6 +47,7 @@ class FailureCategory(StrEnum):
     ENVIRONMENT_PREPARATION = "environment_preparation_failure"
     GOLD_VALIDATION = "gold_validation_failure"
     CODEX_EXECUTION = "codex_execution_failure"
+    CODEX_CAPACITY = "codex_capacity_failure"
     TREATMENT_VALIDATION = "treatment_validation_failure"
     OFFICIAL_EVALUATOR = "official_evaluator_failure"
     REPORT_GENERATION = "report_generation_failure"
@@ -60,6 +61,7 @@ RETRYABLE_FAILURES = frozenset(
         FailureCategory.ENVIRONMENT_PREPARATION,
         FailureCategory.GOLD_VALIDATION,
         FailureCategory.CODEX_EXECUTION,
+        FailureCategory.CODEX_CAPACITY,
         FailureCategory.TREATMENT_VALIDATION,
         FailureCategory.OFFICIAL_EVALUATOR,
         FailureCategory.REPORT_GENERATION,
@@ -104,6 +106,7 @@ class SafeFailure(FrozenModel):
     category: FailureCategory
     phase: TaskPhase | None = None
     summary: str = Field(min_length=1, max_length=500)
+    auto_retry: bool = False
 
 
 class TaskResult(FrozenModel):

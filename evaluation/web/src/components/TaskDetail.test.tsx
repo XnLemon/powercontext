@@ -30,6 +30,13 @@ describe("TaskDetail", () => {
     expect(screen.getByText("Codex 执行失败")).toBeVisible();
   });
 
+  it("labels an upstream capacity failure as retryable", async () => {
+    const failed = { ...record("failed", "task-capacity"), failure_category: "codex_capacity_failure" as const };
+    render(<TaskDetail api={apiStub({ getTask: vi.fn().mockResolvedValue(failed) })} taskId="task-capacity" />);
+
+    expect(await screen.findByText("上游模型容量不足（可重试）")).toBeVisible();
+  });
+
   it("subscribes once, refreshes on SSE, exposes reconnect state, and cleans up on task change", async () => {
     let onEvent!: (event: TaskEvent) => void;
     let onError!: (error: { message: string; reconnecting: boolean; code: "event_stream_disconnected" }) => void;

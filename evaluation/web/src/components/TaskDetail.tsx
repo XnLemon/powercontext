@@ -17,6 +17,7 @@ const failureLabels: Record<FailureCategory, string> = {
   environment_preparation_failure: "环境准备失败",
   gold_validation_failure: "Gold 验证失败",
   codex_execution_failure: "Codex 执行失败",
+  codex_capacity_failure: "上游模型容量不足（可重试）",
   treatment_validation_failure: "处理组验证失败",
   official_evaluator_failure: "官方评测失败",
   report_generation_failure: "报告生成失败",

@@ -81,6 +81,39 @@ describe("EvaluationApi HTTP", () => {
     await expect(api.listBatches()).resolves.toEqual([batch]);
   });
 
+  it("accepts batches paused by an exhausted upstream capacity retry budget", async () => {
+    const batch = {
+      batch_id: "batch-luna",
+      request: {
+        powercontext_ref: "latest",
+        benchmark: "swebench-pro",
+        task_set: "swebench-pro-public-v2",
+        model: "gpt-5.6-luna",
+        reasoning_effort: "medium",
+        treatment_mode: "off_on",
+        idempotency_key: "batch-luna-request",
+        usage_pause_percent: 95,
+        initial_control_intent: "run",
+      },
+      total_tasks: 731,
+      status: "paused",
+      control: {
+        intent: "pause",
+        usage_pause_percent: 95,
+        pause_reason: "codex_capacity",
+        updated_at: "2026-08-04T00:00:00Z",
+        version: 31,
+      },
+      created_at: "2026-08-02T00:00:00Z",
+      started_at: "2026-08-02T00:01:00Z",
+      finished_at: null,
+      resolved_powercontext_sha: "0123456789abcdef0123456789abcdef01234567",
+    };
+    const { api } = apiWithResponse(jsonResponse([batch]));
+
+    await expect(api.listBatches()).resolves.toEqual([batch]);
+  });
+
   it("creates and loads a complete batch through strict relative API routes", async () => {
     const request = {
       powercontext_ref: "latest",

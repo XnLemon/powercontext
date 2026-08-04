@@ -21,6 +21,7 @@ import pytest
 
 from powercontext_eval.artifacts import ArtifactStore, SecretDetected
 from powercontext_eval.codex import (
+    CodexCapacityError,
     CodexInfrastructureError,
     CodexInvocation,
     CodexRunner,
@@ -218,6 +219,57 @@ def test_codex_failures_are_typed_infrastructure_outcomes(
             cwd=tmp_path,
             store=ArtifactStore(tmp_path / "result"),
         )
+
+
+CAPACITY_MESSAGE = "Selected model is at capacity. Please try a different model."
+
+
+def test_upstream_capacity_failure_is_a_distinct_transient_outcome(tmp_path: Path) -> None:
+    stdout = (
+        '{"type":"item.completed","item":{"exit_code":0}}\n'
+        f'{{"type":"error","message":"{CAPACITY_MESSAGE}"}}\n'
+        f'{{"type":"turn.failed","error":{{"message":"{CAPACITY_MESSAGE}"}}}}\n'
+    )
+    runner = FakeRunner(CommandFailed("failed", command_result(stdout, returncode=1)))
+
+    with pytest.raises(CodexCapacityError):
+        CodexRunner(runner).run(
+            CodexInvocation(Arm.OFF, inside_disposable_container=True),
+            prompt=b"prompt",
+            cwd=tmp_path,
+            store=ArtifactStore(tmp_path / "result"),
+        )
+
+    assert (tmp_path / "result/codex/events.jsonl").read_text() == stdout
+
+
+def test_capacity_detection_skips_malformed_event_lines(tmp_path: Path) -> None:
+    stdout = f'not-json\n{{"type":"turn.failed","error":{{"message":"{CAPACITY_MESSAGE}"}}}}\n'
+    runner = FakeRunner(CommandFailed("failed", command_result(stdout, returncode=1)))
+
+    with pytest.raises(CodexCapacityError):
+        CodexRunner(runner).run(
+            CodexInvocation(Arm.OFF, inside_disposable_container=True),
+            prompt=b"prompt",
+            cwd=tmp_path,
+            store=ArtifactStore(tmp_path / "result"),
+        )
+
+
+def test_agent_message_quoting_capacity_is_not_a_capacity_failure(tmp_path: Path) -> None:
+    stdout = f'{{"type":"agent_message","message":"the docs mention {CAPACITY_MESSAGE}"}}\n'
+    runner = FakeRunner(CommandFailed("failed", command_result(stdout, returncode=19)))
+
+    with pytest.raises(CodexInfrastructureError) as raised:
+        CodexRunner(runner).run(
+            CodexInvocation(Arm.OFF, inside_disposable_container=True),
+            prompt=b"prompt",
+            cwd=tmp_path,
+            store=ArtifactStore(tmp_path / "result"),
+        )
+
+    assert not isinstance(raised.value, CodexCapacityError)
+    assert "exit status 19" in str(raised.value)
 
 
 def evidence(**changes: object) -> TreatmentEvidence:

@@ -90,6 +90,7 @@ const failureCategorySchema = z.enum([
   "environment_preparation_failure",
   "gold_validation_failure",
   "codex_execution_failure",
+  "codex_capacity_failure",
   "treatment_validation_failure",
   "official_evaluator_failure",
   "report_generation_failure",
@@ -332,7 +333,14 @@ const batchControlSchema = z.strictObject({
   intent: z.enum(["run", "pause", "cancel"]),
   usage_pause_percent: z.number().int().min(1).max(100),
   pause_reason: z
-    .enum(["user", "usage_threshold", "usage_unavailable", "quota_limit", "infrastructure_failure"])
+    .enum([
+      "user",
+      "usage_threshold",
+      "usage_unavailable",
+      "quota_limit",
+      "infrastructure_failure",
+      "codex_capacity",
+    ])
     .nullable(),
   updated_at: timestampSchema,
   version: nonnegativeIntegerSchema,

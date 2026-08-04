@@ -36,6 +36,7 @@ class BatchPauseReason(StrEnum):
     USAGE_UNAVAILABLE = "usage_unavailable"
     QUOTA_LIMIT = "quota_limit"
     INFRASTRUCTURE_FAILURE = "infrastructure_failure"
+    CODEX_CAPACITY = "codex_capacity"
 
 
 class BatchPreviewRequest(_FrozenModel):

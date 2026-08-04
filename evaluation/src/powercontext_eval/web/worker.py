@@ -21,7 +21,7 @@ from powercontext_eval.benchmarks.swebench_pro.adapter import DatasetSchemaError
 from powercontext_eval.benchmarks.swebench_pro.catalog import CatalogError, SweBenchProCatalog
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialResultError
 from powercontext_eval.benchmarks.swebench_pro.prediction import BinaryPatchError
-from powercontext_eval.codex import CodexInfrastructureError, UnsafeCodexInvocation
+from powercontext_eval.codex import CodexCapacityError, CodexInfrastructureError, UnsafeCodexInvocation
 from powercontext_eval.errors import CommandError, GitSourceError, PowerContextEvalError
 from powercontext_eval.git_source import GitSource
 from powercontext_eval.models import PowerContextRef
@@ -187,7 +187,12 @@ class TaskPairWorker:
         except (TaskOwnershipError, TaskConflict):
             ownership_lost.set()
         except Exception as error:  # noqa: BLE001 - the worker boundary must sanitize every runner failure
-            attempt_finished = self._fail(task, _safe_failure(error, phase), ownership_lost)
+            failure = _safe_failure(
+                error,
+                phase,
+                auto_retry_allowed=task.attempt_number <= self._config.codex_capacity_retry_max,
+            )
+            attempt_finished = self._fail(task, failure, ownership_lost)
         finally:
             heartbeat_stop.set()
             if heartbeat_started and heartbeat is not None:
@@ -578,7 +583,14 @@ def _nonblocking_worker_lock(database_path: Path) -> Iterator[bool]:
         os.close(descriptor)
 
 
-def _safe_failure(error: Exception, phase: TaskPhase | None) -> SafeFailure:
+def _safe_failure(error: Exception, phase: TaskPhase | None, *, auto_retry_allowed: bool = False) -> SafeFailure:
+    if isinstance(error, CodexCapacityError):
+        return SafeFailure(
+            category=FailureCategory.CODEX_CAPACITY,
+            phase=phase,
+            summary="The upstream Codex model was at capacity.",
+            auto_retry=auto_retry_allowed,
+        )
     fixed: tuple[FailureCategory, str]
     if isinstance(error, GitSourceError):
         fixed = FailureCategory.SOURCE_RESOLUTION, "PowerContext source resolution failed."

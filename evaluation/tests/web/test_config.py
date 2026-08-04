@@ -553,6 +553,7 @@ def test_failure_category_values_are_exact() -> None:
         "environment_preparation_failure",
         "gold_validation_failure",
         "codex_execution_failure",
+        "codex_capacity_failure",
         "treatment_validation_failure",
         "official_evaluator_failure",
         "report_generation_failure",

@@ -15,6 +15,7 @@ export type FailureCategory =
   | "environment_preparation_failure"
   | "gold_validation_failure"
   | "codex_execution_failure"
+  | "codex_capacity_failure"
   | "treatment_validation_failure"
   | "official_evaluator_failure"
   | "report_generation_failure"
@@ -259,7 +260,8 @@ export type BatchPauseReason =
   | "usage_threshold"
   | "usage_unavailable"
   | "quota_limit"
-  | "infrastructure_failure";
+  | "infrastructure_failure"
+  | "codex_capacity";
 
 export interface UsageSnapshot {
   limit_id: "codex";

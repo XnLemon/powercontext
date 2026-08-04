@@ -31,6 +31,7 @@ const reasonLabels = {
   usage_unavailable: "无法读取 Codex 用量",
   quota_limit: "Codex 额度限制",
   infrastructure_failure: "基础设施失败",
+  codex_capacity: "上游模型容量不足（自动重试耗尽）",
 } as const;
 
 export function BatchControls({ api, batch, report, onUpdated }: BatchControlsProps) {

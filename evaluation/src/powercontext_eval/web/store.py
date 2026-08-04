@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from re import fullmatch
+from types import MappingProxyType
 from typing import Any, Literal, TypedDict
 
 from powercontext_eval.codex import DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT
@@ -97,6 +98,7 @@ _TERMINAL_FINALIZATION_STATES = frozenset(
         FinalizationState.CLEANUP_FAILED,
     }
 )
+_PAUSE_REASONS = MappingProxyType({FailureCategory.CODEX_CAPACITY: BatchPauseReason.CODEX_CAPACITY})
 
 
 @dataclass(frozen=True)
@@ -862,7 +864,6 @@ class TaskStore:
 
         if not isinstance(idempotency_key, str) or fullmatch(r"[A-Za-z0-9._-]{8,128}", idempotency_key) is None:
             raise ValueError("Retry idempotency key is invalid")
-        created_at = _timestamp(now)
         with self._write() as connection:
             self._select_batch(connection, batch_id)
             task = connection.execute(
@@ -884,43 +885,75 @@ class TaskStore:
             latest_record = self._attempt_record(latest)
             if not latest_record.retryable:
                 raise TaskConflict("The current task outcome is not retryable")
-            attempt_number = latest_record.attempt_number + 1
-            attempt_id = f"{task_id}.attempt-{attempt_number:04d}"
-            connection.execute(
-                """
-                INSERT INTO task_attempts(
-                    attempt_id, task_id, attempt_number, idempotency_key,
-                    status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    attempt_id,
-                    task_id,
-                    attempt_number,
-                    idempotency_key,
-                    TaskStatus.QUEUED.value,
-                    created_at,
-                ),
-            )
-            connection.execute(
-                """
-                UPDATE tasks
-                SET status = ?, phase = NULL, started_at = NULL, finished_at = NULL,
-                    version = 0, failure_category = NULL, failure_phase = NULL,
-                    failure_summary = NULL, result_json = NULL
-                WHERE task_id = ?
-                """,
-                (TaskStatus.QUEUED.value, task_id),
-            )
-            self._append_control_event(
+            self._enqueue_next_attempt(
                 connection,
-                batch_id,
-                BatchControlEventType.TASK_RETRY_REQUESTED,
-                "user",
-                {"task_id": task_id, "attempt_number": attempt_number},
-                now,
+                task_id=task_id,
+                batch_id=batch_id,
+                attempt_number=latest_record.attempt_number + 1,
+                idempotency_key=idempotency_key,
+                actor="user",
+                details={},
+                now=now,
             )
             return self._attempt_record(self._select_latest_attempt(connection, task_id)), True
+
+    def _accepts_another_attempt(self, connection: sqlite3.Connection, task_row: sqlite3.Row) -> bool:
+        """Report whether a batch child may still be retried rather than left failed."""
+
+        batch_id = task_row["batch_id"]
+        if batch_id is None:
+            return False
+        batch = self._select_batch(connection, str(batch_id))
+        return BatchControlIntent(batch["control_intent"]) is not BatchControlIntent.CANCEL
+
+    def _enqueue_next_attempt(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task_id: str,
+        batch_id: str,
+        attempt_number: int,
+        idempotency_key: str,
+        actor: str,
+        details: Mapping[str, int | str | None],
+        now: datetime,
+    ) -> None:
+        """Queue one further attempt for a task whose latest attempt is retryable."""
+
+        connection.execute(
+            """
+            INSERT INTO task_attempts(
+                attempt_id, task_id, attempt_number, idempotency_key,
+                status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{task_id}.attempt-{attempt_number:04d}",
+                task_id,
+                attempt_number,
+                idempotency_key,
+                TaskStatus.QUEUED.value,
+                _timestamp(now),
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET status = ?, phase = NULL, started_at = NULL, finished_at = NULL,
+                version = 0, failure_category = NULL, failure_phase = NULL,
+                failure_summary = NULL, result_json = NULL
+            WHERE task_id = ?
+            """,
+            (TaskStatus.QUEUED.value, task_id),
+        )
+        self._append_control_event(
+            connection,
+            batch_id,
+            BatchControlEventType.TASK_RETRY_REQUESTED,
+            actor,
+            {"task_id": task_id, "attempt_number": attempt_number, **details},
+            now,
+        )
 
     def cancel_batch_queued(self, batch_id: str, *, now: datetime) -> BatchRecord:
         """Compatibility alias for the durable boundary-based cancellation action."""
@@ -1839,9 +1872,23 @@ class TaskStore:
                 "DELETE FROM worker_leases WHERE attempt_id = ? AND worker_id = ?",
                 (attempt["attempt_id"], worker_id),
             )
+            task_row = self._select_task(connection, task_id)
+            if failure.auto_retry and self._accepts_another_attempt(connection, task_row):
+                attempt_number = int(attempt["attempt_number"]) + 1
+                self._enqueue_next_attempt(
+                    connection,
+                    task_id=task_id,
+                    batch_id=str(task_row["batch_id"]),
+                    attempt_number=attempt_number,
+                    idempotency_key=f"{task_id}.attempt-{attempt_number:04d}",
+                    actor="system",
+                    details={"reason": _PAUSE_REASONS[failure.category].value},
+                    now=now,
+                )
+                return self._record(connection, self._select_task(connection, task_id))
             self._pause_batch_for_infrastructure_failure(
                 connection,
-                task_row=self._select_task(connection, task_id),
+                task_row=task_row,
                 attempt_id=str(attempt["attempt_id"]),
                 failure_category=failure.category,
                 now=now,
@@ -1936,7 +1983,7 @@ class TaskStore:
                 """,
                 (
                     BatchControlIntent.PAUSE.value,
-                    BatchPauseReason.INFRASTRUCTURE_FAILURE.value,
+                    _PAUSE_REASONS.get(failure_category, BatchPauseReason.INFRASTRUCTURE_FAILURE).value,
                     _timestamp(now),
                     batch_id,
                     BatchControlIntent.RUN.value,

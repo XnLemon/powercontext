@@ -80,4 +80,26 @@ describe("BatchControls", () => {
 
     expect(await screen.findByText("暂停原因：基础设施失败")).toBeVisible();
   });
+
+  it("labels a pause caused by an exhausted upstream capacity retry budget", async () => {
+    render(
+      <BatchControls
+        api={apiStub()}
+        batch={batchRecord({
+          status: "paused",
+          control: {
+            intent: "pause",
+            usage_pause_percent: 95,
+            pause_reason: "codex_capacity",
+            updated_at: "2026-08-04T00:00:00Z",
+            version: 31,
+          },
+        })}
+        report={batchReport}
+        onUpdated={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("暂停原因：上游模型容量不足（自动重试耗尽）")).toBeVisible();
+  });
 });

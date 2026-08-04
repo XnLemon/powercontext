@@ -14,13 +14,13 @@ import pytest
 from powercontext_eval.benchmarks.base import GoldCheckFailed
 from powercontext_eval.benchmarks.swebench_pro.adapter import DatasetSchemaError, SweBenchProInstance
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialResultError
-from powercontext_eval.codex import CodexInfrastructureError
+from powercontext_eval.codex import CodexCapacityError, CodexInfrastructureError
 from powercontext_eval.errors import GitSourceError
 from powercontext_eval.models import Arm
 from powercontext_eval.powercontext_sut import InvalidTreatment, UnsafeSutConfiguration
 from powercontext_eval.runner import MinimalRunConfig, MinimalRunResult, RunConfig, RunPhase
 from powercontext_eval.tokensflow import TokensFlowFinalizationDescriptor, TokensFlowInfrastructureError
-from powercontext_eval.web.batches import BatchCreate, BatchStatus
+from powercontext_eval.web.batches import BatchControlEventType, BatchCreate, BatchStatus
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.controls import BatchControlIntent, BatchPauseReason
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskCreate, TaskPhase, TaskStatus
@@ -73,9 +73,11 @@ def _config(
     poll_seconds: float = 0.01,
     usage_probe_seconds: int = 60,
     task_parallelism: int = 1,
+    codex_capacity_retry_max: int = 5,
 ) -> WebConfig:
     return WebConfig.for_root(
         root,
+        codex_capacity_retry_max=codex_capacity_retry_max,
         tokensflow_egress_network="bridge",
         run_root=root / "artifacts",
         powercontext_source=root / "source",
@@ -579,6 +581,134 @@ def test_failed_batch_child_pauses_later_children(monkeypatch: pytest.MonkeyPatc
     assert current.status is BatchStatus.PAUSED
     assert current.control.intent is BatchControlIntent.PAUSE
     assert current.control.pause_reason is BatchPauseReason.INFRASTRUCTURE_FAILURE
+
+
+def _capacity_worker(
+    config: WebConfig,
+    store: TaskStore,
+    instance_ids: tuple[str, ...],
+    runner: Callable[..., MinimalRunResult],
+) -> EvaluationWorker:
+    return EvaluationWorker(
+        config,
+        store,
+        runner=runner,
+        source=FakeSource(),
+        catalog=FakeCatalog(instance_ids),
+        clock=lambda: NOW,
+    )
+
+
+def test_upstream_capacity_failure_requeues_the_child_without_pausing_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    instance_ids = ("instance_owner__repo-a", "instance_owner__repo-b")
+    batch = _create_batch(store, instance_ids=instance_ids)
+    calls: list[str] = []
+
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        calls.append(run_config.run_id)
+        if len(calls) == 1:
+            on_phase(RunPhase.RUNNING_OFF)
+            raise CodexCapacityError("upstream pool saturated")
+        run_dir = config.run_root / "runs" / run_config.run_id
+        run_dir.mkdir(parents=True)
+        report = run_dir / "report.md"
+        report.write_text("safe")
+        return MinimalRunResult(run_config.run_id, report, True, True)
+
+    monkeypatch.setattr("powercontext_eval.web.worker.load_report", lambda *args: object())
+    worker = _capacity_worker(config, store, instance_ids, runner)
+
+    assert worker.run_once() is True
+
+    current = store.get_batch(batch.batch_id)
+    assert current.control.intent is BatchControlIntent.RUN
+    assert current.control.pause_reason is None
+    requeued = store.list_batch_tasks(batch.batch_id)[0]
+    assert requeued.status is TaskStatus.QUEUED
+    assert requeued.attempt_number == 2
+
+    retry_events = [
+        event
+        for event in store.list_control_events(batch.batch_id)
+        if event.event_type is BatchControlEventType.TASK_RETRY_REQUESTED
+    ]
+    assert [event.actor for event in retry_events] == ["system"]
+    assert retry_events[0].details["reason"] == "codex_capacity"
+
+    assert worker.run_once() is True
+    assert store.list_batch_tasks(batch.batch_id)[0].status is TaskStatus.SUCCEEDED
+    assert calls[1].endswith("-attempt-0002")
+
+
+def test_capacity_failures_pause_the_batch_once_the_retry_budget_is_spent(tmp_path: Path) -> None:
+    config = _config(tmp_path, codex_capacity_retry_max=1)
+    store = _store(config)
+    instance_ids = ("instance_owner__repo-a", "instance_owner__repo-b")
+    batch = _create_batch(store, instance_ids=instance_ids)
+
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        on_phase(RunPhase.RUNNING_OFF)
+        raise CodexCapacityError("upstream pool saturated")
+
+    worker = _capacity_worker(config, store, instance_ids, runner)
+
+    assert worker.run_once() is True
+    assert store.get_batch(batch.batch_id).control.intent is BatchControlIntent.RUN
+
+    assert worker.run_once() is True
+
+    failed = store.list_batch_tasks(batch.batch_id)[0]
+    assert failed.status is TaskStatus.FAILED
+    assert failed.failure_category is FailureCategory.CODEX_CAPACITY
+    assert failed.retryable is True
+    current = store.get_batch(batch.batch_id)
+    assert current.status is BatchStatus.PAUSED
+    assert current.control.pause_reason is BatchPauseReason.CODEX_CAPACITY
+
+    attempts = store.list_task_attempts(batch.batch_id, failed.task_id)
+    assert [attempt.attempt_number for attempt in attempts] == [1, 2]
+    assert all(attempt.failure_category is FailureCategory.CODEX_CAPACITY for attempt in attempts)
+
+
+def test_capacity_failure_never_resumes_a_batch_the_user_paused(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    instance_ids = ("instance_owner__repo-a",)
+    batch = _create_batch(store, instance_ids=instance_ids)
+
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        store.request_pause(batch.batch_id, reason=BatchPauseReason.USER, now=NOW)
+        raise CodexCapacityError("upstream pool saturated")
+
+    assert _capacity_worker(config, store, instance_ids, runner).run_once() is True
+
+    current = store.get_batch(batch.batch_id)
+    assert current.control.intent is BatchControlIntent.PAUSE
+    assert current.control.pause_reason is BatchPauseReason.USER
+    assert store.list_batch_tasks(batch.batch_id)[0].status is TaskStatus.QUEUED
+
+
+def test_capacity_failure_never_queues_another_attempt_for_a_cancelling_batch(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    instance_ids = ("instance_owner__repo-a",)
+    batch = _create_batch(store, instance_ids=instance_ids)
+
+    def runner(run_config: Any, *, instance: object, on_phase: Any) -> MinimalRunResult:
+        store.request_cancel(batch.batch_id, now=NOW)
+        raise CodexCapacityError("upstream pool saturated")
+
+    assert _capacity_worker(config, store, instance_ids, runner).run_once() is True
+
+    child = store.list_batch_tasks(batch.batch_id)[0]
+    assert child.status is TaskStatus.FAILED
+    assert child.attempt_number == 1
+    assert store.list_task_attempts(batch.batch_id, child.task_id)[-1].attempt_number == 1
 
 
 def test_tokensflow_drain_failure_is_recorded_and_pauses_batch_atomically(tmp_path: Path) -> None:

@@ -20,6 +20,8 @@ EXPECTED_CODEX_VERSION = "0.145.0"
 DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "medium"
 _SAFE_CODEX_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_CAPACITY_MARKER = "at capacity"
+_CAPACITY_EVENT_TYPES = frozenset({"error", "turn.failed"})
 
 
 def is_safe_codex_model(value: str) -> bool:
@@ -34,6 +36,10 @@ class UnsafeCodexInvocation(PowerContextEvalError):
 
 class CodexInfrastructureError(PowerContextEvalError):
     """Codex infrastructure failed before a benchmark patch could be evaluated."""
+
+
+class CodexCapacityError(CodexInfrastructureError):
+    """The upstream model pool was saturated, which a later attempt can survive."""
 
 
 @dataclass(frozen=True)
@@ -162,6 +168,8 @@ class CodexRunner:
             except CommandError as error:
                 self._append_compat_stdout(event_stream, error.result.stdout, secrets)
                 self._retain_process_result(store, error.result, event_stream, secrets)
+                if _stream_reports_upstream_capacity(event_stream):
+                    raise CodexCapacityError("Codex reported the upstream model is at capacity") from None
                 raise CodexInfrastructureError(_command_error_kind(error)) from None
 
             self._append_compat_stdout(event_stream, result.stdout, secrets)
@@ -207,6 +215,24 @@ def _command_error_kind(error: CommandError) -> str:
     if error.result.returncode == 124:
         return "Codex timed out"
     return f"Codex failed with exit status {error.result.returncode}"
+
+
+def _stream_reports_upstream_capacity(stream: BinaryIO) -> bool:
+    """Report whether a failed run ended on an upstream model-pool capacity refusal."""
+
+    stream.seek(0)
+    for raw_line in stream:
+        try:
+            event = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(event, dict) or event.get("type") not in _CAPACITY_EVENT_TYPES:
+            continue
+        error = event.get("error")
+        messages = (event.get("message"), error.get("message") if isinstance(error, dict) else None)
+        if any(isinstance(message, str) and _CAPACITY_MARKER in message for message in messages):
+            return True
+    return False
 
 
 def _parse_jsonl(raw: str) -> tuple[dict[str, Any], ...]:
