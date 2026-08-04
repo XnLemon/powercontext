@@ -173,8 +173,8 @@ def test_missing_task_image_is_exported_through_proxy_loaded_and_verified(tmp_pa
         "HTTP_PROXY": "http://127.0.0.1:7890",
         "https_proxy": "http://127.0.0.1:7890",
         "http_proxy": "http://127.0.0.1:7890",
-        "NO_PROXY": "127.0.0.1,localhost,::1",
-        "no_proxy": "127.0.0.1,localhost,::1",
+        "NO_PROXY": "127.0.0.1,localhost,::1,work.oceanbase-dev.com",
+        "no_proxy": "127.0.0.1,localhost,::1,work.oceanbase-dev.com",
     }
     assert not list(tmp_path.glob(".task-image-*.tar"))
 

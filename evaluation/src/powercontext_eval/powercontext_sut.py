@@ -70,7 +70,8 @@ _CONTAINER_UV_PYTHON_INSTALL_DIR = "/runtime/uv-python"
 _DEFAULT_RECORDER_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "record_codex_jsonl.py"
 _TIMED_OUT_CONTAINER_REMOVAL_SETTLE_SECONDS = 90.0
 _TIMED_OUT_CONTAINER_REMOVAL_POLL_SECONDS = 0.25
-LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
+LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1,work.oceanbase-dev.com"
+_TOKENSFLOW_RETRY_ATTEMPTS = 10
 _PLUGIN_RELATIVE = Path("integrations/codex/plugins/powercontext")
 _TOKENSFLOW_WRAPPER = b"""#!/bin/sh
 real=${POWERCONTEXT_EVAL_TOKENSFLOW_REAL_BINARY-}
@@ -1012,16 +1013,19 @@ class DockerSut:
         timeout: float = 30,
         secrets: Sequence[str] = (),
     ) -> bytes:
-        output, returncode = self._capture_tokensflow_result(
-            argv,
-            cwd=cwd,
-            environment=environment,
-            timeout=timeout,
-            secrets=secrets,
-        )
-        if returncode != 0:
-            raise TokensFlowInfrastructureError("TokensFlow command failed")
-        return output
+        for attempt in range(_TOKENSFLOW_RETRY_ATTEMPTS):
+            output, returncode = self._capture_tokensflow_result(
+                argv,
+                cwd=cwd,
+                environment=environment,
+                timeout=timeout,
+                secrets=secrets,
+            )
+            if returncode == 0:
+                return output
+            if attempt < _TOKENSFLOW_RETRY_ATTEMPTS - 1:
+                time.sleep(1)
+        raise TokensFlowInfrastructureError("TokensFlow command failed")
 
     def _capture_tokensflow_result(
         self,
@@ -2205,9 +2209,13 @@ def _container_env_file_args(
 
     if arm is not Arm.ON or not config.container_env:
         return ()
+    reserved = {"NO_PROXY", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"}
+    safe_env = {k: v for k, v in config.container_env.items() if k not in reserved}
+    if not safe_env:
+        return ()
     env_file = paths.runtime / "container.env"
     env_file.write_text(
-        "".join(f"{key}={value}\n" for key, value in config.container_env.items()),
+        "".join(f"{key}={value}\n" for key, value in safe_env.items()),
         encoding="utf-8",
     )
     return ("--env-file", str(env_file))
