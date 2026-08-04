@@ -61,14 +61,14 @@ and OceanBase uses HNSW for `vector` and `hybrid` searches.
 
 Inference configuration is documented in [Configure Pydantic AI inference](pydantic-ai-inference.md).
 
-Set `POWERCONTEXT_SERVER_RUNTIME_SCHEDULE_SECONDS` to process pending Source windows on a persisted interval and
-`POWERCONTEXT_SERVER_RUNTIME_SCHEDULER_PATH` to choose its SQLite sidecar. Scheduling works with either application
-database and requires a configured generation pipeline.
+Set `POWERCONTEXT_SERVER_RUNTIME_SCHEDULE_SECONDS` to process pending Source windows on a persisted interval. Scheduled
+jobs use the SQLite sidecar at `POWERCONTEXT_HOME/scheduler.db`. Scheduling works with either application database and
+requires a configured generation pipeline.
 
 ## HTTP surface
 
 The source contract is `openapi/powercontext.yaml`. Generated Pydantic models and operation descriptors under
-`powercontext.api.generated` are build artifacts of that contract.
+`powercontext.http._generated` are build artifacts of that contract.
 
 | Area | Operations |
 | --- | --- |
@@ -96,7 +96,7 @@ uv add "powercontext[client]"
 `PowerContextClient` is async-native and uses the generated request and response models:
 
 ```python
-from powercontext.api import SearchMemoryRequest
+from powercontext.http import SearchMemoryRequest
 from powercontext.client import PowerContextClient
 
 
@@ -155,10 +155,11 @@ export POWERCONTEXT_SERVER_MCP_PATH="/agent"
 ```
 
 The MCP projection includes the agent-facing Memory operations for search, listing, reading, remembering, revising,
-and retiring entries. Health, capability, Source capture, flush, and change-history endpoints remain HTTP-only.
+and retiring entries, plus Candidate Review operations for listing, reading, approving, rejecting, and revising
+Candidates. Health, capability, Source capture, Experience, flush, and change-history endpoints remain HTTP-only.
 
 HTTP and MCP share the same Server application and Runtime binding. A request made through either transport therefore
-uses the same scope isolation, Memory validation, and persistence behavior.
+uses the same scope isolation, validation, concurrency checks, and persistence behavior.
 
 ## Programmatic composition
 

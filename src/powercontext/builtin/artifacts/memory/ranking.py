@@ -4,11 +4,42 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from powercontext.builtin.artifacts.memory.models import MemoryChannelHit, MemoryHit, MemoryMatchedBy
+from powercontext.builtin.artifacts.memory.models import (
+    MemoryChannelHit,
+    MemoryHit,
+    MemoryMatchedBy,
+)
+from powercontext.builtin.artifacts.search import admits_fts_text
 
 _RRF_CONSTANT = 60
+_MIN_SEMANTIC_SIMILARITY = 0.3
 
 _HitIdentity = tuple[str, int, str, str]
+
+
+def admit_fts_candidates(
+    query: str,
+    candidates: Sequence[MemoryChannelHit],
+) -> tuple[MemoryChannelHit, ...]:
+    """Keep lexical candidates with enough distinct query-term evidence."""
+
+    return tuple(candidate for candidate in candidates if admits_fts_text(query, candidate.text))
+
+
+def admit_vector_candidates(
+    candidates: Sequence[MemoryChannelHit],
+) -> tuple[MemoryChannelHit, ...]:
+    """Keep unit-vector L2 candidates meeting the semantic similarity baseline."""
+
+    return tuple(
+        candidate
+        for candidate in candidates
+        if candidate.distance is not None and _unit_l2_cosine_similarity(candidate.distance) >= _MIN_SEMANTIC_SIMILARITY
+    )
+
+
+def _unit_l2_cosine_similarity(distance: float) -> float:
+    return max(-1.0, min(1.0, 1.0 - distance**2 / 2.0))
 
 
 def fuse_rankings(

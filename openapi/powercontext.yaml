@@ -3,9 +3,13 @@ info:
   title: PowerContext API
   description: Remote PowerContext transport. Runtime behavior is reported by /v1/capabilities.
   version: 0.0.1
+security:
+  - BearerAuth: []
+  - {}
 paths:
   /health/live:
     get:
+      security: []
       tags: [health]
       summary: Get process liveness
       operationId: get_liveness
@@ -21,6 +25,7 @@ paths:
                 $ref: "#/components/schemas/HealthResponse"
   /health/ready:
     get:
+      security: []
       tags: [health]
       summary: Get deployment readiness
       operationId: get_readiness
@@ -58,6 +63,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Capabilities"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/sources/content:
     post:
       tags: [sources]
@@ -82,6 +89,196 @@ paths:
                 $ref: "#/components/schemas/CaptureContentSourceResponse"
         "409":
           $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/context/prepare:
+    post:
+      tags: [context]
+      summary: Prepare bounded context for an Agent turn
+      description: Prepare final, ephemeral context from Runtime-owned sources without persisting or injecting it.
+      operationId: prepare_context
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrepareContextRequest"
+      responses:
+        "200":
+          description: Final context ready for direct injection, or a normal empty result.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreparedContext"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/handoff/activate:
+    post:
+      tags: [handoff]
+      summary: Activate Handoff generation at a Source boundary
+      description: Evaluate the standard Handoff Trigger and synchronously execute any emitted PrepareHandoff Action.
+      operationId: activate_handoff
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivateHandoffRequest"
+      responses:
+        "200":
+          description: A generated inspectable Draft, or an ignored boundary that was already consumed.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HandoffActivation"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/handoff/prepare:
+    post:
+      tags: [handoff]
+      summary: Generate an inspectable Handoff Draft
+      operationId: prepare_handoff
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrepareHandoffRequest"
+      responses:
+        "200":
+          description: An uncommitted Draft generated from the selected exact evidence.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HandoffDraft"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/handoff/finalize:
+    post:
+      tags: [handoff]
+      summary: Finalize an inspected Handoff Draft
+      operationId: finalize_handoff
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FinalizeHandoffRequest"
+      responses:
+        "200":
+          description: A temporary Handoff ready for direct transfer or explicit commit.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreparedHandoff"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/handoff/commit:
+    post:
+      tags: [handoff]
+      summary: Commit an explicit Handoff milestone
+      operationId: commit_handoff
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommitHandoffRequest"
+      responses:
+        "200":
+          description: The committed immutable Handoff Revision.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommittedHandoff"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/handoff/continue:
+    post:
+      tags: [handoff]
+      summary: Resolve a Handoff as untrusted historical input
+      operationId: continue_handoff
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContinueHandoffRequest"
+      responses:
+        "200":
+          description: Resolved content and per-statement evidence availability.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HandoffResolution"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/InvalidRequest"
         "503":
@@ -110,6 +307,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FlushMemoryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/InvalidRequest"
         "503":
@@ -140,6 +339,8 @@ paths:
                 $ref: "#/components/schemas/MemoryMutationResponse"
         "409":
           $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/InvalidRequest"
         "503":
@@ -168,6 +369,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SearchMemoryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/InvalidRequest"
         "503":
@@ -178,7 +381,9 @@ paths:
     post:
       tags: [memory]
       summary: List Memory entries
-      description: Read the complete entry snapshot from the current Memory head.
+      description: >-
+        Read active entries from the current Memory head. Inactive entries are available only when explicitly
+        requested for audit.
       operationId: list_memory_entries
       requestBody:
         required: true
@@ -188,7 +393,7 @@ paths:
               $ref: "#/components/schemas/ListMemoryEntriesRequest"
       responses:
         "200":
-          description: The current Memory entry snapshot.
+          description: The selected entries from the current Memory head.
           headers:
             X-Request-ID:
               $ref: "#/components/headers/RequestId"
@@ -198,6 +403,8 @@ paths:
                 $ref: "#/components/schemas/ListMemoryEntriesResponse"
         "404":
           $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/InvalidRequest"
         "503":
@@ -228,6 +435,8 @@ paths:
                 $ref: "#/components/schemas/MemoryEntry"
         "404":
           $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/InvalidRequest"
         "503":
@@ -260,6 +469,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/InvalidRequest"
         "503":
@@ -292,6 +503,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/InvalidRequest"
         "503":
@@ -322,6 +535,490 @@ paths:
                 $ref: "#/components/schemas/ListMemoryChangesResponse"
         "404":
           $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/experience/propose:
+    post:
+      tags: [experience]
+      summary: Propose Experience content
+      description: Persist a pending Experience Candidate without creating an Artifact Revision.
+      operationId: propose_experience
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProposeExperienceRequest"
+      responses:
+        "201":
+          description: The pending Experience Candidate.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactCandidate"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/experience/generate:
+    post:
+      tags: [experience]
+      summary: Generate an Experience Candidate
+      description: Use the configured model and caller-selected exact evidence; persist only a schema-valid pending Candidate.
+      operationId: generate_experience
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateExperienceRequest"
+      responses:
+        "200":
+          description: A pending Candidate or an explicit semantic no-op.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeneratedCandidateResponse"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/experience/get:
+    post:
+      tags: [experience]
+      summary: Get an exact Experience Revision
+      description: Read approved Experience content and its exact direct evidence.
+      operationId: get_experience
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GetExperienceRequest"
+      responses:
+        "200":
+          description: The exact approved Experience Revision.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExperienceArtifact"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/skill/propose:
+    post:
+      tags: [skill]
+      summary: Propose managed Skill content
+      description: Persist a pending managed Skill Candidate without creating an Artifact Revision.
+      operationId: propose_skill
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProposeSkillRequest"
+      responses:
+        "201":
+          description: The pending managed Skill Candidate.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactCandidate"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/skill/generate:
+    post:
+      tags: [skill]
+      summary: Generate a managed Skill Candidate
+      description: Use the configured model with an explicit provenance shape; persist only a schema-valid pending Candidate.
+      operationId: generate_skill
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateSkillRequest"
+      responses:
+        "200":
+          description: A pending Candidate or an explicit semantic no-op.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeneratedCandidateResponse"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/skill/get:
+    post:
+      tags: [skill]
+      summary: Get an exact managed Skill Revision
+      description: Read approved managed Skill content and its exact direct evidence.
+      operationId: get_skill
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GetSkillRequest"
+      responses:
+        "200":
+          description: The exact approved managed Skill Revision.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillArtifact"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/external-skills/scan:
+    post:
+      tags: [skill]
+      summary: Scan configured external Skill roots
+      description: Replace the current host-local Registry projection without copying or rewriting package content.
+      operationId: scan_external_skills
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScanExternalSkillsRequest"
+      responses:
+        "200":
+          description: The rebuildable provider snapshot.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanExternalSkillsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/external-skills/list:
+    post:
+      tags: [skill]
+      summary: List external Skills visible on this host
+      description: Return live local resolutions; unavailable registrations are omitted unless explicitly requested.
+      operationId: list_external_skills
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListExternalSkillsRequest"
+      responses:
+        "200":
+          description: External Skills resolved against the current Agent, host, scope, and fingerprint.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListExternalSkillsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/external-skills/resolve:
+    post:
+      tags: [skill]
+      summary: Resolve an exact external Skill fingerprint
+      description: Resolve only the registered local package version requested by the caller; never install or fall back.
+      operationId: resolve_external_skill
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveExternalSkillRequest"
+      responses:
+        "200":
+          description: The live exact-resolution result, which may be unavailable.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalSkillResolution"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/external-skills/import:
+    post:
+      tags: [skill]
+      summary: Import or fork an external Skill into Review
+      description: Capture one exact local snapshot and use the configured model to propose a new managed Skill Candidate.
+      operationId: import_external_skill
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportExternalSkillRequest"
+      responses:
+        "200":
+          description: A pending managed Skill Candidate or an explicit semantic no-op.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeneratedCandidateResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/artifact-candidates/list:
+    post:
+      tags: [review]
+      summary: List Artifact Candidates
+      description: Page current Candidate heads; pending is the default Review Inbox view.
+      operationId: list_artifact_candidates
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListArtifactCandidatesRequest"
+      responses:
+        "200":
+          description: The selected current Candidate heads.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactCandidatePage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/artifact-candidates/get:
+    post:
+      tags: [review]
+      summary: Get an Artifact Candidate
+      description: Read the current head and exact immutable proposal version.
+      operationId: get_artifact_candidate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GetArtifactCandidateRequest"
+      responses:
+        "200":
+          description: The current Candidate head.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactCandidate"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/artifact-candidates/approve:
+    post:
+      tags: [review]
+      summary: Approve an Artifact Candidate
+      description: Commit the reviewed proposal and mark the Candidate approved in one transaction.
+      operationId: approve_artifact_candidate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveArtifactCandidateRequest"
+      responses:
+        "200":
+          description: The approved Candidate and exact result Artifact.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactCandidate"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/artifact-candidates/reject:
+    post:
+      tags: [review]
+      summary: Reject an Artifact Candidate
+      description: Move the exact pending version to its rejected terminal state without writing an Artifact.
+      operationId: reject_artifact_candidate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectArtifactCandidateRequest"
+      responses:
+        "200":
+          description: The rejected Candidate.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactCandidate"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/artifact-candidates/revise:
+    post:
+      tags: [review]
+      summary: Revise an Artifact Candidate
+      description: Append a complete replacement proposal as the next immutable pending version.
+      operationId: revise_artifact_candidate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviseArtifactCandidateRequest"
+      responses:
+        "200":
+          description: The next pending Candidate version.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactCandidate"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/InvalidRequest"
         "503":
@@ -329,12 +1026,33 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Static bearer token used when local Server authentication is enabled.
   headers:
+    BearerChallenge:
+      description: Authentication scheme required by the Server.
+      schema:
+        type: string
+        example: Bearer
     RequestId:
       description: Opaque identifier for correlating one request.
       schema:
         type: string
   responses:
+    Unauthorized:
+      description: A valid bearer token is required by this Server deployment.
+      headers:
+        WWW-Authenticate:
+          $ref: "#/components/headers/BearerChallenge"
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     Conflict:
       description: The command conflicts with current immutable state.
       headers:
@@ -381,6 +1099,34 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    ActivateHandoffRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, boundary_source, objective]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        boundary_source:
+          $ref: "#/components/schemas/SourceReference"
+        objective:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          pattern: '.*\S.*'
+        evidence:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/HandoffCitation"
+          default: []
+        max_bytes:
+          type: integer
+          minimum: 512
+          maximum: 32768
+          default: 8000
     ArtifactReference:
       type: object
       additionalProperties: false
@@ -399,10 +1145,101 @@ components:
         revision:
           type: integer
           minimum: 1
+    ArtifactCandidate:
+      type: object
+      additionalProperties: false
+      required:
+        - candidate_id
+        - version
+        - family
+        - status
+        - proposal
+        - source_refs
+        - artifact_refs
+        - target
+        - reason
+        - result_artifact
+        - decision_reason
+      properties:
+        candidate_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[\x21-\x7E]+$'
+        version:
+          type: integer
+          minimum: 1
+        family:
+          $ref: "#/components/schemas/CandidateFamily"
+        status:
+          $ref: "#/components/schemas/CandidateStatus"
+        proposal:
+          oneOf:
+            - $ref: "#/components/schemas/ExperienceProposal"
+            - $ref: "#/components/schemas/SkillProposal"
+        source_refs:
+          type: array
+          maxItems: 32
+          description: Exact Source evidence. Counted with artifact_refs toward a combined maximum of 32 references.
+          items:
+            $ref: "#/components/schemas/SourceReference"
+        artifact_refs:
+          type: array
+          maxItems: 32
+          description: Exact Artifact evidence. Counted with source_refs toward a combined maximum of 32 references.
+          items:
+            $ref: "#/components/schemas/ArtifactReference"
+        target:
+          $ref: "#/components/schemas/ArtifactReference"
+          nullable: true
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          nullable: true
+        result_artifact:
+          $ref: "#/components/schemas/ArtifactReference"
+          nullable: true
+        decision_reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          nullable: true
+    ArtifactCandidatePage:
+      type: object
+      additionalProperties: false
+      required: [candidates, next_cursor]
+      properties:
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArtifactCandidate"
+        next_cursor:
+          type: string
+          nullable: true
+    ApproveArtifactCandidateRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, candidate_id, expected_version]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        candidate_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[\x21-\x7E]+$'
+        expected_version:
+          type: integer
+          minimum: 1
     Capabilities:
       type: object
       additionalProperties: false
-      required: [source_types, artifact_families, memory_extraction, search_modes]
+      required:
+        [source_types, artifact_families, memory_extraction, handoff_generation, search_modes, context_versions]
       properties:
         source_types:
           type: array
@@ -415,10 +1252,29 @@ components:
         memory_extraction:
           type: boolean
           description: Whether pending Sources can be extracted into Memory.
+        experience_generation:
+          type: boolean
+          default: false
+          description: Whether the configured model can generate reviewed Experience Candidates.
+        managed_skill_generation:
+          type: boolean
+          default: false
+          description: Whether the configured model can generate reviewed managed Skill Candidates.
+        external_skill_registry:
+          type: boolean
+          default: false
+          description: Whether host-local external Skill discovery and exact resolution are configured.
+        handoff_generation:
+          type: boolean
+          description: Whether exact evidence can be generated into an inspectable Handoff Draft.
         search_modes:
           type: array
           items:
             $ref: "#/components/schemas/MemorySearchMode"
+        context_versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/PreparedContextSchema"
     CaptureContentSourceRequest:
       type: object
       additionalProperties: false
@@ -453,6 +1309,310 @@ components:
         position:
           type: integer
           minimum: 1
+    CommitHandoffRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, handoff]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        handoff:
+          $ref: "#/components/schemas/PreparedHandoff"
+    CommittedHandoff:
+      type: object
+      additionalProperties: false
+      required: [reference, content, source_refs, artifact_refs]
+      properties:
+        reference:
+          $ref: "#/components/schemas/ArtifactReference"
+        content:
+          $ref: "#/components/schemas/HandoffContent"
+        source_refs:
+          type: array
+          items:
+            $ref: "#/components/schemas/SourceReference"
+        artifact_refs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArtifactReference"
+    ContinueHandoffRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, selection]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        selection:
+          $ref: "#/components/schemas/HandoffSelection"
+        prepared:
+          $ref: "#/components/schemas/PreparedHandoff"
+          nullable: true
+        revision:
+          $ref: "#/components/schemas/ArtifactReference"
+          nullable: true
+    FinalizeHandoffRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, draft]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        draft:
+          $ref: "#/components/schemas/HandoffDraft"
+    HandoffArtifactCitation:
+      type: object
+      additionalProperties: false
+      required: [kind, artifact_ref]
+      properties:
+        kind:
+          type: string
+          enum: [artifact]
+        artifact_ref:
+          $ref: "#/components/schemas/ArtifactReference"
+    HandoffActivation:
+      type: object
+      additionalProperties: false
+      required: [status, boundary_source, previous_position, current_position, draft]
+      properties:
+        status:
+          $ref: "#/components/schemas/HandoffActivationStatus"
+        boundary_source:
+          $ref: "#/components/schemas/SourceReference"
+        previous_position:
+          type: integer
+          minimum: 0
+        current_position:
+          type: integer
+          minimum: 0
+        draft:
+          $ref: "#/components/schemas/HandoffDraft"
+          nullable: true
+    HandoffCitation:
+      oneOf:
+        - $ref: "#/components/schemas/HandoffSourceCitation"
+        - $ref: "#/components/schemas/HandoffArtifactCitation"
+        - $ref: "#/components/schemas/HandoffMemoryCitation"
+      discriminator:
+        propertyName: kind
+        mapping:
+          source: "#/components/schemas/HandoffSourceCitation"
+          artifact: "#/components/schemas/HandoffArtifactCitation"
+          memory: "#/components/schemas/HandoffMemoryCitation"
+    HandoffContent:
+      type: object
+      additionalProperties: false
+      required: [schema, objective, state, disposition, next_action, omissions]
+      properties:
+        schema:
+          $ref: "#/components/schemas/HandoffSchema"
+        objective:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          pattern: '.*\S.*'
+        state:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/HandoffStatement"
+        disposition:
+          $ref: "#/components/schemas/HandoffDisposition"
+        next_action:
+          $ref: "#/components/schemas/HandoffStatement"
+          nullable: true
+        omissions:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/HandoffOmission"
+    HandoffDraft:
+      type: object
+      additionalProperties: false
+      required: [objective, state, disposition, next_action, omissions]
+      properties:
+        objective:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          pattern: '.*\S.*'
+        state:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/HandoffStatement"
+        disposition:
+          $ref: "#/components/schemas/HandoffDisposition"
+        next_action:
+          $ref: "#/components/schemas/HandoffStatement"
+          nullable: true
+        omissions:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/HandoffOmission"
+    HandoffEvidenceCheck:
+      type: object
+      additionalProperties: false
+      required: [claim, state_index, status, unavailable_evidence]
+      properties:
+        claim:
+          $ref: "#/components/schemas/HandoffClaim"
+        state_index:
+          type: integer
+          minimum: 0
+          nullable: true
+        status:
+          $ref: "#/components/schemas/HandoffEvidenceStatus"
+        unavailable_evidence:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/HandoffCitation"
+    HandoffMemoryCitation:
+      type: object
+      additionalProperties: false
+      required: [kind, memory_citation]
+      properties:
+        kind:
+          type: string
+          enum: [memory]
+        memory_citation:
+          $ref: "#/components/schemas/MemoryCitation"
+    HandoffOmission:
+      type: object
+      additionalProperties: false
+      required: [text, citation]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          pattern: '.*\S.*'
+        citation:
+          $ref: "#/components/schemas/HandoffCitation"
+          nullable: true
+    HandoffResolution:
+      type: object
+      additionalProperties: false
+      required:
+        [trust, status, scope_id, content, selection, selected_revision, current_revision, evidence_checks]
+      properties:
+        trust:
+          type: string
+          enum: [untrusted_history]
+        status:
+          $ref: "#/components/schemas/HandoffResolutionStatus"
+        scope_id:
+          type: string
+        content:
+          $ref: "#/components/schemas/HandoffContent"
+          nullable: true
+        selection:
+          $ref: "#/components/schemas/HandoffSelection"
+          nullable: true
+        selected_revision:
+          $ref: "#/components/schemas/ArtifactReference"
+          nullable: true
+        current_revision:
+          $ref: "#/components/schemas/ArtifactReference"
+          nullable: true
+        evidence_checks:
+          type: array
+          maxItems: 65
+          items:
+            $ref: "#/components/schemas/HandoffEvidenceCheck"
+    HandoffSourceCitation:
+      type: object
+      additionalProperties: false
+      required: [kind, source_ref]
+      properties:
+        kind:
+          type: string
+          enum: [source]
+        source_ref:
+          $ref: "#/components/schemas/SourceReference"
+    HandoffStatement:
+      type: object
+      additionalProperties: false
+      required: [text, citations]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          pattern: '.*\S.*'
+        citations:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/HandoffCitation"
+    PrepareHandoffRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, objective, evidence]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        objective:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          pattern: '.*\S.*'
+        evidence:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/HandoffCitation"
+        max_bytes:
+          type: integer
+          minimum: 512
+          maximum: 32768
+          default: 8000
+    PreparedHandoff:
+      type: object
+      additionalProperties: false
+      required: [schema, scope_id, base, content]
+      properties:
+        schema:
+          $ref: "#/components/schemas/PreparedHandoffSchema"
+        scope_id:
+          type: string
+        base:
+          $ref: "#/components/schemas/ArtifactReference"
+          nullable: true
+        content:
+          $ref: "#/components/schemas/HandoffContent"
+    PreparedContext:
+      type: object
+      additionalProperties: false
+      required: [schema, status, content, content_bytes]
+      properties:
+        schema:
+          $ref: "#/components/schemas/PreparedContextSchema"
+        status:
+          $ref: "#/components/schemas/PreparedContextStatus"
+        content:
+          type: string
+          nullable: true
+        content_bytes:
+          type: integer
+          minimum: 0
     EntryChange:
       type: object
       additionalProperties: false
@@ -480,6 +1640,181 @@ components:
         reason:
           type: string
           nullable: true
+    ExperienceArtifact:
+      type: object
+      additionalProperties: false
+      required: [artifact, content, source_refs, artifact_refs]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/ArtifactReference"
+        content:
+          $ref: "#/components/schemas/ExperienceProposal"
+        source_refs:
+          type: array
+          items:
+            $ref: "#/components/schemas/SourceReference"
+        artifact_refs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArtifactReference"
+    ExperienceProposal:
+      type: object
+      additionalProperties: false
+      required: [situation, action, outcome, lesson]
+      properties:
+        situation:
+          type: string
+          minLength: 1
+          maxLength: 8000
+          pattern: '.*\S.*'
+        action:
+          type: string
+          minLength: 1
+          maxLength: 8000
+          pattern: '.*\S.*'
+        outcome:
+          type: string
+          minLength: 1
+          maxLength: 8000
+          pattern: '.*\S.*'
+        lesson:
+          type: string
+          minLength: 1
+          maxLength: 8000
+          pattern: '.*\S.*'
+    SkillArtifact:
+      type: object
+      additionalProperties: false
+      required: [artifact, content, source_refs, artifact_refs]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/ArtifactReference"
+        content:
+          $ref: "#/components/schemas/SkillProposal"
+        source_refs:
+          type: array
+          items:
+            $ref: "#/components/schemas/SourceReference"
+        artifact_refs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArtifactReference"
+    SkillProposal:
+      type: object
+      additionalProperties: false
+      required: [name, description, instructions, validation]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^\S(?:.*\S)?$'
+        description:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          pattern: '^\S(?:.*\S)?$'
+        instructions:
+          type: string
+          minLength: 1
+          maxLength: 32000
+          pattern: '.*\S.*'
+        validation:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/SkillValidationItem"
+    SkillValidationItem:
+      type: string
+      minLength: 1
+      maxLength: 2000
+      pattern: '^\S(?:.*\S)?$'
+    ExternalSkillRegistration:
+      type: object
+      additionalProperties: false
+      required:
+        - external_skill_id
+        - provider
+        - agent_kind
+        - host_id
+        - installation_scope
+        - locator
+        - fingerprint
+        - name
+        - description
+      properties:
+        external_skill_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[\x21-\x7E]+$'
+        provider:
+          type: string
+          enum: [codex]
+        agent_kind:
+          type: string
+          enum: [codex]
+        host_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^\S(?:.*\S)?$'
+        installation_scope:
+          $ref: "#/components/schemas/ExternalSkillInstallationScope"
+        locator:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          pattern: '^\S(?:.*\S)?$'
+          description: Host-local locator; not a cross-Agent or cross-host contract.
+        fingerprint:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^\S(?:.*\S)?$'
+        description:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          pattern: '^\S(?:.*\S)?$'
+    ExternalSkillResolution:
+      type: object
+      additionalProperties: false
+      required: [registration, status, entrypoint]
+      properties:
+        registration:
+          $ref: "#/components/schemas/ExternalSkillRegistration"
+        status:
+          $ref: "#/components/schemas/ExternalSkillResolutionStatus"
+        entrypoint:
+          type: string
+          nullable: true
+          description: Host-local SKILL.md path; present only when the exact fingerprint is available.
+    ScanExternalSkillsResponse:
+      type: object
+      additionalProperties: false
+      required: [registrations, skipped]
+      properties:
+        registrations:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExternalSkillRegistration"
+        skipped:
+          type: integer
+          minimum: 0
+    ListExternalSkillsResponse:
+      type: object
+      additionalProperties: false
+      required: [skills]
+      properties:
+        skills:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExternalSkillResolution"
     ErrorDetail:
       type: object
       additionalProperties: false
@@ -544,6 +1879,45 @@ components:
           pattern: '.*\S.*'
         citation:
           $ref: "#/components/schemas/MemoryCitation"
+    GetArtifactCandidateRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, candidate_id]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        candidate_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[\x21-\x7E]+$'
+    GetExperienceRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, artifact]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        artifact:
+          $ref: "#/components/schemas/ArtifactReference"
+    GetSkillRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, artifact]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        artifact:
+          $ref: "#/components/schemas/ArtifactReference"
     HealthResponse:
       type: object
       additionalProperties: false
@@ -590,6 +1964,10 @@ components:
           minLength: 1
           maxLength: 256
           pattern: '.*\S.*'
+        include_inactive:
+          type: boolean
+          default: false
+          description: Include inactive entries from the current Memory head for explicit audit.
     ListMemoryEntriesResponse:
       type: object
       additionalProperties: false
@@ -602,6 +1980,45 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/MemoryEntry"
+    ListArtifactCandidatesRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        status:
+          $ref: "#/components/schemas/CandidateStatus"
+          default: pending
+        family:
+          $ref: "#/components/schemas/CandidateFamily"
+          nullable: true
+        cursor:
+          type: string
+          minLength: 1
+          maxLength: 128
+          nullable: true
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+    ListExternalSkillsRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        include_unavailable:
+          type: boolean
+          default: false
     MemoryEntry:
       type: object
       additionalProperties: false
@@ -671,6 +2088,169 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/EntryChange"
+    PrepareContextRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, query]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        query:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          pattern: '.*\S.*'
+        max_bytes:
+          type: integer
+          minimum: 512
+          maximum: 32768
+          default: 8000
+    ProposeExperienceRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, proposal, source_refs, artifact_refs]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        proposal:
+          $ref: "#/components/schemas/ExperienceProposal"
+        source_refs:
+          type: array
+          maxItems: 32
+          description: Exact Source evidence. Counted with artifact_refs toward a combined maximum of 32 references.
+          items:
+            $ref: "#/components/schemas/SourceReference"
+        artifact_refs:
+          type: array
+          maxItems: 32
+          description: Exact Artifact evidence. Counted with source_refs toward a combined maximum of 32 references.
+          items:
+            $ref: "#/components/schemas/ArtifactReference"
+        target:
+          $ref: "#/components/schemas/ArtifactReference"
+          nullable: true
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          nullable: true
+    GenerateExperienceRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, source_refs, artifact_refs]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        source_refs:
+          type: array
+          maxItems: 32
+          description: Exact Source evidence. Counted with artifact_refs toward a combined maximum of 32 references.
+          items:
+            $ref: "#/components/schemas/SourceReference"
+        artifact_refs:
+          type: array
+          maxItems: 32
+          description: Exact Artifact evidence. Counted with source_refs toward a combined maximum of 32 references.
+          items:
+            $ref: "#/components/schemas/ArtifactReference"
+        target:
+          $ref: "#/components/schemas/ArtifactReference"
+          nullable: true
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          nullable: true
+    ProposeSkillRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, proposal, source_refs, artifact_refs]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        proposal:
+          $ref: "#/components/schemas/SkillProposal"
+        source_refs:
+          type: array
+          maxItems: 32
+          description: Exact Source evidence. Counted with artifact_refs toward a combined maximum of 32 references.
+          items:
+            $ref: "#/components/schemas/SourceReference"
+        artifact_refs:
+          type: array
+          maxItems: 32
+          description: Exact Artifact evidence. Counted with source_refs toward a combined maximum of 32 references.
+          items:
+            $ref: "#/components/schemas/ArtifactReference"
+        target:
+          $ref: "#/components/schemas/ArtifactReference"
+          nullable: true
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          nullable: true
+    SkillGenerationOrigin:
+      type: string
+      enum: [experience, source, usage]
+      description: The operation-specific direct provenance shape required for managed Skill generation.
+    GenerateSkillRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, origin, source_refs, artifact_refs]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        origin:
+          $ref: "#/components/schemas/SkillGenerationOrigin"
+        source_refs:
+          type: array
+          maxItems: 32
+          description: Exact Source evidence. Counted with artifact_refs toward a combined maximum of 32 references.
+          items:
+            $ref: "#/components/schemas/SourceReference"
+        artifact_refs:
+          type: array
+          maxItems: 32
+          description: Exact Artifact evidence. Counted with source_refs toward a combined maximum of 32 references.
+          items:
+            $ref: "#/components/schemas/ArtifactReference"
+        target:
+          $ref: "#/components/schemas/ArtifactReference"
+          nullable: true
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          nullable: true
+    GeneratedCandidateStatus:
+      type: string
+      enum: [pending, no_op]
+    GeneratedCandidateResponse:
+      type: object
+      additionalProperties: false
+      required: [status, candidate]
+      properties:
+        status:
+          $ref: "#/components/schemas/GeneratedCandidateStatus"
+        candidate:
+          $ref: "#/components/schemas/ArtifactCandidate"
+          nullable: true
     ReadinessResponse:
       type: object
       additionalProperties: false
@@ -726,6 +2306,71 @@ components:
         reason:
           type: string
           maxLength: 512
+          nullable: true
+    RejectArtifactCandidateRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, candidate_id, expected_version, reason]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        candidate_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[\x21-\x7E]+$'
+        expected_version:
+          type: integer
+          minimum: 1
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          pattern: '.*\S.*'
+    ReviseArtifactCandidateRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, candidate_id, expected_version, proposal, source_refs, artifact_refs]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        candidate_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[\x21-\x7E]+$'
+        expected_version:
+          type: integer
+          minimum: 1
+        proposal:
+          oneOf:
+            - $ref: "#/components/schemas/ExperienceProposal"
+            - $ref: "#/components/schemas/SkillProposal"
+        source_refs:
+          type: array
+          maxItems: 32
+          description: Exact Source evidence. Counted with artifact_refs toward a combined maximum of 32 references.
+          items:
+            $ref: "#/components/schemas/SourceReference"
+        artifact_refs:
+          type: array
+          maxItems: 32
+          description: Exact Artifact evidence. Counted with source_refs toward a combined maximum of 32 references.
+          items:
+            $ref: "#/components/schemas/ArtifactReference"
+        target:
+          $ref: "#/components/schemas/ArtifactReference"
+          nullable: true
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
           nullable: true
     ReviseMemoryEntryRequest:
       type: object
@@ -790,6 +2435,63 @@ components:
         mode:
           $ref: "#/components/schemas/MemorySearchMode"
           default: auto
+    ScanExternalSkillsRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+    ResolveExternalSkillRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, external_skill_id, fingerprint]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        external_skill_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[\x21-\x7E]+$'
+        fingerprint:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+    ExternalSkillImportMode:
+      type: string
+      enum: [import, fork]
+    ImportExternalSkillRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, external_skill_id, fingerprint, mode]
+      properties:
+        scope_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
+        external_skill_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[\x21-\x7E]+$'
+        fingerprint:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Exact package fingerprint captured into Source lineage.
+        mode:
+          $ref: "#/components/schemas/ExternalSkillImportMode"
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          nullable: true
     SearchMemoryResponse:
       type: object
       additionalProperties: false
@@ -818,6 +2520,24 @@ components:
     CaptureStatus:
       type: string
       enum: [accepted]
+    CandidateFamily:
+      type: string
+      enum: [experience, skill]
+    ExternalSkillInstallationScope:
+      type: string
+      enum: [user, project, plugin]
+    ExternalSkillResolutionStatus:
+      type: string
+      enum: [available, unavailable]
+    CandidateStatus:
+      type: string
+      enum: [pending, approved, rejected]
+    PreparedContextSchema:
+      type: string
+      enum: [powercontext.prepared-context.v1]
+    PreparedContextStatus:
+      type: string
+      enum: [ready, empty]
     EntryChangeOperation:
       type: string
       enum: [add, revise, deactivate, reactivate]
@@ -836,3 +2556,27 @@ components:
     MemoryUsedSearchMode:
       type: string
       enum: [fts, vector, hybrid]
+    HandoffClaim:
+      type: string
+      enum: [state, next_action]
+    HandoffActivationStatus:
+      type: string
+      enum: [generated, ignored]
+    HandoffDisposition:
+      type: string
+      enum: [continuable, blocked, complete]
+    HandoffEvidenceStatus:
+      type: string
+      enum: [available, unavailable]
+    HandoffResolutionStatus:
+      type: string
+      enum: [empty, resolved]
+    HandoffSchema:
+      type: string
+      enum: [powercontext.handoff.v1]
+    HandoffSelection:
+      type: string
+      enum: [prepared, exact, latest]
+    PreparedHandoffSchema:
+      type: string
+      enum: [powercontext.prepared-handoff.v1]

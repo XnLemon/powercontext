@@ -7,9 +7,9 @@ import pytest
 from typer.testing import CliRunner
 
 import powercontext.client.cli as client_cli
-from powercontext.api import Capabilities, MemorySearchMode
 from powercontext.cli.app import create_cli
 from powercontext.client import PowerContextClient
+from powercontext.http import Capabilities, MemorySearchMode, PreparedContextSchema
 from powercontext.server.app import create_app
 
 
@@ -18,7 +18,9 @@ def test_capabilities_flow_through_server_sdk_and_cli(monkeypatch: pytest.Monkey
         source_types=["git-commit"],
         artifact_families=["memory", "handoff"],
         memory_extraction=True,
+        handoff_generation=True,
         search_modes=[MemorySearchMode.FTS],
+        context_versions=[PreparedContextSchema.POWERCONTEXT_PREPARED_CONTEXT_V1],
     )
     server_app = create_app(capability_provider=lambda: server_capabilities)
 
@@ -56,5 +58,10 @@ def test_capabilities_flow_through_server_sdk_and_cli(monkeypatch: pytest.Monkey
         "source_types": ["git-commit"],
         "artifact_families": ["memory", "handoff"],
         "memory_extraction": True,
+        "experience_generation": False,
+        "managed_skill_generation": False,
+        "external_skill_registry": False,
+        "handoff_generation": True,
         "search_modes": ["fts"],
+        "context_versions": ["powercontext.prepared-context.v1"],
     }

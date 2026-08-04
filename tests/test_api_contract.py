@@ -4,29 +4,97 @@ import pytest
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from powercontext.api import (
+from powercontext.http import (
+    ActivateHandoffRequest,
+    ApproveArtifactCandidateRequest,
+    ArtifactCandidate,
     ArtifactReference,
     CaptureContentSourceRequest,
     CaptureContentSourceResponse,
+    CommitHandoffRequest,
+    CommittedHandoff,
+    ContinueHandoffRequest,
+    ExternalSkillResolution,
+    FinalizeHandoffRequest,
+    GeneratedCandidateResponse,
+    GenerateExperienceRequest,
+    GenerateSkillRequest,
     GetMemoryEntryRequest,
+    HandoffActivation,
+    HandoffDraft,
+    HandoffResolution,
+    ImportExternalSkillRequest,
+    ListExternalSkillsRequest,
+    ListExternalSkillsResponse,
+    ListMemoryEntriesRequest,
+    PrepareContextRequest,
+    PreparedContext,
+    PreparedHandoff,
+    PrepareHandoffRequest,
+    ProposeExperienceRequest,
+    ProposeSkillRequest,
+    ResolveExternalSkillRequest,
+    ReviseArtifactCandidateRequest,
+    ScanExternalSkillsRequest,
+    ScanExternalSkillsResponse,
     SearchMemoryRequest,
+    SkillProposal,
+    SkillValidationItem,
 )
-from powercontext.api.generated.operations import (
+from powercontext.http._generated.operations import (
+    ACTIVATE_HANDOFF,
+    APPROVE_ARTIFACT_CANDIDATE,
     CAPTURE_CONTENT_SOURCE,
+    COMMIT_HANDOFF,
+    CONTINUE_HANDOFF,
+    FINALIZE_HANDOFF,
     FLUSH_MEMORY,
+    GENERATE_EXPERIENCE,
+    GENERATE_SKILL,
+    GET_ARTIFACT_CANDIDATE,
+    GET_EXPERIENCE,
     GET_MEMORY_ENTRY,
     GET_READINESS,
+    GET_SKILL,
+    IMPORT_EXTERNAL_SKILL,
+    LIST_ARTIFACT_CANDIDATES,
+    LIST_EXTERNAL_SKILLS,
     LIST_MEMORY_CHANGES,
     LIST_MEMORY_ENTRIES,
+    PREPARE_CONTEXT,
+    PREPARE_HANDOFF,
+    PROPOSE_EXPERIENCE,
+    PROPOSE_SKILL,
+    REJECT_ARTIFACT_CANDIDATE,
     REMEMBER_MEMORY,
+    RESOLVE_EXTERNAL_SKILL,
     RETIRE_MEMORY_ENTRY,
+    REVISE_ARTIFACT_CANDIDATE,
     REVISE_MEMORY_ENTRY,
+    SCAN_EXTERNAL_SKILLS,
     SEARCH_MEMORY,
 )
 from powercontext.server.app import create_app
 from powercontext.server.factory import create_server_app
 
 CONTRACT_PATH = Path(__file__).resolve().parents[1] / "openapi" / "powercontext.yaml"
+
+
+def test_contract_declares_optional_bearer_authentication() -> None:
+    contract = yaml.safe_load(CONTRACT_PATH.read_text())
+
+    assert contract["security"] == [{"BearerAuth": []}, {}]
+    assert contract["components"]["securitySchemes"]["BearerAuth"] == {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Static bearer token used when local Server authentication is enabled.",
+    }
+    for path, path_item in contract["paths"].items():
+        operation = next(iter(path_item.values()))
+        if path.startswith("/health/"):
+            assert operation["security"] == []
+        else:
+            assert operation["responses"]["401"] == {"$ref": "#/components/responses/Unauthorized"}
 
 
 def test_capabilities_report_semantics_without_runtime_tuning_values() -> None:
@@ -38,7 +106,12 @@ def test_capabilities_report_semantics_without_runtime_tuning_values() -> None:
         "source_types",
         "artifact_families",
         "memory_extraction",
+        "experience_generation",
+        "managed_skill_generation",
+        "external_skill_registry",
+        "handoff_generation",
         "search_modes",
+        "context_versions",
     }
     assert "CapabilityLimit" not in schemas
 
@@ -70,6 +143,191 @@ def test_memory_operations_use_family_prefixed_paths_and_typed_requests() -> Non
     assert SEARCH_MEMORY.request_type is SearchMemoryRequest
 
 
+def test_prepared_context_is_a_generic_typed_operation_outside_the_mcp_memory_tools() -> None:
+    assert PREPARE_CONTEXT.path == "/v1/context/prepare"
+    assert PREPARE_CONTEXT.request_type is PrepareContextRequest
+    assert PREPARE_CONTEXT.response_type is PreparedContext
+    assert PREPARE_CONTEXT.success_status == 200
+
+    contract = yaml.safe_load(CONTRACT_PATH.read_text())
+    schemas = contract["components"]["schemas"]
+    assert set(schemas["PrepareContextRequest"]["properties"]) == {"scope_id", "query", "max_bytes"}
+    assert set(schemas["PreparedContext"]["properties"]) == {"schema", "status", "content", "content_bytes"}
+    assert not {"memory", "mode", "selection"} & set(schemas["PreparedContext"]["properties"])
+
+
+def test_experience_skill_and_review_operations_are_typed_and_family_routed() -> None:
+    review_operations = (
+        LIST_ARTIFACT_CANDIDATES,
+        GET_ARTIFACT_CANDIDATE,
+        APPROVE_ARTIFACT_CANDIDATE,
+        REJECT_ARTIFACT_CANDIDATE,
+        REVISE_ARTIFACT_CANDIDATE,
+    )
+
+    assert PROPOSE_EXPERIENCE.path == "/v1/experience/propose"
+    assert PROPOSE_EXPERIENCE.request_type is ProposeExperienceRequest
+    assert PROPOSE_EXPERIENCE.response_type is ArtifactCandidate
+    assert PROPOSE_EXPERIENCE.success_status == 201
+    assert GENERATE_EXPERIENCE.path == "/v1/experience/generate"
+    assert GENERATE_EXPERIENCE.request_type is GenerateExperienceRequest
+    assert GENERATE_EXPERIENCE.response_type is GeneratedCandidateResponse
+    assert GENERATE_EXPERIENCE.success_status == 200
+    assert GET_EXPERIENCE.path == "/v1/experience/get"
+    assert PROPOSE_SKILL.path == "/v1/skill/propose"
+    assert PROPOSE_SKILL.request_type is ProposeSkillRequest
+    assert PROPOSE_SKILL.response_type is ArtifactCandidate
+    assert PROPOSE_SKILL.success_status == 201
+    assert GENERATE_SKILL.path == "/v1/skill/generate"
+    assert GENERATE_SKILL.request_type is GenerateSkillRequest
+    assert GENERATE_SKILL.response_type is GeneratedCandidateResponse
+    assert GENERATE_SKILL.success_status == 200
+    assert GET_SKILL.path == "/v1/skill/get"
+    assert all(operation.path.startswith("/v1/artifact-candidates/") for operation in review_operations)
+    assert APPROVE_ARTIFACT_CANDIDATE.request_type is ApproveArtifactCandidateRequest
+
+    contract = yaml.safe_load(CONTRACT_PATH.read_text())
+    schemas = contract["components"]["schemas"]
+    assert set(schemas["ExperienceProposal"]["properties"]) == {"situation", "action", "outcome", "lesson"}
+    assert set(schemas["SkillProposal"]["properties"]) == {
+        "name",
+        "description",
+        "instructions",
+        "validation",
+    }
+    assert schemas["ListArtifactCandidatesRequest"]["properties"]["limit"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100,
+        "default": 50,
+    }
+    for schema_name in (
+        "ArtifactCandidate",
+        "ProposeExperienceRequest",
+        "GenerateExperienceRequest",
+        "ProposeSkillRequest",
+        "GenerateSkillRequest",
+        "ReviseArtifactCandidateRequest",
+    ):
+        properties = schemas[schema_name]["properties"]
+        assert properties["source_refs"]["maxItems"] == 32
+        assert properties["artifact_refs"]["maxItems"] == 32
+        assert "combined maximum of 32" in properties["source_refs"]["description"]
+        assert "combined maximum of 32" in properties["artifact_refs"]["description"]
+
+
+def test_managed_skill_transport_rejects_untrimmed_projection_metadata() -> None:
+    with pytest.raises(ValidationError):
+        SkillProposal(
+            name=" managed-skill ",
+            description="Use for a bounded task.",
+            instructions="Perform the bounded task.",
+            validation=[SkillValidationItem("The expected result exists.")],
+        )
+
+
+def test_external_skill_operations_preserve_local_authority_and_exact_resolution() -> None:
+    assert SCAN_EXTERNAL_SKILLS.path == "/v1/external-skills/scan"
+    assert SCAN_EXTERNAL_SKILLS.request_type is ScanExternalSkillsRequest
+    assert SCAN_EXTERNAL_SKILLS.response_type is ScanExternalSkillsResponse
+    assert LIST_EXTERNAL_SKILLS.path == "/v1/external-skills/list"
+    assert LIST_EXTERNAL_SKILLS.request_type is ListExternalSkillsRequest
+    assert LIST_EXTERNAL_SKILLS.response_type is ListExternalSkillsResponse
+    assert RESOLVE_EXTERNAL_SKILL.path == "/v1/external-skills/resolve"
+    assert RESOLVE_EXTERNAL_SKILL.request_type is ResolveExternalSkillRequest
+    assert RESOLVE_EXTERNAL_SKILL.response_type is ExternalSkillResolution
+    assert IMPORT_EXTERNAL_SKILL.path == "/v1/external-skills/import"
+    assert IMPORT_EXTERNAL_SKILL.request_type is ImportExternalSkillRequest
+    assert IMPORT_EXTERNAL_SKILL.response_type is GeneratedCandidateResponse
+
+    contract = yaml.safe_load(CONTRACT_PATH.read_text())
+    schemas = contract["components"]["schemas"]
+    registration = schemas["ExternalSkillRegistration"]
+    assert {
+        "external_skill_id",
+        "provider",
+        "agent_kind",
+        "host_id",
+        "installation_scope",
+        "locator",
+        "fingerprint",
+        "name",
+        "description",
+    } == set(registration["properties"])
+    assert "cross-Agent" in registration["properties"]["locator"]["description"]
+    assert schemas["ResolveExternalSkillRequest"]["required"] == [
+        "scope_id",
+        "external_skill_id",
+        "fingerprint",
+    ]
+    assert "mode" not in schemas["ResolveExternalSkillRequest"]["properties"]
+    assert schemas["ImportExternalSkillRequest"]["required"] == [
+        "scope_id",
+        "external_skill_id",
+        "fingerprint",
+        "mode",
+    ]
+
+
+def test_memory_search_mode_remains_on_the_search_request() -> None:
+    contract = yaml.safe_load(CONTRACT_PATH.read_text())
+    properties = contract["components"]["schemas"]["SearchMemoryRequest"]["properties"]
+
+    assert properties["mode"] == {
+        "$ref": "#/components/schemas/MemorySearchMode",
+        "default": "auto",
+    }
+
+
+def test_candidate_transport_rejects_combined_evidence_over_limit() -> None:
+    source = {"name": "content", "source_id": "task-1"}
+    artifact = {"family": "experience", "artifact_id": "exp-1", "revision": 1}
+    proposal = {
+        "situation": "OpenAPI changed.",
+        "action": "Regenerate the Client.",
+        "outcome": "Transport stays aligned.",
+        "lesson": "Keep contract tests green.",
+    }
+    over_limit = {
+        "scope_id": "project",
+        "proposal": proposal,
+        "source_refs": [source] * 20,
+        "artifact_refs": [artifact] * 13,
+    }
+
+    with pytest.raises(ValidationError, match="together must not exceed 32"):
+        ProposeExperienceRequest.model_validate(over_limit)
+    with pytest.raises(ValidationError, match="together must not exceed 32"):
+        ReviseArtifactCandidateRequest.model_validate({
+            **over_limit,
+            "candidate_id": "cand-1",
+            "expected_version": 1,
+        })
+
+
+def test_handoff_operations_expose_the_complete_explicit_lifecycle() -> None:
+    operations = (
+        ACTIVATE_HANDOFF,
+        PREPARE_HANDOFF,
+        FINALIZE_HANDOFF,
+        COMMIT_HANDOFF,
+        CONTINUE_HANDOFF,
+    )
+
+    assert all(operation.path.startswith("/v1/handoff/") for operation in operations)
+    assert all(operation.success_status == 200 for operation in operations)
+    assert ACTIVATE_HANDOFF.request_type is ActivateHandoffRequest
+    assert ACTIVATE_HANDOFF.response_type is HandoffActivation
+    assert PREPARE_HANDOFF.request_type is PrepareHandoffRequest
+    assert PREPARE_HANDOFF.response_type is HandoffDraft
+    assert FINALIZE_HANDOFF.request_type is FinalizeHandoffRequest
+    assert FINALIZE_HANDOFF.response_type is PreparedHandoff
+    assert COMMIT_HANDOFF.request_type is CommitHandoffRequest
+    assert COMMIT_HANDOFF.response_type is CommittedHandoff
+    assert CONTINUE_HANDOFF.request_type is ContinueHandoffRequest
+    assert CONTINUE_HANDOFF.response_type is HandoffResolution
+
+
 def test_source_reference_keeps_name_as_the_source_type() -> None:
     contract = yaml.safe_load(CONTRACT_PATH.read_text())
     properties = contract["components"]["schemas"]["SourceReference"]["properties"]
@@ -90,6 +348,18 @@ def test_memory_transport_has_one_reference_shape_and_nested_citations() -> None
         assert "expected_revision" not in properties
 
 
+def test_entry_list_hides_inactive_entries_unless_explicitly_requested() -> None:
+    default_request = ListMemoryEntriesRequest(scope_id="scope")
+    audit_request = ListMemoryEntriesRequest(scope_id="scope", include_inactive=True)
+
+    assert default_request.include_inactive is False
+    assert audit_request.include_inactive is True
+
+    contract = yaml.safe_load(CONTRACT_PATH.read_text())
+    include_inactive = contract["components"]["schemas"]["ListMemoryEntriesRequest"]["properties"]["include_inactive"]
+    assert include_inactive["default"] is False
+
+
 @pytest.mark.parametrize(
     ("model", "value"),
     [
@@ -97,6 +367,7 @@ def test_memory_transport_has_one_reference_shape_and_nested_citations() -> None
         (ArtifactReference, {"family": "memory", "artifact_id": "memory-1", "revision": "1"}),
         (ArtifactReference, {"family": "memory", "artifact_id": "memory with spaces", "revision": 1}),
         (SearchMemoryRequest, {"scope_id": "scope", "query": "query", "limit": True}),
+        (ListMemoryEntriesRequest, {"scope_id": "scope", "include_inactive": 1}),
         (
             GetMemoryEntryRequest,
             {

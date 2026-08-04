@@ -8,44 +8,100 @@ from typing import Self, TypeVar
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
-from powercontext.api import (
+from powercontext.client.errors import InvalidResponseError, ServerResponseError, TransportError
+from powercontext.http import (
+    ActivateHandoffRequest,
+    ApproveArtifactCandidateRequest,
+    ArtifactCandidate,
+    ArtifactCandidatePage,
     Capabilities,
     CaptureContentSourceRequest,
     CaptureContentSourceResponse,
+    CommitHandoffRequest,
+    CommittedHandoff,
+    ContinueHandoffRequest,
     ErrorResponse,
+    ExperienceArtifact,
+    ExternalSkillResolution,
+    FinalizeHandoffRequest,
     FlushMemoryRequest,
     FlushMemoryResponse,
+    GeneratedCandidateResponse,
+    GenerateExperienceRequest,
+    GenerateSkillRequest,
+    GetArtifactCandidateRequest,
+    GetExperienceRequest,
     GetMemoryEntryRequest,
+    GetSkillRequest,
+    HandoffActivation,
+    HandoffDraft,
+    HandoffResolution,
     HealthResponse,
+    ImportExternalSkillRequest,
+    ListArtifactCandidatesRequest,
+    ListExternalSkillsRequest,
+    ListExternalSkillsResponse,
     ListMemoryChangesRequest,
     ListMemoryChangesResponse,
     ListMemoryEntriesRequest,
     ListMemoryEntriesResponse,
     MemoryEntry,
     MemoryMutationResponse,
+    PrepareContextRequest,
+    PreparedContext,
+    PreparedHandoff,
+    PrepareHandoffRequest,
+    ProposeExperienceRequest,
+    ProposeSkillRequest,
     ReadinessResponse,
+    RejectArtifactCandidateRequest,
     RememberMemoryRequest,
+    ResolveExternalSkillRequest,
     RetireMemoryEntryRequest,
+    ReviseArtifactCandidateRequest,
     ReviseMemoryEntryRequest,
+    ScanExternalSkillsRequest,
+    ScanExternalSkillsResponse,
     SearchMemoryRequest,
     SearchMemoryResponse,
+    SkillArtifact,
 )
-from powercontext.api.generated.operations import (
+from powercontext.http._generated.operations import (
+    ACTIVATE_HANDOFF,
+    APPROVE_ARTIFACT_CANDIDATE,
     CAPTURE_CONTENT_SOURCE,
+    COMMIT_HANDOFF,
+    CONTINUE_HANDOFF,
+    FINALIZE_HANDOFF,
     FLUSH_MEMORY,
+    GENERATE_EXPERIENCE,
+    GENERATE_SKILL,
+    GET_ARTIFACT_CANDIDATE,
     GET_CAPABILITIES,
+    GET_EXPERIENCE,
     GET_LIVENESS,
     GET_MEMORY_ENTRY,
     GET_READINESS,
+    GET_SKILL,
+    IMPORT_EXTERNAL_SKILL,
+    LIST_ARTIFACT_CANDIDATES,
+    LIST_EXTERNAL_SKILLS,
     LIST_MEMORY_CHANGES,
     LIST_MEMORY_ENTRIES,
+    PREPARE_CONTEXT,
+    PREPARE_HANDOFF,
+    PROPOSE_EXPERIENCE,
+    PROPOSE_SKILL,
+    REJECT_ARTIFACT_CANDIDATE,
     REMEMBER_MEMORY,
+    RESOLVE_EXTERNAL_SKILL,
     RETIRE_MEMORY_ENTRY,
+    REVISE_ARTIFACT_CANDIDATE,
     REVISE_MEMORY_ENTRY,
+    SCAN_EXTERNAL_SKILLS,
     SEARCH_MEMORY,
     Operation,
 )
-from powercontext.client.errors import InvalidResponseError, ServerResponseError, TransportError
 
 REQUEST_ID_HEADER = "X-Request-ID"
 _RequestT = TypeVar("_RequestT")
@@ -59,10 +115,12 @@ class PowerContextClient:
         self,
         base_url: str,
         *,
+        token: str | None = None,
         timeout: float = 10.0,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._headers = {"Authorization": f"Bearer {token}"} if token else None
         self._owned_http_client: httpx.AsyncClient | None = None
         if http_client is None:
             self._owned_http_client = httpx.AsyncClient(timeout=timeout)
@@ -122,8 +180,38 @@ class PowerContextClient:
 
         return await self._request(SEARCH_MEMORY, request)
 
+    async def prepare_context(self, request: PrepareContextRequest) -> PreparedContext:
+        """Prepare final bounded context for one Agent turn."""
+
+        return await self._request(PREPARE_CONTEXT, request)
+
+    async def prepare_handoff(self, request: PrepareHandoffRequest) -> HandoffDraft:
+        """Generate one inspectable Handoff Draft from exact evidence."""
+
+        return await self._request(PREPARE_HANDOFF, request)
+
+    async def activate_handoff(self, request: ActivateHandoffRequest) -> HandoffActivation:
+        """Evaluate the standard Handoff Trigger at one Source boundary."""
+
+        return await self._request(ACTIVATE_HANDOFF, request)
+
+    async def finalize_handoff(self, request: FinalizeHandoffRequest) -> PreparedHandoff:
+        """Finalize an inspected Handoff Draft for direct transfer."""
+
+        return await self._request(FINALIZE_HANDOFF, request)
+
+    async def commit_handoff(self, request: CommitHandoffRequest) -> CommittedHandoff:
+        """Commit one finalized Handoff as a durable milestone."""
+
+        return await self._request(COMMIT_HANDOFF, request)
+
+    async def continue_handoff(self, request: ContinueHandoffRequest) -> HandoffResolution:
+        """Resolve temporary or committed Handoff content as untrusted history."""
+
+        return await self._request(CONTINUE_HANDOFF, request)
+
     async def list_memory_entries(self, request: ListMemoryEntriesRequest) -> ListMemoryEntriesResponse:
-        """List the entry snapshot from the current Memory head."""
+        """List active entries, optionally including inactive entries for audit."""
 
         return await self._request(LIST_MEMORY_ENTRIES, request)
 
@@ -147,6 +235,81 @@ class PowerContextClient:
 
         return await self._request(LIST_MEMORY_CHANGES, request)
 
+    async def propose_experience(self, request: ProposeExperienceRequest) -> ArtifactCandidate:
+        """Submit complete Experience content as a pending Candidate."""
+
+        return await self._request(PROPOSE_EXPERIENCE, request)
+
+    async def generate_experience(self, request: GenerateExperienceRequest) -> GeneratedCandidateResponse:
+        """Generate a reviewed Experience Candidate from exact evidence."""
+
+        return await self._request(GENERATE_EXPERIENCE, request)
+
+    async def get_experience(self, request: GetExperienceRequest) -> ExperienceArtifact:
+        """Read one exact approved Experience Revision."""
+
+        return await self._request(GET_EXPERIENCE, request)
+
+    async def propose_skill(self, request: ProposeSkillRequest) -> ArtifactCandidate:
+        """Submit complete managed Skill content as a pending Candidate."""
+
+        return await self._request(PROPOSE_SKILL, request)
+
+    async def generate_skill(self, request: GenerateSkillRequest) -> GeneratedCandidateResponse:
+        """Generate a reviewed managed Skill Candidate from explicit provenance."""
+
+        return await self._request(GENERATE_SKILL, request)
+
+    async def get_skill(self, request: GetSkillRequest) -> SkillArtifact:
+        """Read one exact approved managed Skill Revision."""
+
+        return await self._request(GET_SKILL, request)
+
+    async def scan_external_skills(self, request: ScanExternalSkillsRequest) -> ScanExternalSkillsResponse:
+        """Refresh the configured host-local external Skill Registry."""
+
+        return await self._request(SCAN_EXTERNAL_SKILLS, request)
+
+    async def list_external_skills(self, request: ListExternalSkillsRequest) -> ListExternalSkillsResponse:
+        """List external Skills after live local availability checks."""
+
+        return await self._request(LIST_EXTERNAL_SKILLS, request)
+
+    async def resolve_external_skill(self, request: ResolveExternalSkillRequest) -> ExternalSkillResolution:
+        """Resolve one exact local external Skill fingerprint without fallback."""
+
+        return await self._request(RESOLVE_EXTERNAL_SKILL, request)
+
+    async def import_external_skill(self, request: ImportExternalSkillRequest) -> GeneratedCandidateResponse:
+        """Snapshot an exact external package and propose a new managed Skill."""
+
+        return await self._request(IMPORT_EXTERNAL_SKILL, request)
+
+    async def list_artifact_candidates(self, request: ListArtifactCandidatesRequest) -> ArtifactCandidatePage:
+        """Page current Candidate heads in the Review Inbox."""
+
+        return await self._request(LIST_ARTIFACT_CANDIDATES, request)
+
+    async def get_artifact_candidate(self, request: GetArtifactCandidateRequest) -> ArtifactCandidate:
+        """Read the current head of one Candidate."""
+
+        return await self._request(GET_ARTIFACT_CANDIDATE, request)
+
+    async def approve_artifact_candidate(self, request: ApproveArtifactCandidateRequest) -> ArtifactCandidate:
+        """Approve the exact current Candidate version."""
+
+        return await self._request(APPROVE_ARTIFACT_CANDIDATE, request)
+
+    async def reject_artifact_candidate(self, request: RejectArtifactCandidateRequest) -> ArtifactCandidate:
+        """Reject the exact current Candidate version."""
+
+        return await self._request(REJECT_ARTIFACT_CANDIDATE, request)
+
+    async def revise_artifact_candidate(self, request: ReviseArtifactCandidateRequest) -> ArtifactCandidate:
+        """Append a complete replacement Candidate proposal."""
+
+        return await self._request(REVISE_ARTIFACT_CANDIDATE, request)
+
     async def _request(
         self,
         operation: Operation[_RequestT, _ResponseT],
@@ -160,13 +323,14 @@ class PowerContextClient:
             json_payload = TypeAdapter(operation.request_type).dump_python(
                 request,
                 mode="json",
-                exclude_none=True,
+                by_alias=True,
             )
 
         try:
             response = await self._http_client.request(
                 operation.method,
                 f"{self._base_url}{operation.path}",
+                headers=self._headers,
                 json=json_payload,
             )
         except httpx.HTTPError as exc:

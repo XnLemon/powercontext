@@ -1,13 +1,27 @@
-from fastapi.testclient import TestClient
+import logging
 
-from powercontext.api import (
+import pytest
+from fastapi.testclient import TestClient
+from pydantic import SecretStr
+
+from powercontext.builtin.artifacts.experience import ExperienceCandidateInput
+from powercontext.builtin.persistence.oceanbase import OceanBaseConfig
+from powercontext.builtin.persistence.sqlite import SQLiteConfig
+from powercontext.builtin.runtime import RuntimeConfig
+from powercontext.http import (
     Capabilities,
     ReadinessResponse,
     ReadinessStatus,
 )
-from powercontext.builtin.persistence.oceanbase import OceanBaseConfig
 from powercontext.server.app import create_app
-from powercontext.server.settings import ServerSettings
+from powercontext.server.factory import create_server_app
+from powercontext.server.settings import BearerAuthConfig, McpConfig, ServerSettings
+from powercontext.sources import Source
+
+
+class _NoopExperiencePipeline:
+    async def incubate(self, _sources: tuple[Source, ...], /) -> tuple[ExperienceCandidateInput, ...]:
+        return ()
 
 
 def test_settings_load_server_environment(monkeypatch) -> None:
@@ -18,11 +32,19 @@ def test_settings_load_server_environment(monkeypatch) -> None:
         "sqlite+aiosqlite:////var/lib/powercontext/test.db",
     )
     monkeypatch.setenv("POWERCONTEXT_SERVER_RUNTIME_SOURCE_WINDOW_LIMIT", "25")
+    monkeypatch.setenv("POWERCONTEXT_SERVER_RUNTIME_EXPERIENCE_SCHEDULE_SECONDS", "45")
     monkeypatch.setenv("POWERCONTEXT_SERVER_INFERENCE_GENERATION_MODEL", " test ")
     monkeypatch.setenv("POWERCONTEXT_SERVER_INFERENCE_GENERATION_TIMEOUT_SECONDS", "12.5")
     monkeypatch.setenv("POWERCONTEXT_SERVER_INFERENCE_GENERATION_MAX_REQUESTS", "4")
     monkeypatch.setenv("POWERCONTEXT_SERVER_MCP_ENABLED", "false")
     monkeypatch.setenv("POWERCONTEXT_SERVER_MCP_PATH", "/context/")
+    monkeypatch.setenv(
+        "POWERCONTEXT_SERVER_EXTERNAL_SKILLS",
+        (
+            '{"host_id":"workstation-1","codex_roots":['
+            '{"root_id":"repository","installation_scope":"project","path":"/srv/project/.agents/skills"}]}'
+        ),
+    )
 
     settings = ServerSettings()
 
@@ -30,11 +52,15 @@ def test_settings_load_server_environment(monkeypatch) -> None:
     assert settings.http.port == 9000
     assert settings.database.url == "sqlite+aiosqlite:////var/lib/powercontext/test.db"
     assert settings.runtime.source_window_limit == 25
+    assert settings.runtime.experience_schedule_seconds == 45
     assert settings.inference.generation_model == "test"
     assert settings.inference.generation_timeout_seconds == 12.5
     assert settings.inference.generation_max_requests == 4
     assert settings.mcp.enabled is False
     assert settings.mcp.path == "/context"
+    assert settings.external_skills.host_id == "workstation-1"
+    assert settings.external_skills.codex_roots[0].root_id == "repository"
+    assert settings.external_skills.codex_roots[0].path.as_posix() == "/srv/project/.agents/skills"
 
 
 def test_server_settings_select_oceanbase(monkeypatch) -> None:
@@ -46,6 +72,38 @@ def test_server_settings_select_oceanbase(monkeypatch) -> None:
 
     assert isinstance(settings.database, OceanBaseConfig)
     assert settings.database.url.get_secret_value() == url
+
+
+def test_server_scheduler_uses_the_powercontext_data_directory(tmp_path, monkeypatch) -> None:
+    data_dir = tmp_path / "powercontext-data"
+    monkeypatch.setenv("POWERCONTEXT_HOME", str(data_dir))
+    app = create_server_app(
+        settings=ServerSettings(
+            runtime=RuntimeConfig(experience_schedule_seconds=3_600),
+            mcp=McpConfig(enabled=False),
+        ),
+        experience_pipeline=_NoopExperiencePipeline(),
+    )
+
+    with TestClient(app):
+        assert (data_dir / "scheduler.db").is_file()
+
+
+def test_settings_load_bearer_authentication_without_exposing_token(monkeypatch) -> None:
+    monkeypatch.setenv("POWERCONTEXT_SERVER_AUTH_ENABLED", "true")
+    monkeypatch.setenv("POWERCONTEXT_SERVER_AUTH_TOKEN", "server-secret")
+
+    settings = ServerSettings()
+
+    assert settings.auth.enabled is True
+    assert settings.auth.token is not None
+    assert settings.auth.token.get_secret_value() == "server-secret"
+    assert "server-secret" not in repr(settings)
+
+
+def test_enabled_bearer_authentication_requires_a_token() -> None:
+    with pytest.raises(ValueError, match="Bearer token is required"):
+        BearerAuthConfig(enabled=True)
 
 
 def test_liveness_adds_a_request_id() -> None:
@@ -67,6 +125,35 @@ def test_liveness_does_not_reflect_an_unsafe_request_id() -> None:
 
     assert response.status_code == 200
     assert response.headers["X-Request-ID"] != "unsafe value"
+
+
+def test_server_factory_optionally_requires_bearer_authentication() -> None:
+    app = create_server_app(
+        settings=ServerSettings(
+            auth=BearerAuthConfig(enabled=True, token=SecretStr("server-secret")),
+            mcp=McpConfig(enabled=False),
+        )
+    )
+    client = TestClient(app)
+
+    missing = client.get("/v1/capabilities", headers={"X-Request-ID": "request-missing"})
+    invalid = client.get("/v1/capabilities", headers={"Authorization": "Bearer wrong"})
+    accepted = client.get("/v1/capabilities", headers={"Authorization": "Bearer server-secret"})
+    liveness = client.get("/health/live")
+
+    assert missing.status_code == 401
+    assert missing.headers["WWW-Authenticate"] == "Bearer"
+    assert missing.headers["X-Request-ID"] == "request-missing"
+    assert missing.json() == {
+        "error": {
+            "code": "unauthorized",
+            "message": "A valid bearer token is required.",
+            "details": None,
+        }
+    }
+    assert invalid.status_code == 401
+    assert accepted.status_code == 200
+    assert liveness.status_code == 200
 
 
 def test_readiness_reports_unavailable_bindings() -> None:
@@ -93,6 +180,66 @@ def test_unhandled_errors_preserve_the_request_id() -> None:
     client = TestClient(create_app(capability_provider=fail), raise_server_exceptions=False)
 
     response = client.get("/v1/capabilities", headers={"X-Request-ID": "request-123"})
+
+    assert response.status_code == 500
+    assert response.headers["X-Request-ID"] == "request-123"
+
+
+def test_prepare_context_rejects_memory_specific_tuning_fields(tmp_path) -> None:
+    app = create_server_app(
+        settings=ServerSettings(
+            database=SQLiteConfig(url=f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}"),
+            mcp=McpConfig(enabled=False),
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/context/prepare",
+            json={
+                "scope_id": "project:test",
+                "query": "query",
+                "candidate_limit": 2,
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_application_failure_log_uses_operation_context(caplog) -> None:
+    def fail() -> Capabilities:
+        raise RuntimeError("boom")
+
+    with caplog.at_level(logging.ERROR, logger="powercontext.server.app"):
+        response = TestClient(create_app(capability_provider=fail), raise_server_exceptions=False).get(
+            "/v1/capabilities",
+            headers={"X-Request-ID": "request-123"},
+        )
+
+    record = next(record for record in caplog.records if record.event == "application.operation.completed")
+    assert response.status_code == 500
+    assert record.operation == "get_capabilities"
+    assert record.outcome == "failure"
+    assert record.request_id == "request-123"
+    assert record.unit == "application"
+    assert record.error_code == "internal_error"
+
+
+def test_logging_failure_does_not_change_the_response(monkeypatch) -> None:
+    def fail() -> Capabilities:
+        raise RuntimeError("boom")
+
+    def fail_to_log(*args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError
+
+    monkeypatch.setattr("powercontext.server.app.logger.log", fail_to_log)
+
+    response = TestClient(create_app(capability_provider=fail), raise_server_exceptions=False).get(
+        "/v1/capabilities",
+        headers={"X-Request-ID": "request-123"},
+    )
 
     assert response.status_code == 500
     assert response.headers["X-Request-ID"] == "request-123"

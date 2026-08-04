@@ -8,7 +8,7 @@ from typing import Generic, TypeVar, cast
 
 from pydantic import BaseModel, Field
 
-from powercontext.builtin.artifacts.memory.canonical import validate_embedding
+from powercontext.builtin.artifacts.memory.canonical import canonical_embedding
 from powercontext.builtin.artifacts.memory.models import EmbeddingProfile
 from powercontext.builtin.inference.errors import (
     InferenceError,
@@ -171,9 +171,10 @@ class PydanticAIEmbeddingModel:
                 self._embedder.embed_documents(texts),
                 timeout=self._limits.timeout_seconds,
             )
-            vectors = self._validated_vectors(texts, result.inputs, result.input_type, result.embeddings)
         except asyncio.CancelledError:
             raise
+        except ValueError as error:
+            raise InferenceUnavailableError("embed") from error
         except Exception as error:
             mapped = _map_error(error, operation="embed", timeout_seconds=self._limits.timeout_seconds)
             if mapped is None:
@@ -182,6 +183,7 @@ class PydanticAIEmbeddingModel:
                 raise
             raise mapped from error
 
+        vectors = self._validated_vectors(texts, result.inputs, result.input_type, result.embeddings)
         usage = InferenceUsage(
             requests=1,
             input_tokens=result.usage.input_tokens,
@@ -208,7 +210,13 @@ class PydanticAIEmbeddingModel:
         vectors: list[tuple[float, ...]] = []
         for row in rows:
             try:
-                vectors.append(validate_embedding(row, dimension=self.profile.dimension))
+                vectors.append(
+                    canonical_embedding(
+                        row,
+                        dimension=self.profile.dimension,
+                        normalization=self.profile.normalization,
+                    )
+                )
             except (TypeError, ValueError) as error:
                 raise InvalidInferenceOutputError("embed", str(error)) from error
         return tuple(vectors)
