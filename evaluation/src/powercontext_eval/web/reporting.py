@@ -573,8 +573,9 @@ def load_batch_report(
     )
     total = batch.total_tasks
     terminal_tasks = sum(status_counts[status] for status in _TERMINAL_STATES)
-    off_rate = off_resolved / total * 100
-    on_rate = on_resolved / total * 100
+    denominator = terminal_tasks if terminal_tasks > 0 else 1
+    off_rate = off_resolved / denominator * 100
+    on_rate = on_resolved / denominator * 100
     return BatchReportResponse(
         batch_id=batch.batch_id,
         report_revision=batch.control.version + sum(task.attempt_count * 100 + task.version for task in tasks),
@@ -583,8 +584,8 @@ def load_batch_report(
         comparable_pairs=comparable,
         execution_failures=execution_failures,
         cancelled_tasks=status_counts[TaskStatus.CANCELLED],
-        off=ResolutionAggregate(resolved=off_resolved, total=total, rate_percent=off_rate),
-        on=ResolutionAggregate(resolved=on_resolved, total=total, rate_percent=on_rate),
+        off=ResolutionAggregate(resolved=off_resolved, total=terminal_tasks, rate_percent=off_rate),
+        on=ResolutionAggregate(resolved=on_resolved, total=terminal_tasks, rate_percent=on_rate),
         resolution_rate_delta_points=on_rate - off_rate,
         pair_categories=categories,
         task_statuses={status: status_counts[status] for status in TaskStatus},

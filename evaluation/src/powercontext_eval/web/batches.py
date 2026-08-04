@@ -139,7 +139,7 @@ class BatchRecord(_FrozenModel):
 
 class ResolutionAggregate(_FrozenModel):
     resolved: Annotated[int, Field(ge=0)]
-    total: Annotated[int, Field(ge=1)]
+    total: Annotated[int, Field(ge=0)]
     rate_percent: Annotated[float, Field(ge=0, le=100, allow_inf_nan=False)]
 
 
