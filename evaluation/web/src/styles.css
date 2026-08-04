@@ -769,6 +769,74 @@ td small {
   gap: 24px;
 }
 
+.batch-home-actions {
+  display: grid;
+  min-width: 0;
+  gap: 20px;
+}
+
+.auth-panel {
+  padding: 24px;
+}
+
+.auth-panel .panel-heading {
+  margin-bottom: 14px;
+}
+
+.auth-help {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.auth-help code {
+  padding: 2px 5px;
+  background: #f1f3ed;
+  color: #344137;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.auth-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.auth-editor > label {
+  display: block;
+}
+
+.auth-textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 150px;
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  background: #fbfcf8;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.auth-textarea:hover,
+.auth-textarea:focus {
+  border-color: #7b867a;
+  outline: none;
+}
+
+.auth-submit {
+  width: 100%;
+  margin-top: 2px;
+}
+
+.auth-panel .form-feedback {
+  margin: 12px 0 0;
+}
+
 .batch-contract {
   display: grid;
   gap: 6px;

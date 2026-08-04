@@ -97,13 +97,15 @@ export function App({ api: injectedApi }: AppProps) {
           description="选择已有批次，或提交一次固定 731 任务的完整 OFF / ON 评测。"
         />
         <div className="batch-home-grid">
-          <BatchLauncher
-            api={api}
-            onCreated={(batch) => navigate(`/report/${encodeURIComponent(batch.batch_id)}`)}
-          />
+          <div className="batch-home-actions">
+            <BatchLauncher
+              api={api}
+              onCreated={(batch) => navigate(`/report/${encodeURIComponent(batch.batch_id)}`)}
+            />
+            <AuthPanel api={api} />
+          </div>
           <ReportIndex api={api} navigate={navigate} />
         </div>
-        <AuthPanel api={api} />
       </div>
     );
   }

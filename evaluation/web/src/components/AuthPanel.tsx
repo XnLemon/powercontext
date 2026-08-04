@@ -38,22 +38,26 @@ export function AuthPanel({ api }: AuthPanelProps) {
         在本地终端执行 <code>cat ~/.codex/auth.json</code>，将输出的完整 JSON 粘贴到下方。
         该认证将用于调用 Codex API 和读取账号用量。更新后无需重启服务。
       </p>
-      <textarea
-        className="auth-textarea"
-        rows={12}
-        placeholder='{"auth_mode":"chatgpt","tokens":{...}}'
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-        spellCheck={false}
-      />
-      <button
-        className="primary-button"
-        type="button"
-        disabled={pending || !value.trim()}
-        onClick={submit}
-      >
-        {pending ? "正在更新…" : "保存认证"}
-      </button>
+      <div className="auth-editor">
+        <label htmlFor="codex-auth-json">auth.json 内容</label>
+        <textarea
+          id="codex-auth-json"
+          className="auth-textarea"
+          rows={8}
+          placeholder='{"auth_mode":"chatgpt","tokens":{...}}'
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          spellCheck={false}
+        />
+        <button
+          className="primary-button auth-submit"
+          type="button"
+          disabled={pending || !value.trim()}
+          onClick={submit}
+        >
+          {pending ? "正在更新…" : "保存认证"}
+        </button>
+      </div>
       {message && <p className="form-feedback" aria-live="polite">{message}</p>}
     </section>
   );
