@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Protocol
 from urllib.parse import quote, quote_plus, urlsplit
 
@@ -354,6 +355,7 @@ class SutConfig:
     plugin_version: str = "0.1.0"
     codex_timeout: float = 3600
     finalization_registrar: TokensFlowFinalizationRegistrar | None = None
+    container_env: Mapping[str, str] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         if _SAFE_RUN_ID.fullmatch(self.run_id) is None:
@@ -2024,6 +2026,7 @@ class DockerSut:
                 }
             ),
             *_docker_inherited_env_args(tokensflow_environment),
+            *_container_env_file_args(config, arm, paths),
             "--entrypoint",
             "/runtime/pc-env/bin/powercontext",
             config.task_image,
@@ -2187,6 +2190,27 @@ def _docker_inherited_env_args(environment: Mapping[str, str]) -> tuple[str, ...
     """Ask Docker to inherit selected values without placing them in argv."""
 
     return tuple(part for key in environment for part in ("--env", key))
+
+
+def _container_env_file_args(
+    config: SutConfig,
+    arm: Arm,
+    paths: ArmPaths,
+) -> tuple[str, ...]:
+    """Write user-supplied env to a file and return the --env-file docker flag.
+
+    Only the ON arm receives user env; the OFF arm stays pristine. Docker reads
+    --env-file line by line without shell expansion, avoiding escaping issues.
+    """
+
+    if arm is not Arm.ON or not config.container_env:
+        return ()
+    env_file = paths.runtime / "container.env"
+    env_file.write_text(
+        "".join(f"{key}={value}\n" for key, value in config.container_env.items()),
+        encoding="utf-8",
+    )
+    return ("--env-file", str(env_file))
 
 
 def _directory_entry_matches(parent_fd: int, name: str, opened_fd: int) -> bool:

@@ -30,6 +30,7 @@ class BatchCreate(_FrozenModel):
     idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
     usage_pause_percent: Annotated[int, Field(ge=1, le=100)] = 80
     initial_control_intent: Literal["run", "pause"] = "run"
+    container_env: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("powercontext_ref")
     @classmethod

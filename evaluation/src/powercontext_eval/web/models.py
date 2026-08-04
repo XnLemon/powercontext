@@ -79,6 +79,7 @@ class TaskCreate(FrozenModel):
     reasoning_effort: Literal["medium"] = DEFAULT_REASONING_EFFORT
     treatment_mode: Literal["off_on"]
     idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
+    container_env: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("powercontext_ref")
     @classmethod

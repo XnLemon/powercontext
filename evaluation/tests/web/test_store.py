@@ -1874,3 +1874,32 @@ def test_recover_unexpired_lease_is_noop(store: TaskStore) -> None:
 
     assert store.recover_expired(now=NOW + timedelta(seconds=60)) == []
     assert store.get(queued.task_id).status is TaskStatus.RUNNING
+
+
+def test_create_batch_propagates_container_env_to_child_tasks(
+    store: TaskStore,
+) -> None:
+    request = batch_request("env-batch")
+    request = request.model_copy(
+        update={"container_env": {"POWERCONTEXT_SERVER_INFERENCE_GENERATION_MODEL": "openrouter:test"}},
+    )
+    batch, _created = store.create_batch(request, ("instance_a",), now=NOW)
+    children = store.list_batch_tasks(batch.batch_id)
+
+    child = children[0]
+    assert child.request.container_env == {
+        "POWERCONTEXT_SERVER_INFERENCE_GENERATION_MODEL": "openrouter:test",
+    }
+
+
+def test_batch_record_round_trips_container_env(store: TaskStore) -> None:
+    request = batch_request("env-roundtrip")
+    request = request.model_copy(
+        update={"container_env": {"OPENROUTER_API_KEY": "sk-test", "POWERCONTEXT_SERVER_HTTP_PORT": "8000"}},
+    )
+    batch, _ = store.create_batch(request, ("instance_a",), now=NOW)
+    reloaded = store.get_batch(batch.batch_id)
+    assert reloaded.request.container_env == {
+        "OPENROUTER_API_KEY": "sk-test",
+        "POWERCONTEXT_SERVER_HTTP_PORT": "8000",
+    }

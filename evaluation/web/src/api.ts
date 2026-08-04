@@ -316,6 +316,7 @@ const batchCreateSchema = z.strictObject({
   idempotency_key: z.string().min(8).max(128).regex(/^[A-Za-z0-9._-]+$/),
   usage_pause_percent: z.number().int().min(1).max(100),
   initial_control_intent: z.enum(["run", "pause"]),
+  container_env: z.record(z.string(), z.string()).optional(),
 });
 const usageSnapshotSchema = z.strictObject({
   limit_id: z.literal("codex"),
@@ -595,7 +596,11 @@ function validateReport(value: unknown): ReportResponse {
 }
 
 function validateBatch(value: unknown): BatchRecord {
-  return validateWithSchema(batchRecordSchema, value);
+  return validateWithSchema(batchRecordSchema, value) as BatchRecord;
+}
+
+function validateAuthUpdate(value: unknown): { updated_at: string } {
+  return validateWithSchema(z.object({ updated_at: timestampSchema }), value);
 }
 
 function validateBatchPreview(value: unknown): BatchPreview {
@@ -700,6 +705,15 @@ export class EvaluationApi {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(batch),
+      ...withSignal(signal),
+    });
+  }
+
+  updateAuth(authJson: string, signal?: AbortSignal): Promise<{ updated_at: string }> {
+    return this.#json(apiPath("/auth"), validateAuthUpdate, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auth_json: authJson }),
       ...withSignal(signal),
     });
   }

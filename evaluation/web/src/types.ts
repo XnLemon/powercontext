@@ -317,6 +317,7 @@ export interface BatchCreate {
   idempotency_key: string;
   usage_pause_percent: number;
   initial_control_intent: "run" | "pause";
+  container_env?: Record<string, string>;
 }
 
 export interface BatchRecord {

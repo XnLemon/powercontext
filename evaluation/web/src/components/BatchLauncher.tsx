@@ -37,6 +37,7 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
   const [models, setModels] = useState<string[]>(["gpt-5.6-sol"]);
   const [startPaused, setStartPaused] = useState(false);
   const [threshold, setThreshold] = useState(80);
+  const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>([]);
   const [preview, setPreview] = useState<BatchPreview | null>(null);
   const [pending, setPending] = useState<"preview" | "submitting" | null>(null);
   const [message, setMessage] = useState("");
@@ -140,6 +141,10 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
       usage_pause_percent: preview.usage_pause_percent,
       idempotency_key: confirmationKey.current.key,
       initial_control_intent: intent.initialControlIntent,
+      container_env: envRows.filter((row) => row.key.trim()).reduce(
+        (acc, row) => ({ ...acc, [row.key.trim()]: row.value }),
+        {} as Record<string, string>,
+      ),
     };
     controller.current?.abort();
     const nextController = new AbortController();
@@ -208,6 +213,46 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
           </select>
           <span className="field-hint">批次创建后固定，重试也保持不变</span>
         </label>
+        <fieldset className="env-editor">
+          <legend>容器环境变量（可选，仅 ON 臂）</legend>
+          <span className="field-hint">PowerContext Server 在 ON 臂启动时读取这些变量，例如 POWERCONTEXT_SERVER_INFERENCE_GENERATION_MODEL</span>
+          {envRows.map((row, index) => (
+            <div key={index} className="env-row">
+              <input
+                aria-label={`环境变量名 ${index + 1}`}
+                placeholder="KEY"
+                value={row.key}
+                onChange={(event) => {
+                  setEnvRows((rows) => rows.map((r, i) => i === index ? { ...r, key: event.target.value } : r));
+                }}
+                spellCheck={false}
+              />
+              <input
+                aria-label={`环境变量值 ${index + 1}`}
+                placeholder="value"
+                value={row.value}
+                onChange={(event) => {
+                  setEnvRows((rows) => rows.map((r, i) => i === index ? { ...r, value: event.target.value } : r));
+                }}
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                className="env-remove"
+                onClick={() => setEnvRows((rows) => rows.filter((_, i) => i !== index))}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            className="env-add"
+            onClick={() => setEnvRows((rows) => [...rows, { key: "", value: "" }])}
+          >
+            + 添加变量
+          </button>
+        </fieldset>
         <label>
           暂停阈值
           <span className="threshold-input">

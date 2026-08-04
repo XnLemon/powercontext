@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 
 from powercontext_eval.artifacts import ArmState, ArtifactStore
 from powercontext_eval.benchmarks.base import GoldResult, run_after_gold
@@ -98,6 +99,7 @@ class RunConfig:
     model: str = DEFAULT_CODEX_MODEL
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     finalization_registrar: TokensFlowFinalizationRegistrar | None = None
+    container_env: Mapping[str, str] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         if not is_safe_codex_model(self.model):
@@ -280,6 +282,7 @@ def _run_swebench_pro_instance(
                 model=config.model,
                 reasoning_effort=config.reasoning_effort,
                 finalization_registrar=config.finalization_registrar,
+                container_env=config.container_env,
             ),
             paths=arm_paths,
             prompts={Arm.OFF: prompt, Arm.ON: prompt},

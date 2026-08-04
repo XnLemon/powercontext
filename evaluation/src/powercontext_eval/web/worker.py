@@ -245,6 +245,7 @@ class TaskPairWorker:
             model=task.request.model,
             reasoning_effort=task.request.reasoning_effort,
             finalization_registrar=self._finalization_registrar(task),
+            container_env=dict(task.request.container_env),
         )
 
     def _legacy_run_config(self, task: TaskRecord) -> MinimalRunConfig:

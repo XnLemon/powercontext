@@ -415,6 +415,28 @@ def create_app(
     def capabilities() -> Capabilities:
         return Capabilities(models=config.codex_models)
 
+    @app.put("/api/auth")
+    def update_auth(body: dict[str, Any]) -> Response:
+        raw = body.get("auth_json")
+        if not isinstance(raw, str):
+            return _error(422, "invalid_auth_json", "auth_json must be a JSON string.")
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return _error(422, "invalid_auth_json", "auth_json is not valid JSON.")
+        if not isinstance(parsed, dict) or "tokens" not in parsed or "auth_mode" not in parsed:
+            return _error(422, "invalid_auth_json", "auth_json must contain auth_mode and tokens.")
+        auth_path = config.auth_json
+        auth_path.parent.mkdir(parents=True, exist_ok=True)
+        if auth_path.exists():
+            backup = auth_path.with_name(f"auth.json.backup-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}")
+            auth_path.replace(backup)
+        tmp = auth_path.with_suffix(".json.tmp")
+        tmp.write_text(raw, encoding="utf-8")
+        tmp.chmod(0o600)
+        os.replace(tmp, auth_path)
+        return JSONResponse({"updated_at": datetime.now(UTC).isoformat()}, headers=_NO_STORE)
+
     @app.post("/api/batches/preview")
     def preview_batch(request: BatchPreviewRequest) -> Response:
         if not config.accepts_codex_model(request.model):

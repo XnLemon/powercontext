@@ -1823,3 +1823,35 @@ def test_batch_report_rejects_unsafe_report_artifacts(
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "report_unavailable"
+
+
+def test_put_auth_replaces_the_credential_file(config: WebConfig, client: TestClient) -> None:
+    auth_path = config.auth_json
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    original = {"auth_mode": "chatgpt", "tokens": {"access_token": "old"}}
+    auth_path.write_text(json.dumps(original))
+    new_auth = {"auth_mode": "chatgpt", "tokens": {"access_token": "new", "refresh_token": "rt-new"}}
+
+    response = client.put("/api/auth", json={"auth_json": json.dumps(new_auth)})
+
+    assert response.status_code == 200
+    assert "updated_at" in response.json()
+    loaded = json.loads(auth_path.read_text())
+    assert loaded == new_auth
+    assert auth_path.with_suffix(".json.backup").exists() or any(
+        p.name.startswith("auth.json.backup") for p in auth_path.parent.iterdir()
+    )
+
+
+def test_put_auth_rejects_invalid_json(config: WebConfig, client: TestClient) -> None:
+    response = client.put("/api/auth", json={"auth_json": "not-json"})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_auth_json"
+
+
+def test_put_auth_rejects_missing_tokens(config: WebConfig, client: TestClient) -> None:
+    response = client.put("/api/auth", json={"auth_json": json.dumps({"auth_mode": "chatgpt"})})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_auth_json"

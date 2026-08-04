@@ -508,6 +508,7 @@ class TaskStore:
                     reasoning_effort=request.reasoning_effort,
                     treatment_mode=request.treatment_mode,
                     idempotency_key=f"{batch_id}.{source_index:04d}",
+                    container_env=request.container_env,
                 )
                 connection.execute(
                     """
