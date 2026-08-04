@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from powercontext_eval.codex import DEFAULT_CODEX_MODEL, is_safe_codex_model
 
 _SAFE_DOCKER_NETWORK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
-MAX_TASK_PARALLELISM = 10
+MAX_TASK_PARALLELISM = 20
 MAX_TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS = 600
 MAX_CODEX_CAPACITY_RETRY_MAX = 20
 
