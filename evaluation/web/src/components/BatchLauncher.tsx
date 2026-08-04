@@ -253,8 +253,8 @@ export function BatchLauncher({ api, onCreated }: BatchLauncherProps) {
             + 添加变量
           </button>
         </fieldset>
-        <label>
-          暂停阈值
+        <label className="threshold-field">
+          <span className="threshold-field__label">暂停阈值</span>
           <span className="threshold-input">
             <input
               aria-label="暂停阈值"
