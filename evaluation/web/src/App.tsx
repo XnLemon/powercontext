@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { EvaluationApi } from "./api";
 import { AppShell } from "./components/AppShell";
 import { BatchLauncher } from "./components/BatchLauncher";
+import { AuthPanel } from "./components/AuthPanel";
 import { BatchOverview } from "./components/BatchOverview";
 import { BatchTaskReport } from "./components/BatchTaskReport";
 import { ReportIndex } from "./components/ReportIndex";
@@ -102,6 +103,7 @@ export function App({ api: injectedApi }: AppProps) {
           />
           <ReportIndex api={api} navigate={navigate} />
         </div>
+        <AuthPanel api={api} />
       </div>
     );
   }
