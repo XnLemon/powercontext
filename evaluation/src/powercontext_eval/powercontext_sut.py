@@ -838,6 +838,7 @@ class DockerSut:
                     "UV_OFFLINE": "1",
                 },
                 secrets=credential_variants,
+                scan_output_secrets=False,
             )
             if config.finalization_registrar is None:
                 tokensflow_drain_failed = False

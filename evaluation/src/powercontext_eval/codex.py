@@ -149,6 +149,7 @@ class CodexRunner:
         timeout: float | None = None,
         env: Mapping[str, str] | None = None,
         secrets: tuple[str, ...] = (),
+        scan_output_secrets: bool = True,
     ) -> CodexOutcome:
         """Send the exact prompt on stdin and parse strict JSONL output."""
 
@@ -166,14 +167,16 @@ class CodexRunner:
                     stdout_sink=event_stream,
                 )
             except CommandError as error:
-                self._append_compat_stdout(event_stream, error.result.stdout, secrets)
-                self._retain_process_result(store, error.result, event_stream, secrets)
+                output_secrets = secrets if scan_output_secrets else ()
+                self._append_compat_stdout(event_stream, error.result.stdout, output_secrets)
+                self._retain_process_result(store, error.result, event_stream, output_secrets)
                 if _stream_reports_upstream_capacity(event_stream):
                     raise CodexCapacityError("Codex reported the upstream model is at capacity") from None
                 raise CodexInfrastructureError(_command_error_kind(error)) from None
 
-            self._append_compat_stdout(event_stream, result.stdout, secrets)
-            self._retain_process_result(store, result, event_stream, secrets)
+            output_secrets = secrets if scan_output_secrets else ()
+            self._append_compat_stdout(event_stream, result.stdout, output_secrets)
+            self._retain_process_result(store, result, event_stream, output_secrets)
             try:
                 event_stream.seek(0)
                 last_message, usage = _summarize_jsonl_stream(event_stream)

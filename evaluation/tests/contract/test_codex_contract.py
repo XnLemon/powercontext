@@ -157,6 +157,28 @@ def test_codex_runner_writes_exact_jsonl_and_summary_artifacts(tmp_path: Path) -
     assert outcome.usage == {"input_tokens": 7, "output_tokens": 3}
 
 
+def test_codex_runner_can_disable_retained_output_secret_scan(tmp_path: Path) -> None:
+    raw = (
+        b'{"type":"agent_message","message":"password test uses chatgpt auth mode"}\n'
+        b'{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":3}}\n'
+    )
+    runner = FakeRunner(command_result(raw.decode()))
+    store = ArtifactStore(tmp_path / "result")
+
+    outcome = CodexRunner(runner).run(
+        CodexInvocation(Arm.ON, inside_disposable_container=True),
+        prompt=b"exact prompt",
+        cwd=tmp_path,
+        store=store,
+        secrets=("chatgpt",),
+        scan_output_secrets=False,
+    )
+
+    assert runner.calls[0]["secrets"] == ("chatgpt",)
+    assert (store.root / "codex/events.jsonl").read_bytes() == raw
+    assert outcome.last_message == "password test uses chatgpt auth mode"
+
+
 def test_codex_runner_uses_bounded_stream_sink_and_keeps_nonzero_evidence(tmp_path: Path) -> None:
     raw = b'{"type":"agent_message","message":"done"}\n{"type":"turn.completed"}\n'
 
