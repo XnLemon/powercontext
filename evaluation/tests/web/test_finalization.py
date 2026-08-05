@@ -704,7 +704,7 @@ class LifecycleRunner:
 def test_finalizer_quiesces_daemon_before_upload_doctor_and_cleanup(tmp_path: Path) -> None:
     store = _store(tmp_path)
     job = _register(store, key="quiesce-order")
-    (tmp_path / job.runtime_path / "tokensflow-home").mkdir(parents=True)
+    (tmp_path / job.runtime_path / "root-home").mkdir(parents=True)
     runner = LifecycleRunner()
     runtime = DockerFinalizationRuntime(tmp_path, runner=runner)
     finalizer = TokensFlowFinalizer(store, runtime, clock=lambda: NOW + timedelta(seconds=1), task_parallelism=10)
@@ -752,7 +752,7 @@ class CleanupBudgetRunner:
 def test_force_cleanup_commands_share_one_total_timeout_budget(tmp_path: Path) -> None:
     store = _store(tmp_path)
     job = _register(store, key="cleanup-command-budget")
-    (tmp_path / job.runtime_path / "tokensflow-home").mkdir(parents=True)
+    (tmp_path / job.runtime_path / "root-home").mkdir(parents=True)
     runner = CleanupBudgetRunner(job.container_name)
     monotonic_times = iter((0.0, 0.0, 20.0))
     runtime = DockerFinalizationRuntime(tmp_path, runner=runner, monotonic=lambda: next(monotonic_times))
@@ -775,7 +775,7 @@ def test_restart_after_queue_pass_and_container_removal_finishes_idempotent_clea
         now=NOW,
     )
     store.release_tokensflow_finalization(job.job_id, "crashed-finalizer", now=NOW)
-    private_home = tmp_path / job.runtime_path / "tokensflow-home"
+    private_home = tmp_path / job.runtime_path / "root-home"
     private_home.mkdir(parents=True)
     (private_home / "owned-state").write_text("remove me")
     runner = AbsentContainerRunner(job.container_name)

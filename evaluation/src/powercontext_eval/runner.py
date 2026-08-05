@@ -251,8 +251,9 @@ def _run_swebench_pro_instance(
         for arm in (Arm.OFF, Arm.ON):
             arm_work = layout.arm_work(arm)
             runtime = arm_work / "runtime"
+            root_home = runtime / "root-home"
             try:
-                tokensflow = snapshot_tokensflow_home(config.tokensflow_user_home, runtime / "tokensflow-home")
+                tokensflow = snapshot_tokensflow_home(config.tokensflow_user_home, root_home)
             except UnsafeTokensFlowConfiguration:
                 raise TokensFlowInfrastructureError("TokensFlow profile snapshot failed") from None
             arm_paths[arm] = ArmPaths(
@@ -260,7 +261,7 @@ def _run_swebench_pro_instance(
                 auth_source=config.auth_json,
                 workspace=arm_work / "workspace",
                 runtime=runtime,
-                codex_home=runtime / "codex-home",
+                codex_home=root_home / ".codex",
                 pc_home=runtime / "pc-home",
                 result_root=layout.arm_artifacts(arm),
                 tokensflow_home=tokensflow.user_home,

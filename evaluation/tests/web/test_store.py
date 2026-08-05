@@ -757,13 +757,14 @@ def test_sol_and_luna_batches_keep_children_and_retries_model_isolated(store: Ta
     assert store.get_batch_task(luna.batch_id, luna_task.task_id).request.model == "gpt-5.6-luna"
 
 
-def test_store_migrates_worker_capacity_and_enforces_ten_pair_limit(database: Path) -> None:
+@pytest.mark.parametrize("existing_max", [4, 10])
+def test_store_migrates_worker_capacity_and_enforces_twenty_pair_limit(database: Path, existing_max: int) -> None:
     with sqlite3.connect(database) as connection:
         connection.execute(
-            """
+            f"""
             CREATE TABLE worker_runtime (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                task_parallelism INTEGER NOT NULL CHECK (task_parallelism BETWEEN 1 AND 4),
+                task_parallelism INTEGER NOT NULL CHECK (task_parallelism BETWEEN 1 AND {existing_max}),
                 observed_at TEXT NOT NULL
             )
             """
@@ -772,11 +773,11 @@ def test_store_migrates_worker_capacity_and_enforces_ten_pair_limit(database: Pa
     store = TaskStore(database, lease_duration=timedelta(seconds=60))
 
     store.initialize()
-    store.record_worker_capacity(10, now=NOW)
+    store.record_worker_capacity(20, now=NOW)
 
-    assert store.health_snapshot(now=NOW)["task_parallelism"] == 10
-    with pytest.raises(ValueError, match="between 1 and 10"):
-        store.record_worker_capacity(11, now=NOW)
+    assert store.health_snapshot(now=NOW)["task_parallelism"] == 20
+    with pytest.raises(ValueError, match="between 1 and 20"):
+        store.record_worker_capacity(21, now=NOW)
 
 
 def test_pause_without_a_running_task_is_immediate_idempotent_and_restart_safe(database: Path) -> None:
@@ -1648,7 +1649,7 @@ def test_worker_capacity_is_published_without_web_configuration_reload(store: Ta
     assert store.health_snapshot(now=NOW + timedelta(seconds=2))["task_parallelism"] == 4
 
 
-@pytest.mark.parametrize("value", [0, 11, True])
+@pytest.mark.parametrize("value", [0, 21, True])
 def test_worker_capacity_rejects_out_of_range_values(store: TaskStore, value: object) -> None:
     with pytest.raises(ValueError):
         store.record_worker_capacity(value, now=NOW)  # ty: ignore[invalid-argument-type]

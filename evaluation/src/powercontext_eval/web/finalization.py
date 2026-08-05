@@ -144,7 +144,7 @@ class DockerFinalizationRuntime:
             ):
                 return False
             DockerSut._cleanup_tokensflow_wrapper(cast(ArmPaths, SimpleNamespace(runtime=runtime)))
-            self._remove_private_home(runtime / "tokensflow-home")
+            self._remove_private_home(runtime / "root-home")
         except (CommandError, OSError, UnsafeSutConfiguration):
             return False
         return True

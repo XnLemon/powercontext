@@ -261,7 +261,7 @@ class TaskStore:
                 );
                 CREATE TABLE IF NOT EXISTS worker_runtime (
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                    task_parallelism INTEGER NOT NULL CHECK (task_parallelism BETWEEN 1 AND 10),
+                    task_parallelism INTEGER NOT NULL CHECK (task_parallelism BETWEEN 1 AND 20),
                     observed_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS usage_snapshots (
@@ -915,7 +915,7 @@ class TaskStore:
         batch_id: str,
         attempt_number: int,
         idempotency_key: str,
-        actor: str,
+        actor: Literal["user", "system"],
         details: Mapping[str, int | str | None],
         now: datetime,
     ) -> None:
@@ -2476,14 +2476,19 @@ def _migrate_worker_runtime_parallelism_constraint(connection: sqlite3.Connectio
     row = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'worker_runtime'"
     ).fetchone()
-    if row is None or "BETWEEN 1 AND 4" not in str(row["sql"]).upper():
+    if row is None:
+        return
+    table_sql = str(row["sql"]).upper()
+    if "BETWEEN 1 AND 20" in table_sql:
+        return
+    if not any(constraint in table_sql for constraint in ("BETWEEN 1 AND 4", "BETWEEN 1 AND 10")):
         return
     connection.execute("ALTER TABLE worker_runtime RENAME TO worker_runtime_v1")
     connection.execute(
         """
         CREATE TABLE worker_runtime (
             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-            task_parallelism INTEGER NOT NULL CHECK (task_parallelism BETWEEN 1 AND 10),
+            task_parallelism INTEGER NOT NULL CHECK (task_parallelism BETWEEN 1 AND 20),
             observed_at TEXT NOT NULL
         )
         """

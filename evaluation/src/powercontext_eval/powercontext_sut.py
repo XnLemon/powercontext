@@ -60,7 +60,6 @@ _SAFE_RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 _SAFE_DOCKER_NETWORK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _INVALID_DOCKER_COPY_SYMLINK = re.compile(r'invalid symlink "[^"\r\n]+" -> "[^"\r\n]+"')
-_CONTAINER_UID_GID = "2950:100"
 _CONTAINER_CODEX = "/tools/codex-dir/codex"
 _CONTAINER_TOKENSFLOW = "/tools/tokensflow-dir/tokensflow"
 _CONTAINER_TOKENSFLOW_WRAPPER_DIR = "/tools/tokensflow-wrapper"
@@ -709,6 +708,7 @@ class DockerSut:
         network = f"powercontext-eval-{config.run_id}"
         relay = self._relay_factory()
         network_created = False
+        preserve_for_diagnosis = False
         try:
             self._docker.run(
                 (
@@ -727,11 +727,14 @@ class DockerSut:
             gateway = self.network_gateway(network, cwd)
             relay_url = relay.start(gateway, config.proxy)
             yield network, relay_url
+        except BaseException:
+            preserve_for_diagnosis = network_created
+            raise
         finally:
             try:
                 relay.stop()
             finally:
-                if network_created:
+                if network_created and not preserve_for_diagnosis:
                     self._docker.run(
                         ("docker", "network", "rm", network),
                         cwd=cwd,
@@ -755,6 +758,7 @@ class DockerSut:
         tokensflow_egress_attached = False
         handed_off = False
         preserve_after_drain_failure = False
+        preserve_after_infrastructure_failure = False
         tokensflow_wrapper_staged = False
         tokensflow_environment = tokensflow_runtime_environment()
         tokensflow_environment_values = tuple(
@@ -767,13 +771,12 @@ class DockerSut:
         credential_variants = auth_secret_variants(paths.auth_source) + tokensflow_command_secrets
         try:
             paths.prepare()
-            auth = paths.copy_auth()
+            paths.copy_auth()
             self._stage_recorder(config, paths)
             self._stage_tokensflow_wrapper(paths)
             tokensflow_wrapper_staged = True
             self._initialize_workspace(config, arm, paths)
-            self._assign_arm_ownership(config, paths)
-            self._prewarm(config, arm, paths, network, relay_url, auth)
+            self._prewarm(config, arm, paths, network, relay_url)
             self._start_container(
                 config,
                 arm,
@@ -781,7 +784,6 @@ class DockerSut:
                 network,
                 container,
                 relay_url,
-                auth,
                 tokensflow_environment,
                 tokensflow_command_secrets,
             )
@@ -827,7 +829,6 @@ class DockerSut:
                 timeout=config.codex_timeout,
                 env={
                     **loopback_proxy_environment(relay_url),
-                    "CODEX_HOME": "/runtime/codex-home",
                     "POWERCONTEXT_HOME": "/runtime/pc-home",
                     "POWERCONTEXT_CODEX_SCOPE_ID": f"eval:{config.run_id}:{arm.value}",
                     "POWERCONTEXT_EVAL_TRACE_PATH": "/runtime/pc-home/evaluation-injections.jsonl",
@@ -931,20 +932,26 @@ class DockerSut:
                 except (CommandError, OSError):
                     pass
             return SutOutcome(codex, evidence, tokensflow, tokensflow_daemon)
+        except BaseException:
+            preserve_after_infrastructure_failure = container_started
+            if preserve_after_infrastructure_failure and not (paths.runtime / "tokensflow-recovery.json").exists():
+                self._write_tokensflow_recovery_marker(paths, "infrastructure_failure_retained")
+            raise
         finally:
             if not handed_off:
+                preserve_for_diagnosis = preserve_after_drain_failure or preserve_after_infrastructure_failure
                 try:
                     if tokensflow_egress_attached:
                         self._detach_tokensflow_egress(config, container, paths)
                 finally:
                     container_removed = not container_started
-                    if container_started and not preserve_after_drain_failure:
+                    if container_started and not preserve_for_diagnosis:
                         container_removed = self._remove_container_for_cleanup(container, paths)
                         if not container_removed:
                             self._write_tokensflow_recovery_marker(paths, "tokensflow_container_cleanup_failed")
-                    if tokensflow_wrapper_staged and not preserve_after_drain_failure and container_removed:
+                    if tokensflow_wrapper_staged and not preserve_for_diagnosis and container_removed:
                         self._cleanup_tokensflow_wrapper(paths)
-                    if container_started and not preserve_after_drain_failure and not container_removed:
+                    if container_started and not preserve_for_diagnosis and not container_removed:
                         raise TokensFlowInfrastructureError("TokensFlow container cleanup failed") from None
 
     @staticmethod
@@ -1076,8 +1083,6 @@ class DockerSut:
         container_environment = {
             **runtime_environment,
             **direct_egress_environment(),
-            "HOME": "/runtime/tokensflow-home",
-            "CODEX_HOME": "/runtime/codex-home",
         }
         host_version = parse_tokensflow_version(
             self._capture_tokensflow_output(
@@ -1135,14 +1140,12 @@ class DockerSut:
         command_secrets: Sequence[str],
     ) -> TokensFlowDaemonHandle:
         _, tokensflow_home = self._validate_tokensflow_inputs(config, paths)
-        state = "/runtime/tokensflow-home/.local/share/tokensflow"
+        state = "/root/.local/share/tokensflow"
         container_pid_file = f"{state}/evaluation-daemon.pid"
         container_log_file = f"{state}/evaluation-daemon.log"
         environment = {
             **runtime_environment,
             **direct_egress_environment(),
-            "HOME": "/runtime/tokensflow-home",
-            "CODEX_HOME": "/runtime/codex-home",
         }
         script = (
             f'umask 077; echo "$$" > {container_pid_file}; '
@@ -1223,8 +1226,6 @@ class DockerSut:
         environment = {
             **runtime_environment,
             **direct_egress_environment(),
-            "HOME": "/runtime/tokensflow-home",
-            "CODEX_HOME": "/runtime/codex-home",
         }
         self._stop_tokensflow_daemon(
             container,
@@ -1420,6 +1421,9 @@ class DockerSut:
             "tokensflow_container_cleanup_failed": (
                 b'{"reason":"tokensflow_container_cleanup_failed","recovery_required":true}\n'
             ),
+            "infrastructure_failure_retained": (
+                b'{"reason":"infrastructure_failure_retained","recovery_required":true}\n'
+            ),
         }
         try:
             payload = payloads[reason]
@@ -1553,13 +1557,6 @@ class DockerSut:
                         "--rm",
                         "--network",
                         "none",
-                        "--read-only",
-                        "--cap-drop",
-                        "ALL",
-                        "--security-opt",
-                        "no-new-privileges",
-                        "--user",
-                        _CONTAINER_UID_GID,
                         "--cpus",
                         config.limits.cpus,
                         "--memory",
@@ -1750,46 +1747,6 @@ class DockerSut:
             if root_fd >= 0:
                 os.close(root_fd)
 
-    def _assign_arm_ownership(self, config: SutConfig, paths: ArmPaths) -> None:
-        """Use a networkless, capability-minimal helper for exact owned mounts."""
-
-        if all((path.stat().st_uid, path.stat().st_gid) == (2950, 100) for path in (paths.workspace, paths.runtime)):
-            return
-        self._docker.run(
-            (
-                "docker",
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                *_docker_env_args(
-                    {**loopback_proxy_environment(config.proxy.url), "UV_CACHE_DIR": "/runtime/uv-cache"}
-                ),
-                "--read-only",
-                "--cap-drop",
-                "ALL",
-                "--cap-add",
-                "CHOWN",
-                "--security-opt",
-                "no-new-privileges",
-                "--user",
-                "0:0",
-                "--mount",
-                f"type=bind,src={paths.workspace},dst=/workspace",
-                "--mount",
-                f"type=bind,src={paths.runtime},dst=/runtime",
-                "--entrypoint",
-                "/bin/chown",
-                config.task_image,
-                "--recursive",
-                _CONTAINER_UID_GID,
-                "/workspace",
-                "/runtime",
-            ),
-            cwd=paths.runtime,
-            timeout=300,
-        )
-
     def _prewarm(
         self,
         config: SutConfig,
@@ -1797,9 +1754,8 @@ class DockerSut:
         paths: ArmPaths,
         network: str,
         relay_url: str,
-        auth: Path,
     ) -> None:
-        del arm, auth
+        del arm
         common_environment = {
             **loopback_proxy_environment(relay_url),
             "UV_CACHE_DIR": "/runtime/uv-cache",
@@ -1809,13 +1765,6 @@ class DockerSut:
             "docker",
             "run",
             "--rm",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--user",
-            _CONTAINER_UID_GID,
             "--cpus",
             config.limits.cpus,
             "--memory",
@@ -1851,13 +1800,6 @@ class DockerSut:
                 "docker",
                 "run",
                 "--rm",
-                "--read-only",
-                "--cap-drop",
-                "ALL",
-                "--security-opt",
-                "no-new-privileges",
-                "--user",
-                _CONTAINER_UID_GID,
                 "--cpus",
                 config.limits.cpus,
                 "--memory",
@@ -1891,13 +1833,6 @@ class DockerSut:
             "docker",
             "run",
             "--rm",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--user",
-            _CONTAINER_UID_GID,
             "--cpus",
             config.limits.cpus,
             "--memory",
@@ -1911,13 +1846,14 @@ class DockerSut:
             "--mount",
             f"type=bind,src={paths.runtime},dst=/runtime",
             "--mount",
+            f"type=bind,src={paths.tokensflow_home},dst=/root",
+            "--mount",
             _tool_directory_mount(config.codex_binary, "/tools/codex-dir", expected_name="codex"),
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=256m",
             *_docker_env_args(
                 {
                     **common_environment,
-                    "CODEX_HOME": "/runtime/codex-home",
                     "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env",
                     "UV_OFFLINE": "1",
                 }
@@ -1953,7 +1889,6 @@ class DockerSut:
         network: str,
         container: str,
         relay_url: str,
-        auth: Path,
         tokensflow_environment: Mapping[str, str],
         tokensflow_command_secrets: Sequence[str],
     ) -> None:
@@ -1968,13 +1903,6 @@ class DockerSut:
             container,
             "--label",
             f"powercontext-eval.run={config.run_id}",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--user",
-            _CONTAINER_UID_GID,
             "--cpus",
             config.limits.cpus,
             "--memory",
@@ -1987,6 +1915,8 @@ class DockerSut:
             f"type=bind,src={paths.workspace},dst=/workspace",
             "--mount",
             f"type=bind,src={paths.runtime},dst=/runtime",
+            "--mount",
+            f"type=bind,src={paths.tokensflow_home},dst=/root",
             "--mount",
             f"type=bind,src={config.source_checkout},dst=/source,readonly",
             "--mount",
@@ -2006,15 +1936,11 @@ class DockerSut:
             ),
             "--mount",
             _tool_directory_mount(config.uv_binary, "/tools/uv-dir", expected_name="uv"),
-            "--mount",
-            f"type=bind,src={auth},dst=/runtime/codex-home/auth.json,readonly",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=1g",
             *_docker_env_args(
                 {
                     **loopback_proxy_environment(relay_url),
-                    "HOME": "/runtime/tokensflow-home",
-                    "CODEX_HOME": "/runtime/codex-home",
                     "POWERCONTEXT_HOME": "/runtime/pc-home",
                     "POWERCONTEXT_CODEX_SCOPE_ID": scope,
                     "UV_PROJECT_ENVIRONMENT": "/runtime/plugin-env",
@@ -2309,7 +2235,7 @@ def run_codex_contract_smoke(
         try:
             tokensflow = snapshot_tokensflow_home(
                 Path(tokensflow_user_home).absolute(),
-                runtime / "tokensflow-home",
+                runtime / "root-home",
             )
         except UnsafeTokensFlowConfiguration:
             raise TokensFlowInfrastructureError("TokensFlow profile snapshot failed") from None
@@ -2318,7 +2244,7 @@ def run_codex_contract_smoke(
             auth_source=auth,
             workspace=arm_root / "ephemeral/workspace",
             runtime=runtime,
-            codex_home=runtime / "codex-home",
+            codex_home=runtime / "root-home/.codex",
             pc_home=runtime / "pc-home",
             result_root=arm_root / "results",
             tokensflow_home=tokensflow.user_home,

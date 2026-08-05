@@ -391,7 +391,7 @@ def test_runner_snapshots_tokensflow_per_arm_and_blocks_both_credential_sets(
     config, result, observed = _run_with_fakes(tmp_path, monkeypatch, [])
 
     for arm in (Arm.OFF, Arm.ON):
-        snapshot = config.root / "work" / result.run_id / arm.value / "runtime/tokensflow-home"
+        snapshot = config.root / "work" / result.run_id / arm.value / "runtime/root-home"
         assert (snapshot / ".tokensflow/credentials.json").read_text() == (
             config.tokensflow_user_home / ".tokensflow/credentials.json"
         ).read_text()

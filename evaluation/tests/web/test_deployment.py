@@ -47,10 +47,8 @@ def _unit(name: str) -> str:
     return (DEPLOY / name).read_text()
 
 
-def test_systemd_units_run_the_pinned_checkout_as_the_m0_operator() -> None:
+def test_systemd_units_run_the_pinned_checkout_with_role_appropriate_users() -> None:
     common = {
-        "User=rongfeng.frf",
-        "Group=users",
         "WorkingDirectory=/data/powercontext-eval/deploy/powercontext",
         "EnvironmentFile=/data/powercontext-eval/config/evaluation-console.env",
         "Restart=on-failure",
@@ -62,6 +60,10 @@ def test_systemd_units_run_the_pinned_checkout_as_the_m0_operator() -> None:
         assert (
             "ExecStart=/data/powercontext-eval/bin/uv run --project evaluation powercontext-eval " + command
         ) in unit
+    web = set(_unit("powercontext-eval-web.service").splitlines())
+    worker = set(_unit("powercontext-eval-worker.service").splitlines())
+    assert {"User=rongfeng.frf", "Group=users"} <= web
+    assert not {line for line in worker if line.startswith(("User=", "Group=", "SupplementaryGroups="))}
 
 
 def test_systemd_units_keep_uv_cache_inside_the_writable_evaluation_root() -> None:
@@ -96,10 +98,10 @@ def test_systemd_units_enforce_role_appropriate_security_boundaries() -> None:
         "ReadWriteDirectories=/data/powercontext-eval",
     }
     assert common <= set(web.splitlines())
-    assert common <= set(worker.splitlines())
+    assert not common & set(worker.splitlines())
     assert "/var/run/docker.sock" not in web
-    assert "SupplementaryGroups=docker" in worker
-    assert "ReadWriteDirectories=/data/powercontext-eval" in worker
+    assert "SupplementaryGroups=docker" not in worker
+    assert "ReadWriteDirectories=/data/powercontext-eval" not in worker
     assert "After=network.target" in web
     assert "After=network.target powercontext-eval-web.service" in worker
 
@@ -176,7 +178,7 @@ def test_operator_guide_documents_safety_acceptance_and_rollback_contracts() -> 
         "install -o rongfeng.frf -g users -m 0600",
         "sudo -u rongfeng.frf test -r /data/powercontext-eval/codex-home/auth.json",
         "operator-supplied",
-        "read-only except `/data/powercontext-eval` and the service's private temporary directory",
+        "The Worker runs as root",
         "731",
         "b5b2462bfbf5aeb2cb7ba7d215778a1768b85f9d7ad7f748546c7f80a0ad1510",
         "explicit final approval",

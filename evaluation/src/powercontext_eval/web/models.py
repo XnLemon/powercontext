@@ -272,7 +272,7 @@ class HealthResponse(FrozenModel):
     service: Literal["ok"]
     worker_lease_active: bool
     active_task_pairs: Annotated[int, Field(ge=0)]
-    task_parallelism: Annotated[int, Field(ge=1, le=10)]
+    task_parallelism: Annotated[int, Field(ge=1, le=20)]
     queued_tasks: Annotated[int, Field(ge=0)]
     running_tasks: Annotated[int, Field(ge=0)]
 

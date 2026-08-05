@@ -289,13 +289,15 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now powercontext-eval-web.service powercontext-eval-worker.service
 ```
 
-The m0 host uses systemd 219, so the units use its legacy `ReadOnlyDirectories=` and `ReadWriteDirectories=`
-spellings (the current spellings are `ReadOnlyPaths=` and `ReadWritePaths=`). The filesystem namespace root is
-read-only except `/data/powercontext-eval` and the service's private temporary directory. `ProtectSystem=full`
-provides a second system-directory restriction compatible with systemd 219. The worker retains normal local
-networking for the loopback proxy and joins the `docker` group to connect to `/var/run/docker.sock`; the Docker
-daemon remains external to the namespace and is not managed by the unit. The web process does not receive Docker
-group access.
+The Web unit keeps its systemd filesystem restrictions and runs as `rongfeng.frf`. The Worker runs as root because it
+owns the disposable benchmark runtime and Docker lifecycle; it does not receive a synthetic UID/GID or a restricted
+filesystem namespace. Task containers likewise keep the image's default root user and default `/root` home instead of
+forcing `HOME`, `CODEX_HOME`, a read-only root, dropped capabilities, or `no-new-privileges`. Isolation still comes
+from task-scoped mounts and networks, the absence of a Docker-socket mount, and CPU, memory, and PID limits.
+
+Successful task containers and scoped networks are cleaned normally after report handoff. If evaluation
+infrastructure fails after a task starts, the Worker retains the exact container, scoped network, workspace, runtime,
+and logs for diagnosis; an operator removes those resources explicitly only after collecting evidence.
 
 ## Verify and operate
 

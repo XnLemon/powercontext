@@ -331,9 +331,10 @@ def make_paths(tmp_path: Path) -> ArmPaths:
     auth = tmp_path / "outside-results" / "auth.json"
     workspace = tmp_path / "ephemeral" / "workspace"
     runtime = tmp_path / "ephemeral" / "runtime"
-    codex_home = runtime / "codex-home"
+    root_home = runtime / "root-home"
+    codex_home = root_home / ".codex"
     pc_home = runtime / "pc-home"
-    tokensflow_home = runtime / "tokensflow-home"
+    tokensflow_home = root_home
     for path in (source, auth.parent):
         path.mkdir(parents=True, exist_ok=True)
     auth.write_text('{"token":"fixture-secret"}')
@@ -544,9 +545,10 @@ def test_workspace_initialization_recovers_from_docker_cp_rejecting_an_escaping_
     )
     assert "--network" in fallback
     assert fallback[fallback.index("--network") + 1] == "none"
-    assert ("--cap-drop", "ALL") == fallback[fallback.index("--cap-drop") : fallback.index("--cap-drop") + 2]
-    assert "no-new-privileges" in " ".join(fallback)
-    assert fallback[fallback.index("--user") + 1] == "2950:100"
+    assert "--read-only" not in fallback
+    assert "--cap-drop" not in fallback
+    assert "no-new-privileges" not in " ".join(fallback)
+    assert "--user" not in fallback
     assert fallback[fallback.index("--entrypoint") + 1] == "/bin/cp"
     assert fallback[-4:] == ("--archive", "--no-preserve=ownership", "/app/.", "/workspace")
     assert not paths.workspace.joinpath("partial-copy").exists()
@@ -574,14 +576,16 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
     run = next(command for command in transcript if command[:3] == ("docker", "run", "-d"))
     joined = " ".join(run)
     assert "--init" in run
-    assert "--read-only" in run
-    assert ("--cap-drop", "ALL") == run[run.index("--cap-drop") : run.index("--cap-drop") + 2]
-    assert "no-new-privileges" in joined
+    assert "--read-only" not in run
+    assert "--cap-drop" not in run
+    assert "no-new-privileges" not in joined
     assert "--network powercontext-eval-run-1" in joined
-    assert "--user 2950:100" in joined
+    assert "--user" not in run
     assert "--cpus 2" in joined and "--memory 4g" in joined and "--pids-limit 256" in joined
     assert "/var/run/docker.sock" not in joined
     assert str(Path.home()) not in joined
+    assert f"type=bind,src={paths.tokensflow_home},dst=/root" in joined
+    assert not any(part.startswith(("HOME=", "CODEX_HOME=")) for part in run)
     assert "POWERCONTEXT_CODEX_SCOPE_ID=eval:run-1:on" in joined
     mounts = [run[index + 1] for index, value in enumerate(run) if value in {"--mount", "-v"}]
     assert all(
@@ -631,17 +635,7 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
         for index, command in enumerate(transcript)
         if command[-8:] == ("sync", "--frozen", "--project", "/source", "--extra", "server", "--extra", "cli")
     )
-    chown_entries = [(index, command) for index, command in enumerate(transcript) if "/bin/chown" in command]
-    if chown_entries:
-        chown_index, chown = chown_entries[0]
-        assert chown_index < prewarm_index
-        assert "--network" in chown and chown[chown.index("--network") + 1] == "none"
-        assert ("--cap-drop", "ALL", "--cap-add", "CHOWN") == chown[
-            chown.index("--cap-drop") : chown.index("--cap-drop") + 4
-        ]
-        assert chown[-4:] == ("--recursive", "2950:100", "/workspace", "/runtime")
-    else:
-        assert all((path.stat().st_uid, path.stat().st_gid) == (2950, 100) for path in (paths.workspace, paths.runtime))
+    assert not any("/bin/chown" in command for command in transcript[:prewarm_index])
 
 
 def _is_codex_inference(command: tuple[str, ...]) -> bool:
@@ -683,8 +677,8 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
     task = next(command for command in docker.commands if command[:3] == ("docker", "run", "-d"))
     mounts = [task[index + 1] for index, value in enumerate(task) if value == "--mount"]
     assert f"type=bind,src={config.tokensflow_binary.resolve().parent},dst=/tools/tokensflow-dir,readonly" in mounts
-    assert "HOME=/runtime/tokensflow-home" in task
-    assert "CODEX_HOME=/runtime/codex-home" in task
+    assert f"type=bind,src={paths.tokensflow_home},dst=/root" in mounts
+    assert not any(part.startswith(("HOME=", "CODEX_HOME=")) for part in task)
 
     host_whoami_index = next(
         index
@@ -713,8 +707,7 @@ def test_tokensflow_identity_gate_mounts_dynamic_binary_and_starts_one_arm_daemo
     assert task_network == "powercontext-eval-run-1"
     assert task_network != config.tokensflow_egress_network
     assert docker.container_networks["powercontext-eval-run-1-on"] == {task_network}
-    assert "HOME=/runtime/tokensflow-home" in daemon
-    assert "CODEX_HOME=/runtime/codex-home" in daemon
+    assert not any(part.startswith(("HOME=", "CODEX_HOME=")) for part in daemon)
     assert "evaluation-daemon.pid" in " ".join(daemon)
     assert "evaluation-daemon.log" in " ".join(daemon)
     readiness = next(
@@ -814,7 +807,7 @@ def test_durable_handoff_survives_disconnect_failure_without_local_container_cle
     assert ("docker", "rm", "-f", registrations[0].container_name) not in docker.commands
 
 
-def test_failed_handoff_registration_cleans_locally_without_an_untracked_container(tmp_path: Path) -> None:
+def test_failed_handoff_registration_retains_container_for_diagnosis(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     config = sut_config(tmp_path)
     config.codex_binary.write_text("binary")
@@ -833,8 +826,8 @@ def test_failed_handoff_registration_cleans_locally_without_an_untracked_contain
             ArtifactStore(paths.result_root),
         )
 
-    assert ("docker", "rm", "-f", "powercontext-eval-run-1-off") in docker.commands
-    assert not (paths.runtime.parent / "evaluation-control/tokensflow-wrapper").exists()
+    assert ("docker", "rm", "-f", "powercontext-eval-run-1-off") not in docker.commands
+    assert (paths.runtime.parent / "evaluation-control/tokensflow-wrapper").exists()
 
 
 def test_tokensflow_path_wrapper_clears_only_proxy_environment_and_preserves_arguments(tmp_path: Path) -> None:
@@ -995,7 +988,7 @@ def test_tokensflow_dynamic_environment_reaches_every_lifecycle_command_without_
     assert profile not in serialized_container_argv
     assert blocked not in serialized_container_argv
     assert "TOKENSFLOW_ACCESS_TOKEN" not in serialized_container_argv
-    assert "HOME=/runtime/tokensflow-home" in container_argv
+    assert not any(part.startswith(("HOME=", "CODEX_HOME=")) for part in container_argv)
     assert "POWERCONTEXT_EVAL_TOKENSFLOW_REAL_BINARY=/tools/tokensflow-dir/tokensflow" in container_argv
     assert "HTTP_PROXY=http://172.29.0.1:17890" in container_argv
 
@@ -1884,7 +1877,7 @@ def test_tokensflow_arm_home_path_validation_is_a_sanitized_infrastructure_error
 
 
 @pytest.mark.parametrize("phase", ["capture", "detached-exec", "readiness"])
-def test_tokensflow_command_failures_are_sanitized_block_codex_and_cleanup(
+def test_tokensflow_command_failures_are_sanitized_block_codex_and_retain_container(
     tmp_path: Path,
     phase: str,
 ) -> None:
@@ -1958,7 +1951,7 @@ def test_tokensflow_command_failures_are_sanitized_block_codex_and_cleanup(
     assert docker.tokensflow_secrets
     assert all(secret in variants for variants in docker.tokensflow_secrets)
     assert not any(_is_codex_inference(command) for command in docker.commands)
-    assert ("docker", "rm", "-f", "powercontext-eval-run-1-on") in docker.commands
+    assert ("docker", "rm", "-f", "powercontext-eval-run-1-on") not in docker.commands
     retained = b"".join(path.read_bytes() for path in paths.result_root.rglob("*") if path.is_file())
     assert secret.encode() not in retained
 
@@ -2257,7 +2250,7 @@ def test_pair_reuses_one_relay_and_network_and_runs_off_then_on(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("fail_at", ["run", "exec", "evidence"])
-def test_sut_faults_clean_up_only_exact_owned_resources(tmp_path: Path, fail_at: str) -> None:
+def test_sut_faults_retain_started_infrastructure_for_diagnosis(tmp_path: Path, fail_at: str) -> None:
     paths = make_paths(tmp_path)
     docker = TranscriptDocker(fail_at=fail_at)
     config = sut_config(tmp_path)
@@ -2269,9 +2262,8 @@ def test_sut_faults_clean_up_only_exact_owned_resources(tmp_path: Path, fail_at:
             config, Arm.ON, paths, b"prompt", ArtifactStore(paths.result_root)
         )
 
-    if fail_at != "run":
-        assert ("docker", "rm", "-f", "powercontext-eval-run-1-on") in docker.commands
-    assert ("docker", "network", "rm", "powercontext-eval-run-1") in docker.commands
+    assert ("docker", "rm", "-f", "powercontext-eval-run-1-on") not in docker.commands
+    assert ("docker", "network", "rm", "powercontext-eval-run-1") not in docker.commands
     assert not any("unowned" in part for command in docker.commands for part in command)
 
 
@@ -2790,7 +2782,7 @@ def test_managed_python_is_kept_in_the_writable_arm_runtime(tmp_path: Path) -> N
     assert all("UV_PYTHON_INSTALL_DIR=/runtime/uv-python" in command for command in uv_consumers)
 
 
-def test_network_cleanup_survives_relay_stop_failure(tmp_path: Path) -> None:
+def test_network_is_retained_when_relay_stop_fails(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     config = sut_config(tmp_path)
     docker = TranscriptDocker()
@@ -2803,4 +2795,4 @@ def test_network_cleanup_survives_relay_stop_failure(tmp_path: Path) -> None:
         DockerSut(docker, relay_factory=BrokenStopRelay).run_arm(
             config, Arm.ON, paths, b"prompt", ArtifactStore(paths.result_root)
         )
-    assert ("docker", "network", "rm", "powercontext-eval-run-1") in docker.commands
+    assert ("docker", "network", "rm", "powercontext-eval-run-1") not in docker.commands
