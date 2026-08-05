@@ -135,7 +135,7 @@ class TokensFlowFinalizationCreate:
             if path.is_absolute() or not path.parts or ".." in path.parts or "\x00" in value:
                 raise ValueError("TokensFlow finalization path is unsafe")
         if (
-            not self.daemon_pid_file.startswith("/runtime/")
+            not self.daemon_pid_file.startswith(("/runtime/", "/root/"))
             or ".." in Path(self.daemon_pid_file).parts
             or "\x00" in self.daemon_pid_file
         ):

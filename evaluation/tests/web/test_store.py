@@ -131,6 +131,22 @@ def test_tokensflow_finalization_registration_is_unique_and_deadline_is_immutabl
     assert first.evidence_bytes == 123
 
 
+def test_tokensflow_finalization_accepts_native_root_daemon_pid_file(store: TaskStore) -> None:
+    task_id, attempt_id = _queued_task_with_attempt(store, "finalization-root-home")
+    create = finalization_create(task_id, attempt_id)
+    root_create = TokensFlowFinalizationCreate(
+        **{
+            **create.__dict__,
+            "daemon_pid_file": "/root/.local/share/tokensflow/evaluation-daemon.pid",
+        }
+    )
+
+    registered, created = store.register_tokensflow_finalization(root_create, now=NOW, timeout_seconds=600)
+
+    assert created is True
+    assert registered.daemon_pid_file == "/root/.local/share/tokensflow/evaluation-daemon.pid"
+
+
 @pytest.mark.parametrize("timeout_seconds", [601, 3600])
 def test_tokensflow_finalization_registration_rejects_deadline_beyond_hard_limit(
     store: TaskStore,
