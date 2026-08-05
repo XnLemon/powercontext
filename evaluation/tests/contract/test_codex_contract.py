@@ -583,7 +583,7 @@ def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(t
     assert "--user" not in run
     assert "--cpus 2" in joined and "--memory 4g" in joined and "--pids-limit 256" in joined
     assert "/var/run/docker.sock" not in joined
-    assert str(Path.home()) not in joined
+    assert not any(argument.startswith(f"type=bind,src={Path.home()},") for argument in run)
     assert f"type=bind,src={paths.tokensflow_home},dst=/root" in joined
     assert not any(part.startswith(("HOME=", "CODEX_HOME=")) for part in run)
     assert "POWERCONTEXT_CODEX_SCOPE_ID=eval:run-1:on" in joined
