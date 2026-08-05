@@ -62,6 +62,19 @@ _OPENLIBRARY_DYNAMIC_YEAR_PREFIX = (
     "openlibrary/catalog/add_book/tests/test_add_book.py::TestNormalizeImportRecord::"
     "test_future_publication_dates_are_deleted"
 )
+_NODEBB_DIGEST_TEST_PREFIX = (
+    "test/user.js | User Digest.getSubscribers should accurately build digest list given ACP default "
+)
+_NODEBB_BIG_ARRAY_TEST = (
+    "test/database.js | Test database test/database/sorted.js::Sorted Set methods "
+    "test/database/sorted.js::getSortedSetRange() should work with big arrays (length > 100)"
+)
+_NODEBB_LEGACY_TEST_NAME_REPLACEMENTS = {
+    f'{_NODEBB_DIGEST_TEST_PREFIX}"day': f'{_NODEBB_DIGEST_TEST_PREFIX}"day"',
+    f'{_NODEBB_DIGEST_TEST_PREFIX}"week': f'{_NODEBB_DIGEST_TEST_PREFIX}"week"',
+    f'{_NODEBB_DIGEST_TEST_PREFIX}"off': f'{_NODEBB_DIGEST_TEST_PREFIX}"off"',
+    _NODEBB_BIG_ARRAY_TEST: f"{_NODEBB_BIG_ARRAY_TEST} ",
+}
 
 
 class RunPhase(StrEnum):
@@ -377,8 +390,11 @@ def _evaluator_test_requirements(
             f"{_OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[{evaluation_year + 1}-False]"
         ),
     }
+    remapped_fail_to_pass = tuple(
+        _NODEBB_LEGACY_TEST_NAME_REPLACEMENTS.get(name, name) for name in instance.fail_to_pass
+    )
     remapped_pass_to_pass = tuple(replacements.get(name, name) for name in instance.pass_to_pass)
-    return instance.fail_to_pass, remapped_pass_to_pass
+    return remapped_fail_to_pass, remapped_pass_to_pass
 
 
 @dataclass(frozen=True)

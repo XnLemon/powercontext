@@ -44,6 +44,13 @@ OPENLIBRARY_DYNAMIC_YEAR_PREFIX = (
     "openlibrary/catalog/add_book/tests/test_add_book.py::TestNormalizeImportRecord::"
     "test_future_publication_dates_are_deleted"
 )
+NODEBB_DIGEST_TEST_PREFIX = (
+    "test/user.js | User Digest.getSubscribers should accurately build digest list given ACP default "
+)
+NODEBB_BIG_ARRAY_TEST = (
+    "test/database.js | Test database test/database/sorted.js::Sorted Set methods "
+    "test/database/sorted.js::getSortedSetRange() should work with big arrays (length > 100)"
+)
 IMAGE_ID = "sha256:" + "d" * 64
 ProcessCall = tuple[tuple[str, ...], dict[str, object]]
 EvaluatorCall = dict[str, object]
@@ -557,6 +564,31 @@ def test_openlibrary_dynamic_year_reconciliation_only_rewrites_exact_legacy_node
         f"{OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[2043-False]",
         f"{OPENLIBRARY_DYNAMIC_YEAR_PREFIX}[2026-false]",
     )
+
+
+def test_nodebb_legacy_test_name_reconciliation_only_rewrites_exact_names() -> None:
+    raw = _instance().official_row()
+    raw["FAIL_TO_PASS"] = [
+        f'{NODEBB_DIGEST_TEST_PREFIX}"day',
+        f'{NODEBB_DIGEST_TEST_PREFIX}"week',
+        f'{NODEBB_DIGEST_TEST_PREFIX}"off',
+        NODEBB_BIG_ARRAY_TEST,
+        f'{NODEBB_DIGEST_TEST_PREFIX}"day-extra',
+        f"{NODEBB_BIG_ARRAY_TEST} extra",
+    ]
+    instance = SweBenchProInstance.from_public_raw(raw)
+
+    required_fail_to_pass, required_pass_to_pass = _evaluator_test_requirements(instance, evaluation_year=2042)
+
+    assert required_fail_to_pass == (
+        f'{NODEBB_DIGEST_TEST_PREFIX}"day"',
+        f'{NODEBB_DIGEST_TEST_PREFIX}"week"',
+        f'{NODEBB_DIGEST_TEST_PREFIX}"off"',
+        f"{NODEBB_BIG_ARRAY_TEST} ",
+        f'{NODEBB_DIGEST_TEST_PREFIX}"day-extra',
+        f"{NODEBB_BIG_ARRAY_TEST} extra",
+    )
+    assert required_pass_to_pass == instance.pass_to_pass
 
 
 def test_runner_removes_a_task_image_imported_for_a_completed_run(
