@@ -24,7 +24,7 @@ from powercontext_eval.benchmarks.swebench_pro.evaluator import (
     OfficialResultError,
     TestGroupResult,
 )
-from powercontext_eval.benchmarks.swebench_pro.prediction import BinaryPatchError, encode_predictions
+from powercontext_eval.benchmarks.swebench_pro.prediction import encode_predictions
 from powercontext_eval.powercontext_sut import LOOPBACK_NO_PROXY, ProxyRelayConfig
 from powercontext_eval.process import CommandResult, ProcessRunner
 
@@ -116,9 +116,10 @@ def test_prediction_is_official_json_array_and_preserves_patch_bytes() -> None:
 
 
 @pytest.mark.parametrize("marker", ["GIT binary patch", "Binary files a/x and b/x differ"])
-def test_prediction_rejects_binary_patch(marker: str) -> None:
-    with pytest.raises(BinaryPatchError):
-        encode_predictions(INSTANCE_ID, f"diff --git a/x b/x\n{marker}\n", "codex-0.145.0")
+def test_prediction_preserves_binary_patch(marker: str) -> None:
+    patch = f"diff --git a/x b/x\n{marker}\n"
+    encoded = encode_predictions(INSTANCE_ID, patch, "codex-0.145.0")
+    assert json.loads(encoded) == [{"instance_id": INSTANCE_ID, "patch": patch, "prefix": "codex-0.145.0"}]
 
 
 def test_gold_failure_prevents_arm_factory_from_being_called() -> None:

@@ -18,8 +18,6 @@ def encode_predictions(instance_id: str, patch: str, prefix: str) -> str:
         raise ValueError("Prediction identity and prefix must be non-empty strings")
     if not isinstance(patch, str):
         raise TypeError("Patch must be text")
-    if "GIT binary patch" in patch or ("Binary files " in patch and " differ" in patch):
-        raise BinaryPatchError("Binary patches are outside the MVP contract")
     return json.dumps(
         [{"instance_id": instance_id, "patch": patch, "prefix": prefix}],
         ensure_ascii=False,
