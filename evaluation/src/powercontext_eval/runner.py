@@ -89,6 +89,21 @@ _NODEBB_LEGACY_TEST_NAME_REPLACEMENTS = {
 }
 _SOURCE595_LEGACY_CACHE_INVALID_TEST = 'test/units/galaxy/test_api.py::test_cache_invalid_cache_content[{"de'
 _SOURCE595_PARSED_CACHE_INVALID_TEST = f'{_SOURCE595_LEGACY_CACHE_INVALID_TEST}"'
+_SOURCE621_INSTANCE_ID = (
+    "instance_future-architect__vuls-bff6b7552370b55ff76d474860eead4ab5de785a-v1151a6325649aaf997cd541ebe533b53fddf1b07"
+)
+_SOURCE621_LEGACY_TEST_NAMES = (
+    'Test_redhatBase_parseUpdatablePacksLine/centos_7.0:_"zlib"_"0"_"1.2.7"_"17.el7"_"rhui-REGION-rhel-server-releases',
+    (
+        'Test_redhatBase_parseUpdatablePacksLine/centos_7.0:_"shadow-utils"_"2"_"4.1.5.1_24.el7"_'
+        '"rhui-REGION-rhel-server-releases'
+    ),
+    (
+        'Test_redhatBase_parseUpdatablePacksLine/amazon_2023:_Is_this_ok_[y/N]:_"dnf"_"0"_"4.14.0"_'
+        '"1.amzn2023.0.6"_"amazonlinux'
+    ),
+)
+_SOURCE621_TEST_NAME_REPLACEMENTS = {name: f'{name}"' for name in _SOURCE621_LEGACY_TEST_NAMES}
 
 
 class RunPhase(StrEnum):
@@ -431,6 +446,10 @@ def _evaluator_test_requirements(
         remapped_fail_to_pass = tuple(
             _SOURCE595_PARSED_CACHE_INVALID_TEST if name == _SOURCE595_LEGACY_CACHE_INVALID_TEST else name
             for name in remapped_fail_to_pass
+        )
+    if instance.instance_id == _SOURCE621_INSTANCE_ID:
+        remapped_fail_to_pass = tuple(
+            _SOURCE621_TEST_NAME_REPLACEMENTS.get(name, name) for name in remapped_fail_to_pass
         )
     remapped_pass_to_pass = tuple(replacements.get(name, name) for name in instance.pass_to_pass)
     return remapped_fail_to_pass, remapped_pass_to_pass

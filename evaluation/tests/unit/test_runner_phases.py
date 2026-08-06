@@ -60,6 +60,20 @@ SOURCE595_SELECTED_TEST_FILES = (
 SOURCE595_EFFECTIVE_TEST_FILES = '["test/units/galaxy/test_api.py"]'
 SOURCE595_LEGACY_CACHE_INVALID_TEST = 'test/units/galaxy/test_api.py::test_cache_invalid_cache_content[{"de'
 SOURCE595_PARSED_CACHE_INVALID_TEST = f'{SOURCE595_LEGACY_CACHE_INVALID_TEST}"'
+SOURCE621_INSTANCE_ID = (
+    "instance_future-architect__vuls-bff6b7552370b55ff76d474860eead4ab5de785a-v1151a6325649aaf997cd541ebe533b53fddf1b07"
+)
+SOURCE621_LEGACY_TEST_NAMES = (
+    'Test_redhatBase_parseUpdatablePacksLine/centos_7.0:_"zlib"_"0"_"1.2.7"_"17.el7"_"rhui-REGION-rhel-server-releases',
+    (
+        'Test_redhatBase_parseUpdatablePacksLine/centos_7.0:_"shadow-utils"_"2"_"4.1.5.1_24.el7"_'
+        '"rhui-REGION-rhel-server-releases'
+    ),
+    (
+        'Test_redhatBase_parseUpdatablePacksLine/amazon_2023:_Is_this_ok_[y/N]:_"dnf"_"0"_"4.14.0"_'
+        '"1.amzn2023.0.6"_"amazonlinux'
+    ),
+)
 OPENLIBRARY_DYNAMIC_YEAR_PREFIX = (
     "openlibrary/catalog/add_book/tests/test_add_book.py::TestNormalizeImportRecord::"
     "test_future_publication_dates_are_deleted"
@@ -712,6 +726,29 @@ def test_source595_reconciles_only_the_exact_legacy_cache_invalid_node_id() -> N
     assert required_pass_to_pass == instance.pass_to_pass
 
     raw["instance_id"] = f"{SOURCE595_INSTANCE_ID}-other"
+    other_instance = SweBenchProInstance.from_public_raw(raw)
+    other_fail_to_pass, _other_pass_to_pass = _evaluator_test_requirements(other_instance, evaluation_year=2042)
+    assert other_fail_to_pass == tuple(raw["FAIL_TO_PASS"])
+
+
+def test_source621_reconciles_only_the_exact_legacy_go_subtest_names() -> None:
+    raw = _instance().official_row()
+    raw["instance_id"] = SOURCE621_INSTANCE_ID
+    raw["FAIL_TO_PASS"] = [
+        *SOURCE621_LEGACY_TEST_NAMES,
+        f"{SOURCE621_LEGACY_TEST_NAMES[0]}-extra",
+    ]
+    instance = SweBenchProInstance.from_public_raw(raw)
+
+    required_fail_to_pass, required_pass_to_pass = _evaluator_test_requirements(instance, evaluation_year=2042)
+
+    assert required_fail_to_pass == (
+        *(f'{name}"' for name in SOURCE621_LEGACY_TEST_NAMES),
+        f"{SOURCE621_LEGACY_TEST_NAMES[0]}-extra",
+    )
+    assert required_pass_to_pass == instance.pass_to_pass
+
+    raw["instance_id"] = f"{SOURCE621_INSTANCE_ID}-other"
     other_instance = SweBenchProInstance.from_public_raw(raw)
     other_fail_to_pass, _other_pass_to_pass = _evaluator_test_requirements(other_instance, evaluation_year=2042)
     assert other_fail_to_pass == tuple(raw["FAIL_TO_PASS"])
