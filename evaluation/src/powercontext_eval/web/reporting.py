@@ -294,6 +294,7 @@ def load_report(run_dir: Path, run_root: Path | None = None) -> ReportResponse:
             on=_arm_response("on", bundle.on),
             comparison=_comparisons(bundle.off, bundle.on),
             evidence=EvidenceResponse(off=off_evidence, on=on_evidence),
+            gold_validation=bundle.gold_validation,
             revisions=bundle.revisions,
             configuration=bundle.configuration,
             generated_at=datetime.fromtimestamp(report_metadata.st_mtime, tz=UTC),

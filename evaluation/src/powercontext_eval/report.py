@@ -12,6 +12,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic_core import PydanticSerializationError
 
 from powercontext_eval.artifacts import ArmState
+from powercontext_eval.benchmarks.swebench_pro.gold_overrides import (
+    SOURCE559_DATASET_PATCH_SHA256,
+    SOURCE559_INSTANCE_ID,
+    SOURCE559_REFERENCE_DATASET,
+    SOURCE559_REFERENCE_FILE_OID,
+    SOURCE559_REFERENCE_PATCH_SHA256,
+    SOURCE559_REFERENCE_REVISION,
+)
 
 
 class MetricSet(BaseModel):
@@ -79,6 +87,54 @@ class ArmReport(BaseModel):
         return value
 
 
+class GoldValidationAudit(BaseModel):
+    """Independent provenance record for the Gold validation patch."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    instance_id: str = Field(min_length=1, max_length=300)
+    mode: Literal["dataset_patch", "verified_override"]
+    dataset_patch_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    validation_patch_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dataset_patch_status: Literal["unverified", "known_failed"]
+    reference_validation_status: Literal["not_applicable", "passed"]
+    attempt_gold_validation_status: Literal["pending", "passed", "failed"]
+    source_dataset: str | None = None
+    source_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    source_file_oid: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    source_kind: Literal["verified_reference_submission"] | None = None
+
+    @model_validator(mode="after")
+    def validate_provenance(self) -> Self:
+        if self.mode == "dataset_patch":
+            if self.validation_patch_sha256 != self.dataset_patch_sha256:
+                raise ValueError("Dataset Gold validation must use the dataset patch")
+            if self.dataset_patch_status != "unverified" or self.reference_validation_status != "not_applicable":
+                raise ValueError("Dataset Gold validation provenance is invalid")
+            if any(
+                value is not None
+                for value in (self.source_dataset, self.source_revision, self.source_file_oid, self.source_kind)
+            ):
+                raise ValueError("Dataset Gold validation cannot contain reference provenance")
+        else:
+            if self.dataset_patch_status != "known_failed" or self.reference_validation_status != "passed":
+                raise ValueError("Gold override validation provenance is invalid")
+            if not all(
+                value is not None
+                for value in (self.source_dataset, self.source_revision, self.source_file_oid, self.source_kind)
+            ):
+                raise ValueError("Gold override validation requires complete reference provenance")
+            if (
+                self.dataset_patch_sha256 != SOURCE559_DATASET_PATCH_SHA256
+                or self.validation_patch_sha256 != SOURCE559_REFERENCE_PATCH_SHA256
+                or self.source_dataset != SOURCE559_REFERENCE_DATASET
+                or self.source_revision != SOURCE559_REFERENCE_REVISION
+                or self.source_file_oid != SOURCE559_REFERENCE_FILE_OID
+            ):
+                raise ValueError("Gold override provenance does not match the pinned reference")
+        return self
+
+
 class ReportBundle(BaseModel):
     """Complete, side-effect-free input to report rendering."""
 
@@ -89,6 +145,25 @@ class ReportBundle(BaseModel):
     configuration: Mapping[str, str]
     off: ArmReport
     on: ArmReport
+    gold_validation: GoldValidationAudit | None = None
+
+    @model_validator(mode="after")
+    def validate_gold_binding(self) -> Self:
+        instance_id = self.configuration.get("instance")
+        audit = self.gold_validation
+        if audit is not None and audit.attempt_gold_validation_status != "passed":
+            raise ValueError("Final reports require successful Gold validation")
+        if instance_id == SOURCE559_INSTANCE_ID:
+            if (
+                audit is None
+                or audit.instance_id != instance_id
+                or audit.mode != "verified_override"
+                or audit.attempt_gold_validation_status != "passed"
+            ):
+                raise ValueError("source559 reports require the verified Gold override audit")
+        elif audit is not None and (audit.instance_id != instance_id or audit.mode == "verified_override"):
+            raise ValueError("Gold validation audit is not bound to the report instance")
+        return self
 
     @field_validator("revisions", "configuration")
     @classmethod
@@ -200,6 +275,14 @@ def _arm_section(label: str, arm: ArmReport) -> list[str]:
     ]
 
 
+def _gold_validation_section(audit: GoldValidationAudit) -> list[str]:
+    values = audit.model_dump(mode="python")
+    lines = ["## Gold validation audit", "", "| Field | Value |", "| --- | --- |"]
+    lines.extend(f"| {_cell(key)} | {_cell(value)} |" for key, value in values.items())
+    lines.append("")
+    return lines
+
+
 def _comparison(bundle: ReportBundle) -> list[str]:
     lines = ["## Comparison", ""]
     comparable_states = {ArmState.TREATMENT_VALIDATED, ArmState.REPORTED}
@@ -255,6 +338,11 @@ def _validated_bundle(bundle: ReportBundle) -> ReportBundle:
             for group in (model.fail_to_pass, model.pass_to_pass):
                 if type(group) is not TestGroupReport or set(group.__dict__) != set(TestGroupReport.model_fields):
                     raise ValueError
+        if bundle.gold_validation is not None and (
+            type(bundle.gold_validation) is not GoldValidationAudit
+            or set(bundle.gold_validation.__dict__) != set(GoldValidationAudit.model_fields)
+        ):
+            raise ValueError
         serialized = bundle.model_dump(mode="python", round_trip=True, warnings="none")
         return ReportBundle.model_validate(serialized, strict=True)
     except (AttributeError, PydanticSerializationError, TypeError, ValueError):
@@ -270,6 +358,8 @@ def render_report(bundle: ReportBundle) -> str:
     lines = [f"# {_cell(bundle.title)}", ""]
     lines.extend(_mapping_table("Resolved revisions", bundle.revisions))
     lines.extend(_mapping_table("Configuration", bundle.configuration))
+    if bundle.gold_validation is not None:
+        lines.extend(_gold_validation_section(bundle.gold_validation))
     lines.extend(_arm_section("OFF", bundle.off))
     lines.extend(_arm_section("ON", bundle.on))
     lines.extend(_comparison(bundle))

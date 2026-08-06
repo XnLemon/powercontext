@@ -216,6 +216,20 @@ export interface EvidenceResponse {
   on: TreatmentEvidence;
 }
 
+export interface GoldValidationAudit {
+  instance_id: string;
+  mode: "dataset_patch" | "verified_override";
+  dataset_patch_sha256: string;
+  validation_patch_sha256: string;
+  dataset_patch_status: "unverified" | "known_failed";
+  reference_validation_status: "not_applicable" | "passed";
+  attempt_gold_validation_status: "pending" | "passed" | "failed";
+  source_dataset: string | null;
+  source_revision: string | null;
+  source_file_oid: string | null;
+  source_kind: "verified_reference_submission" | null;
+}
+
 export interface ReportResponse {
   task_id: string;
   acceptance_valid: boolean;
@@ -223,6 +237,7 @@ export interface ReportResponse {
   on: ArmResponse & { arm: "on" };
   comparison: ComparisonResponse;
   evidence: EvidenceResponse;
+  gold_validation?: GoldValidationAudit | null;
   revisions: Record<string, string>;
   configuration: Record<string, string>;
   generated_at: string;

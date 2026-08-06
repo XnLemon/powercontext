@@ -67,6 +67,29 @@ describe("ReportView", () => {
     expect(screen.queryByText(/生命周期未确认|官方结果未确认|处理证据未确认/)).not.toBeInTheDocument();
   });
 
+  it("renders the nullable Gold validation audit when present", async () => {
+    const audited: ReportResponse = {
+      ...report,
+      gold_validation: {
+        instance_id: "instance_gravitational__teleport-c335534e02de143508ebebc7341021d7f8656e8f",
+        mode: "verified_override",
+        dataset_patch_sha256: "a".repeat(64),
+        validation_patch_sha256: "b".repeat(64),
+        dataset_patch_status: "known_failed",
+        reference_validation_status: "passed",
+        attempt_gold_validation_status: "passed",
+        source_dataset: "livesweagent/claude-sonnet-4-5_swebench_pro_traj",
+        source_revision: "c".repeat(40),
+        source_file_oid: "d".repeat(40),
+        source_kind: "verified_reference_submission",
+      },
+    };
+    render(<ReportView api={apiStub({ getReport: vi.fn().mockResolvedValue(audited) })} taskId="audited" />);
+    expect(await screen.findByText("Gold 校验审计")).toBeVisible();
+    expect(screen.getByText("verified_override")).toBeVisible();
+    expect(screen.getAllByText("passed")).toHaveLength(2);
+  });
+
   it("shows safe loading, API error, and retry states", async () => {
     const first = deferred<ReportResponse>();
     const getReport = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValueOnce(report);

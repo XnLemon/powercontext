@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_valid
 from powercontext_eval.artifacts import ArmState
 from powercontext_eval.codex import DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT, is_safe_codex_model
 from powercontext_eval.models import PowerContextRef
+from powercontext_eval.report import GoldValidationAudit
 from powercontext_eval.runner import INSTANCE_ID
 
 
@@ -330,6 +331,7 @@ class ReportResponse(FrozenModel):
     on: ArmResponse
     comparison: ComparisonResponse
     evidence: EvidenceResponse
+    gold_validation: GoldValidationAudit | None = None
     revisions: Mapping[str, str]
     configuration: Mapping[str, str]
     generated_at: datetime

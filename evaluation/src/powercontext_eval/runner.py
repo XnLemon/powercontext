@@ -23,6 +23,7 @@ from powercontext_eval.benchmarks.swebench_pro.adapter import (
     SweBenchProInstance,
 )
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluation, OfficialEvaluator
+from powercontext_eval.benchmarks.swebench_pro.gold_overrides import select_gold_validation
 from powercontext_eval.benchmarks.swebench_pro.prediction import encode_predictions
 from powercontext_eval.codex import DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT, is_safe_codex_model
 from powercontext_eval.context_trace import write_context_trace
@@ -40,7 +41,14 @@ from powercontext_eval.powercontext_sut import (
     loopback_proxy_environment,
 )
 from powercontext_eval.process import ProcessRunner
-from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, TestGroupReport, render_report
+from powercontext_eval.report import (
+    ArmReport,
+    GoldValidationAudit,
+    MetricSet,
+    ReportBundle,
+    TestGroupReport,
+    render_report,
+)
 from powercontext_eval.tokensflow import (
     TokensFlowFinalizationRegistrar,
     TokensFlowInfrastructureError,
@@ -234,15 +242,21 @@ def _run_swebench_pro_instance(
         python_executable=os.fspath(config.harness_python),
         proxy=ProxyRelayConfig(config.proxy_url),
     )
+    gold_selection = select_gold_validation(instance.instance_id, instance.patch)
+    gold_audit = GoldValidationAudit.model_validate(gold_selection.audit, strict=True)
+    run_store.create_json("gold/validation.json", gold_audit.model_dump(mode="json"))
+    run_store.create_text(
+        "gold/original-predictions.json", encode_predictions(instance.instance_id, instance.patch, "gold")
+    )
     gold_prediction = run_store.create_text(
         "gold/predictions.json",
-        encode_predictions(instance.instance_id, instance.patch, "gold"),
+        encode_predictions(instance.instance_id, gold_selection.validation_patch, "gold"),
     )
     gold_patch_applied = _patch_applies(
         process,
         task_image_id=task_image_id,
         base_commit=instance.base_commit,
-        patch=instance.patch,
+        patch=gold_selection.validation_patch,
         cwd=layout.run_artifacts,
     )
     emit_phase(RunPhase.VALIDATING_GOLD)
@@ -256,6 +270,10 @@ def _run_swebench_pro_instance(
         required_pass_to_pass=required_pass_to_pass,
         patch_applied=gold_patch_applied,
     )
+    gold_audit = gold_audit.model_copy(
+        update={"attempt_gold_validation_status": "passed" if gold.resolved else "failed"}
+    )
+    run_store.write_json("gold/validation.json", gold_audit.model_dump(mode="json"))
 
     def arms() -> tuple[OfficialEvaluation, OfficialEvaluation, Mapping[Arm, SutOutcome], dict[Arm, int]]:
         codex_secrets = auth_secret_variants(config.auth_json)
@@ -367,6 +385,7 @@ def _run_swebench_pro_instance(
         },
         off=_arm_report(Arm.OFF, off_eval, off_outcome, patch_sizes[Arm.OFF]),
         on=_arm_report(Arm.ON, on_eval, on_outcome, patch_sizes[Arm.ON]),
+        gold_validation=gold_audit,
     )
     rendered = render_report(report)
     if render_report(report) != rendered:

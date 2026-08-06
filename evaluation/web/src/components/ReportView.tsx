@@ -142,6 +142,25 @@ export function ReportView({ api, taskId }: ReportViewProps) {
         </dl>
       </section>
 
+      {report.gold_validation != null && (
+        <section className="report-section" aria-labelledby="gold-validation-heading">
+          <h3 id="gold-validation-heading">Gold 校验审计</h3>
+          <div className="metadata-group">
+            <dl className="metadata-list">
+              <div><dt>校验模式</dt><dd>{report.gold_validation.mode}</dd></div>
+              <div><dt>原始 Gold 状态</dt><dd>{report.gold_validation.dataset_patch_status}</dd></div>
+              <div><dt>参考补丁校验</dt><dd>{report.gold_validation.reference_validation_status}</dd></div>
+              <div><dt>本次 Gold 校验</dt><dd>{report.gold_validation.attempt_gold_validation_status}</dd></div>
+              <div><dt>原始补丁 SHA</dt><dd>{report.gold_validation.dataset_patch_sha256}</dd></div>
+              <div><dt>校验补丁 SHA</dt><dd>{report.gold_validation.validation_patch_sha256}</dd></div>
+              {report.gold_validation.source_dataset !== null && <div><dt>来源数据集</dt><dd>{report.gold_validation.source_dataset}</dd></div>}
+              {report.gold_validation.source_revision !== null && <div><dt>来源 revision</dt><dd>{report.gold_validation.source_revision}</dd></div>}
+              {report.gold_validation.source_file_oid !== null && <div><dt>来源文件 OID</dt><dd>{report.gold_validation.source_file_oid}</dd></div>}
+            </dl>
+          </div>
+        </section>
+      )}
+
       <a
         className="primary-link raw-report-link"
         href={`/api/tasks/${encodeURIComponent(taskId)}/report.md`}

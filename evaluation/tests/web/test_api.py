@@ -15,7 +15,15 @@ from starlette.requests import Request
 
 from powercontext_eval.artifacts import ArmState
 from powercontext_eval.benchmarks.swebench_pro.adapter import SweBenchProInstance
-from powercontext_eval.report import ArmReport, MetricSet, ReportBundle, TestGroupReport
+from powercontext_eval.benchmarks.swebench_pro.gold_overrides import (
+    SOURCE559_DATASET_PATCH_SHA256,
+    SOURCE559_INSTANCE_ID,
+    SOURCE559_REFERENCE_DATASET,
+    SOURCE559_REFERENCE_FILE_OID,
+    SOURCE559_REFERENCE_PATCH_SHA256,
+    SOURCE559_REFERENCE_REVISION,
+)
+from powercontext_eval.report import ArmReport, GoldValidationAudit, MetricSet, ReportBundle, TestGroupReport
 from powercontext_eval.web.api import TaskEventStream, create_app
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskCreate, TaskPhase, TaskRecord, TaskResult
@@ -980,7 +988,10 @@ def test_frontend_rejects_dist_outside_root_deploy(tmp_path: Path, config: WebCo
 class _BatchCatalog:
     instance_ids = tuple(f"instance_org__repo-{letter}" for letter in "abcde")
 
-    def __init__(self) -> None:
+    def __init__(self, instance_ids: tuple[str, ...] | None = None) -> None:
+        if instance_ids is not None:
+            self.instance_ids = instance_ids
+        labels = "abcde"[: len(self.instance_ids)]
         self.instances = {
             instance_id: SimpleNamespace(
                 instance_id=instance_id,
@@ -991,7 +1002,7 @@ class _BatchCatalog:
                 test_patch=f"diff --git a/test_{letter}.py b/test_{letter}.py\n",
                 selected_test_files_to_run=json.dumps([f"test_{letter}.py"]),
             )
-            for letter, instance_id in zip("abcde", self.instance_ids, strict=True)
+            for letter, instance_id in zip(labels, self.instance_ids, strict=True)
         }
 
     def require(self, instance_id: str) -> SweBenchProInstance:
@@ -1025,6 +1036,7 @@ def _write_batch_artifacts(
     on_resolved: bool,
     off_tokens: tuple[int, int],
     on_tokens: tuple[int, int],
+    gold_validation: GoldValidationAudit | None = None,
 ) -> None:
     run_dir = config.run_root / "runs" / task_id
     run_dir.mkdir(parents=True)
@@ -1063,6 +1075,7 @@ def _write_batch_artifacts(
         },
         off=arm("off", off_resolved, off_tokens),
         on=arm("on", on_resolved, on_tokens),
+        gold_validation=gold_validation,
     )
     (run_dir / "report.json").write_text(bundle.model_dump_json())
     for arm_name in ("off", "on"):
@@ -1554,6 +1567,86 @@ def test_batch_report_reconciles_resolution_pairs_failures_and_total_tokens(
     assert "patch_bytes" not in response.text
     assert "treatment_valid" not in response.text
     assert "elapsed" not in response.text
+
+
+def test_batch_report_mixes_legacy_and_source559_audited_reports_without_changing_aggregates(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    source559_audit = GoldValidationAudit(
+        instance_id=SOURCE559_INSTANCE_ID,
+        mode="verified_override",
+        dataset_patch_sha256=SOURCE559_DATASET_PATCH_SHA256,
+        validation_patch_sha256=SOURCE559_REFERENCE_PATCH_SHA256,
+        dataset_patch_status="known_failed",
+        reference_validation_status="passed",
+        attempt_gold_validation_status="passed",
+        source_dataset=SOURCE559_REFERENCE_DATASET,
+        source_revision=SOURCE559_REFERENCE_REVISION,
+        source_file_oid=SOURCE559_REFERENCE_FILE_OID,
+        source_kind="verified_reference_submission",
+    )
+    catalog = _BatchCatalog(("instance_org__repo-a", SOURCE559_INSTANCE_ID))
+    client = TestClient(create_app(config, store, catalog=catalog))
+    batch = client.post("/api/batches", json=_batch_payload("mixed-audit-report")).json()
+    children = store.list_batch_tasks(batch["batch_id"])
+    started = datetime.now(UTC) + timedelta(seconds=1)
+    outcomes = ((True, False, None), (False, True, source559_audit))
+    for index, (off_resolved, on_resolved, audit) in enumerate(outcomes):
+        claimed = store.claim_next("batch-worker", now=started + timedelta(seconds=index * 2))
+        assert claimed is not None and claimed.task_id == children[index].task_id
+        _write_batch_artifacts(
+            config,
+            claimed.task_id,
+            claimed.request.instance_id,
+            off_resolved=off_resolved,
+            on_resolved=on_resolved,
+            off_tokens=(100 + index, 10 + index),
+            on_tokens=(80 + index, 8 + index),
+            gold_validation=audit,
+        )
+        run_dir = config.run_root / "runs" / claimed.task_id
+        store.succeed(
+            claimed.task_id,
+            "batch-worker",
+            TaskResult(
+                artifact_dir=str(run_dir.relative_to(config.run_root)),
+                report_path=str((run_dir / "report.json").relative_to(config.run_root)),
+                off_resolved=off_resolved,
+                on_resolved=on_resolved,
+            ),
+            now=started + timedelta(seconds=index * 2 + 1),
+        )
+
+    report = client.get(f"/api/batches/{batch['batch_id']}/report")
+
+    assert report.status_code == 200
+    payload = report.json()
+    assert payload["total_tasks"] == payload["terminal_tasks"] == payload["comparable_pairs"] == 2
+    assert payload["off"] == {"resolved": 1, "total": 2, "rate_percent": 50.0}
+    assert payload["on"] == {"resolved": 1, "total": 2, "rate_percent": 50.0}
+    assert payload["resolution_rate_delta_points"] == 0.0
+    assert payload["pair_categories"] == {
+        "off_fail_on_pass": 1,
+        "off_pass_on_fail": 1,
+        "both_pass": 0,
+        "both_fail": 0,
+        "execution_failure": 0,
+    }
+    assert payload["tokens"]["input"] == {
+        "off": 201,
+        "on": 161,
+        "delta": -40,
+        "off_measured_tasks": 2,
+        "on_measured_tasks": 2,
+    }
+    assert payload["tokens"]["output"] == {
+        "off": 21,
+        "on": 17,
+        "delta": -4,
+        "off_measured_tasks": 2,
+        "on_measured_tasks": 2,
+    }
 
 
 def test_batch_preview_uses_only_complete_historical_pair_measurements(

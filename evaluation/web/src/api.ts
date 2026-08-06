@@ -292,6 +292,19 @@ const treatmentEvidenceSchema = z.strictObject({
   scope_id: z.string(),
   server_ready: z.boolean(),
 });
+const goldValidationAuditSchema = z.strictObject({
+  instance_id: z.string(),
+  mode: z.enum(["dataset_patch", "verified_override"]),
+  dataset_patch_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  validation_patch_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  dataset_patch_status: z.enum(["unverified", "known_failed"]),
+  reference_validation_status: z.enum(["not_applicable", "passed"]),
+  attempt_gold_validation_status: z.enum(["pending", "passed", "failed"]),
+  source_dataset: z.string().nullable(),
+  source_revision: z.string().regex(/^[0-9a-f]{40}$/).nullable(),
+  source_file_oid: z.string().regex(/^[0-9a-f]{40}$/).nullable(),
+  source_kind: z.literal("verified_reference_submission").nullable(),
+});
 const reportSchema = z.strictObject({
   task_id: z.string(),
   acceptance_valid: z.boolean(),
@@ -302,6 +315,7 @@ const reportSchema = z.strictObject({
     off: treatmentEvidenceSchema,
     on: treatmentEvidenceSchema,
   }),
+  gold_validation: goldValidationAuditSchema.nullable().optional(),
   revisions: z.record(z.string(), z.string()),
   configuration: z.record(z.string(), z.string()),
   generated_at: timestampSchema,

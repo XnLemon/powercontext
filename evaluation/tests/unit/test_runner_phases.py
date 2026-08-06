@@ -14,6 +14,16 @@ import pytest
 from powercontext_eval.artifacts import ArtifactStore, SecretDetected
 from powercontext_eval.benchmarks.swebench_pro.adapter import SweBenchProInstance
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluation
+from powercontext_eval.benchmarks.swebench_pro.gold_overrides import (
+    SOURCE559_DATASET_PATCH_SHA256,
+    SOURCE559_INSTANCE_ID,
+    SOURCE559_REFERENCE_DATASET,
+    SOURCE559_REFERENCE_FILE_OID,
+    SOURCE559_REFERENCE_PATCH,
+    SOURCE559_REFERENCE_PATCH_SHA256,
+    SOURCE559_REFERENCE_REVISION,
+    GoldValidationSelection,
+)
 from powercontext_eval.codex import CodexOutcome
 from powercontext_eval.errors import CommandFailed
 from powercontext_eval.models import Arm
@@ -496,6 +506,48 @@ def test_runner_uses_arbitrary_instance_prompt_image_and_base_commit(
             "official_evaluator",
         ]
     assert not any(call[0][:3] == ("docker", "image", "rm") for call in calls)
+
+
+def test_source559_gold_override_preserves_original_row_and_off_on_patches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = _instance().official_row()
+    raw["instance_id"] = SOURCE559_INSTANCE_ID
+    raw["patch"] = "original dataset Gold patch"
+    instance = SweBenchProInstance.from_public_raw(raw)
+    selection = GoldValidationSelection(
+        instance_id=SOURCE559_INSTANCE_ID,
+        mode="verified_override",
+        dataset_patch_sha256=SOURCE559_DATASET_PATCH_SHA256,
+        validation_patch=SOURCE559_REFERENCE_PATCH,
+        validation_patch_sha256=SOURCE559_REFERENCE_PATCH_SHA256,
+        dataset_patch_status="known_failed",
+        reference_validation_status="passed",
+        source_dataset=SOURCE559_REFERENCE_DATASET,
+        source_revision=SOURCE559_REFERENCE_REVISION,
+        source_file_oid=SOURCE559_REFERENCE_FILE_OID,
+        source_kind="verified_reference_submission",
+    )
+    monkeypatch.setattr("powercontext_eval.runner.select_gold_validation", lambda *_args: selection)
+    config, result, _observed = _run_with_fakes(tmp_path, monkeypatch, [], instance=instance)
+
+    run_root = config.root / "runs" / result.run_id
+    retained = json.loads((run_root / "instance.jsonl").read_text())
+    evaluator_row = json.loads((run_root / "evaluator-instance.jsonl").read_text())
+    assert retained == instance.official_row()
+    assert evaluator_row["patch"] == instance.patch
+    original_prediction = json.loads((run_root / "gold/original-predictions.json").read_text())[0]
+    gold_prediction = json.loads((run_root / "gold/predictions.json").read_text())[0]
+    assert original_prediction["patch"] == instance.patch
+    assert gold_prediction["patch"] == SOURCE559_REFERENCE_PATCH
+    for arm in (Arm.OFF, Arm.ON):
+        prediction = json.loads((run_root / "arms" / arm.value / "prediction.json").read_text())[0]
+        assert prediction["patch"] == "candidate patch"
+    validation = json.loads((run_root / "gold/validation.json").read_text())
+    assert validation["attempt_gold_validation_status"] == "passed"
+    report = ReportBundle.model_validate_json((run_root / "report.json").read_text(), strict=True)
+    assert report.gold_validation is not None
+    assert report.gold_validation.mode == "verified_override"
 
 
 def test_runner_reconciles_the_pinned_openlibrary_dynamic_year_test_ids(
