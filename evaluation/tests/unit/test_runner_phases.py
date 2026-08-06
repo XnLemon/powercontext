@@ -523,6 +523,7 @@ def test_source559_gold_override_preserves_original_row_and_off_on_patches(
         validation_patch_sha256=SOURCE559_REFERENCE_PATCH_SHA256,
         dataset_patch_status="known_failed",
         reference_validation_status="passed",
+        official_evaluation_transport="proxy_bypassed_for_test_isolation",
         source_dataset=SOURCE559_REFERENCE_DATASET,
         source_revision=SOURCE559_REFERENCE_REVISION,
         source_file_oid=SOURCE559_REFERENCE_FILE_OID,
@@ -548,6 +549,10 @@ def test_source559_gold_override_preserves_original_row_and_off_on_patches(
     report = ReportBundle.model_validate_json((run_root / "report.json").read_text(), strict=True)
     assert report.gold_validation is not None
     assert report.gold_validation.mode == "verified_override"
+    assert report.gold_validation.official_evaluation_transport == "proxy_bypassed_for_test_isolation"
+    initializations = cast(list[dict[str, object]], _observed["evaluator_initializations"])
+    assert len(initializations) == 1
+    assert initializations[0]["kwargs"] == {"python_executable": str(config.harness_python)}
 
 
 def test_runner_reconciles_the_pinned_openlibrary_dynamic_year_test_ids(

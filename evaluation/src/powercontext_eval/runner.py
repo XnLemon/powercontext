@@ -23,7 +23,10 @@ from powercontext_eval.benchmarks.swebench_pro.adapter import (
     SweBenchProInstance,
 )
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluation, OfficialEvaluator
-from powercontext_eval.benchmarks.swebench_pro.gold_overrides import select_gold_validation
+from powercontext_eval.benchmarks.swebench_pro.gold_overrides import (
+    OFFICIAL_EVALUATION_DOCKER_PROXY,
+    select_gold_validation,
+)
 from powercontext_eval.benchmarks.swebench_pro.prediction import encode_predictions
 from powercontext_eval.codex import DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT, is_safe_codex_model
 from powercontext_eval.context_trace import write_context_trace
@@ -237,12 +240,15 @@ def _run_swebench_pro_instance(
         json.dumps(evaluator_row, ensure_ascii=False, separators=(",", ":")) + "\n",
     )
 
-    evaluator = OfficialEvaluator(
-        process,
-        python_executable=os.fspath(config.harness_python),
-        proxy=ProxyRelayConfig(config.proxy_url),
-    )
     gold_selection = select_gold_validation(instance.instance_id, instance.patch)
+    if gold_selection.official_evaluation_transport == OFFICIAL_EVALUATION_DOCKER_PROXY:
+        evaluator = OfficialEvaluator(
+            process,
+            python_executable=os.fspath(config.harness_python),
+            proxy=ProxyRelayConfig(config.proxy_url),
+        )
+    else:
+        evaluator = OfficialEvaluator(process, python_executable=os.fspath(config.harness_python))
     gold_audit = GoldValidationAudit.model_validate(gold_selection.audit, strict=True)
     run_store.create_json("gold/validation.json", gold_audit.model_dump(mode="json"))
     run_store.create_text(

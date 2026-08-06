@@ -1581,6 +1581,7 @@ def test_batch_report_mixes_legacy_and_source559_audited_reports_without_changin
         dataset_patch_status="known_failed",
         reference_validation_status="passed",
         attempt_gold_validation_status="passed",
+        official_evaluation_transport="proxy_bypassed_for_test_isolation",
         source_dataset=SOURCE559_REFERENCE_DATASET,
         source_revision=SOURCE559_REFERENCE_REVISION,
         source_file_oid=SOURCE559_REFERENCE_FILE_OID,

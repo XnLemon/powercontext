@@ -13,6 +13,8 @@ from pydantic_core import PydanticSerializationError
 
 from powercontext_eval.artifacts import ArmState
 from powercontext_eval.benchmarks.swebench_pro.gold_overrides import (
+    OFFICIAL_EVALUATION_DOCKER_PROXY,
+    OFFICIAL_EVALUATION_PROXY_BYPASSED,
     SOURCE559_DATASET_PATCH_SHA256,
     SOURCE559_INSTANCE_ID,
     SOURCE559_REFERENCE_DATASET,
@@ -99,6 +101,9 @@ class GoldValidationAudit(BaseModel):
     dataset_patch_status: Literal["unverified", "known_failed"]
     reference_validation_status: Literal["not_applicable", "passed"]
     attempt_gold_validation_status: Literal["pending", "passed", "failed"]
+    official_evaluation_transport: Literal["docker_proxy", "proxy_bypassed_for_test_isolation"] = (
+        OFFICIAL_EVALUATION_DOCKER_PROXY
+    )
     source_dataset: str | None = None
     source_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     source_file_oid: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
@@ -107,6 +112,8 @@ class GoldValidationAudit(BaseModel):
     @model_validator(mode="after")
     def validate_provenance(self) -> Self:
         if self.mode == "dataset_patch":
+            if self.official_evaluation_transport != OFFICIAL_EVALUATION_DOCKER_PROXY:
+                raise ValueError("Dataset Gold validation must use the Docker proxy transport")
             if self.validation_patch_sha256 != self.dataset_patch_sha256:
                 raise ValueError("Dataset Gold validation must use the dataset patch")
             if self.dataset_patch_status != "unverified" or self.reference_validation_status != "not_applicable":
@@ -117,6 +124,8 @@ class GoldValidationAudit(BaseModel):
             ):
                 raise ValueError("Dataset Gold validation cannot contain reference provenance")
         else:
+            if self.official_evaluation_transport != OFFICIAL_EVALUATION_PROXY_BYPASSED:
+                raise ValueError("Gold override validation requires the audited proxy bypass")
             if self.dataset_patch_status != "known_failed" or self.reference_validation_status != "passed":
                 raise ValueError("Gold override validation provenance is invalid")
             if not all(

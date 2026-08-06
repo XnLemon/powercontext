@@ -15,7 +15,7 @@ from powercontext_eval.benchmarks.swebench_pro.gold_overrides import (
     GoldValidationOverrideError,
     select_gold_validation,
 )
-from powercontext_eval.report import ArmReport, GoldValidationAudit, ReportBundle
+from powercontext_eval.report import ArmReport, GoldValidationAudit, ReportBundle, render_report
 
 
 def _source559_dataset_patch() -> str:
@@ -27,7 +27,10 @@ SOURCE559_REAL_DATASET_PATCH = base64.b64decode(
 ).decode()
 
 
-def _source559_audit(status: str = "passed") -> GoldValidationAudit:
+def _source559_audit(
+    status: str = "passed",
+    official_evaluation_transport: str = "proxy_bypassed_for_test_isolation",
+) -> GoldValidationAudit:
     return GoldValidationAudit(
         instance_id=SOURCE559_INSTANCE_ID,
         mode="verified_override",
@@ -36,6 +39,7 @@ def _source559_audit(status: str = "passed") -> GoldValidationAudit:
         dataset_patch_status="known_failed",
         reference_validation_status="passed",
         attempt_gold_validation_status=status,
+        official_evaluation_transport=official_evaluation_transport,
         source_dataset="livesweagent/claude-sonnet-4-5_swebench_pro_traj",
         source_revision="e9c3cf3611956d75ad8a78b9cce5b4a524828e22",
         source_file_oid="7d910a550fc80f16647b795e2ab23fa032ac91fa",
@@ -89,6 +93,7 @@ def test_exact_instance_selects_override_and_audits_pending_before_attempt(monke
     assert selection.validation_patch == SOURCE559_REFERENCE_PATCH
     assert selection.audit["attempt_gold_validation_status"] == "pending"
     assert selection.audit["dataset_patch_sha256"] == hashlib.sha256(original.encode()).hexdigest()
+    assert selection.audit["official_evaluation_transport"] == "proxy_bypassed_for_test_isolation"
 
 
 def test_hash_drift_fails_closed() -> None:
@@ -102,6 +107,16 @@ def test_other_instances_keep_original_patch_and_have_no_reference_provenance() 
     assert selection.mode == "dataset_patch"
     assert selection.audit["source_dataset"] is None
     assert selection.audit["attempt_gold_validation_status"] == "pending"
+    assert selection.audit["official_evaluation_transport"] == "docker_proxy"
+
+
+def test_legacy_ordinary_audit_defaults_to_docker_proxy() -> None:
+    data = select_gold_validation("instance_other", "ordinary patch").audit
+    data.pop("official_evaluation_transport", None)
+
+    audit = GoldValidationAudit(**data)
+
+    assert audit.official_evaluation_transport == "docker_proxy"
 
 
 @pytest.mark.parametrize("status", ["pending", "failed"])
@@ -121,6 +136,7 @@ def test_source559_report_requires_successful_verified_audit(status: str) -> Non
         ReportBundle(**base, gold_validation=_source559_audit(status=status))
     report = ReportBundle(**base, gold_validation=_source559_audit())
     assert report.gold_validation is not None
+    assert "| official_evaluation_transport | proxy_bypassed_for_test_isolation |" in render_report(report)
 
 
 def test_source559_report_rejects_tampered_audit() -> None:
@@ -137,6 +153,8 @@ def test_source559_report_rejects_tampered_audit() -> None:
     data["source_file_oid"] = "0" * 40
     with pytest.raises(ValidationError):
         ReportBundle(**base, gold_validation=data)
+    with pytest.raises(ValidationError):
+        ReportBundle(**base, gold_validation=_source559_audit(official_evaluation_transport="docker_proxy"))
 
 
 @pytest.mark.parametrize("status", ["pending", "failed"])

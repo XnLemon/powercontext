@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from typing import Literal
 
 SOURCE559_INSTANCE_ID = "instance_gravitational__teleport-c335534e02de143508ebebc7341021d7f8656e8f"
 SOURCE559_DATASET_PATCH_SHA256 = "de187c18609f9a6fdedca6fb8b0fb2beb381bca169f02fa21550f67072e4f464"
@@ -11,6 +12,9 @@ SOURCE559_REFERENCE_PATCH_SHA256 = "f4c611735a6dc7731d84bd4c01eacacf67bf1f93ef02
 SOURCE559_REFERENCE_DATASET = "livesweagent/claude-sonnet-4-5_swebench_pro_traj"
 SOURCE559_REFERENCE_REVISION = "e9c3cf3611956d75ad8a78b9cce5b4a524828e22"
 SOURCE559_REFERENCE_FILE_OID = "7d910a550fc80f16647b795e2ab23fa032ac91fa"
+OFFICIAL_EVALUATION_DOCKER_PROXY = "docker_proxy"
+OFFICIAL_EVALUATION_PROXY_BYPASSED = "proxy_bypassed_for_test_isolation"
+OfficialEvaluationTransport = Literal["docker_proxy", "proxy_bypassed_for_test_isolation"]
 
 # This patch is embedded to make the override deterministic and offline.
 SOURCE559_REFERENCE_PATCH = """diff --git a/lib/client/keyagent.go b/lib/client/keyagent.go
@@ -141,6 +145,7 @@ class GoldValidationSelection:
     dataset_patch_status: str
     reference_validation_status: str
     attempt_gold_validation_status: str = "pending"
+    official_evaluation_transport: OfficialEvaluationTransport = OFFICIAL_EVALUATION_DOCKER_PROXY
     source_dataset: str | None = None
     source_revision: str | None = None
     source_file_oid: str | None = None
@@ -156,6 +161,7 @@ class GoldValidationSelection:
             "dataset_patch_status": self.dataset_patch_status,
             "reference_validation_status": self.reference_validation_status,
             "attempt_gold_validation_status": self.attempt_gold_validation_status,
+            "official_evaluation_transport": self.official_evaluation_transport,
             "source_dataset": self.source_dataset,
             "source_revision": self.source_revision,
             "source_file_oid": self.source_file_oid,
@@ -200,6 +206,7 @@ def select_gold_validation(instance_id: str, dataset_patch: str) -> GoldValidati
         validation_patch_sha256=reference_hash,
         dataset_patch_status="known_failed",
         reference_validation_status="passed",
+        official_evaluation_transport=OFFICIAL_EVALUATION_PROXY_BYPASSED,
         source_dataset=SOURCE559_REFERENCE_DATASET,
         source_revision=SOURCE559_REFERENCE_REVISION,
         source_file_oid=SOURCE559_REFERENCE_FILE_OID,
