@@ -21,6 +21,8 @@ from powercontext_eval.benchmarks.swebench_pro.gold_overrides import (
     SOURCE559_REFERENCE_FILE_OID,
     SOURCE559_REFERENCE_PATCH_SHA256,
     SOURCE559_REFERENCE_REVISION,
+    SOURCE595_DATASET_PATCH_SHA256,
+    SOURCE595_INSTANCE_ID,
 )
 
 
@@ -104,6 +106,10 @@ class GoldValidationAudit(BaseModel):
     official_evaluation_transport: Literal["docker_proxy", "proxy_bypassed_for_test_isolation"] = (
         OFFICIAL_EVALUATION_DOCKER_PROXY
     )
+    official_evaluation_test_selection: Literal[
+        "dataset_selected_files",
+        "required_unit_tests_only_for_invalid_integration_target",
+    ] = "dataset_selected_files"
     source_dataset: str | None = None
     source_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     source_file_oid: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
@@ -123,9 +129,20 @@ class GoldValidationAudit(BaseModel):
                 for value in (self.source_dataset, self.source_revision, self.source_file_oid, self.source_kind)
             ):
                 raise ValueError("Dataset Gold validation cannot contain reference provenance")
+            if self.instance_id == SOURCE595_INSTANCE_ID:
+                if (
+                    self.dataset_patch_sha256 != SOURCE595_DATASET_PATCH_SHA256
+                    or self.official_evaluation_test_selection
+                    != "required_unit_tests_only_for_invalid_integration_target"
+                ):
+                    raise ValueError("source595 requires the pinned official test-selection correction")
+            elif self.official_evaluation_test_selection != "dataset_selected_files":
+                raise ValueError("Official test-selection correction is not valid for this instance")
         else:
             if self.official_evaluation_transport != OFFICIAL_EVALUATION_PROXY_BYPASSED:
                 raise ValueError("Gold override validation requires the audited proxy bypass")
+            if self.official_evaluation_test_selection != "dataset_selected_files":
+                raise ValueError("Gold override validation must retain the dataset test selection")
             if self.dataset_patch_status != "known_failed" or self.reference_validation_status != "passed":
                 raise ValueError("Gold override validation provenance is invalid")
             if not all(

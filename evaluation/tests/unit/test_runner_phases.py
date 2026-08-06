@@ -50,6 +50,14 @@ OTHER_OPENLIBRARY_DYNAMIC_YEAR_INSTANCE_ID = (
     "instance_internetarchive__openlibrary-43f9e7f9d13888d6303d6a4ae7142f48e94f0d2a-"
     "v0f5ae00000000000000000000000000000000000"
 )
+SOURCE595_INSTANCE_ID = (
+    "instance_ansible__ansible-de5858f48dc9e1ce9117034e0d7e76806f420ca8-v1055803c3a812189a1133297f7f5468579283f86"
+)
+SOURCE595_SELECTED_TEST_FILES = (
+    '["test/integration/targets/ansible-galaxy-collection/library/setup_collections.py", '
+    '"test/units/galaxy/test_api.py"]'
+)
+SOURCE595_EFFECTIVE_TEST_FILES = '["test/units/galaxy/test_api.py"]'
 OPENLIBRARY_DYNAMIC_YEAR_PREFIX = (
     "openlibrary/catalog/add_book/tests/test_add_book.py::TestNormalizeImportRecord::"
     "test_future_publication_dates_are_deleted"
@@ -553,6 +561,42 @@ def test_source559_gold_override_preserves_original_row_and_off_on_patches(
     initializations = cast(list[dict[str, object]], _observed["evaluator_initializations"])
     assert len(initializations) == 1
     assert initializations[0]["kwargs"] == {"python_executable": str(config.harness_python)}
+
+
+def test_source595_uses_only_required_unit_file_for_all_official_evaluations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = _instance().official_row()
+    raw["instance_id"] = SOURCE595_INSTANCE_ID
+    raw["patch"] = "source595 Gold patch"
+    raw["selected_test_files_to_run"] = SOURCE595_SELECTED_TEST_FILES
+    instance = SweBenchProInstance.from_public_raw(raw)
+    source595_patch_hash = "f984e4a44cf8ce42671e5a4740656f99da379f829d312c6885f9d13ffb875c22"
+    selection = GoldValidationSelection(
+        instance_id=SOURCE595_INSTANCE_ID,
+        mode="dataset_patch",
+        dataset_patch_sha256=source595_patch_hash,
+        validation_patch=instance.patch,
+        validation_patch_sha256=source595_patch_hash,
+        dataset_patch_status="unverified",
+        reference_validation_status="not_applicable",
+        official_evaluation_test_selection="required_unit_tests_only_for_invalid_integration_target",
+        evaluator_selected_test_files_to_run=SOURCE595_EFFECTIVE_TEST_FILES,
+    )
+    monkeypatch.setattr("powercontext_eval.runner.select_gold_validation", lambda *_args: selection)
+
+    config, result, _observed = _run_with_fakes(tmp_path, monkeypatch, [], instance=instance)
+
+    run_root = config.root / "runs" / result.run_id
+    retained = json.loads((run_root / "instance.jsonl").read_text())
+    evaluator_row = json.loads((run_root / "evaluator-instance.jsonl").read_text())
+    assert retained["selected_test_files_to_run"] == SOURCE595_SELECTED_TEST_FILES
+    assert evaluator_row["selected_test_files_to_run"] == SOURCE595_EFFECTIVE_TEST_FILES
+    report = ReportBundle.model_validate_json((run_root / "report.json").read_text(), strict=True)
+    assert report.gold_validation is not None
+    assert report.gold_validation.official_evaluation_test_selection == (
+        "required_unit_tests_only_for_invalid_integration_target"
+    )
 
 
 def test_runner_reconciles_the_pinned_openlibrary_dynamic_year_test_ids(

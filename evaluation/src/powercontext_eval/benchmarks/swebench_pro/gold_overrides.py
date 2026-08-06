@@ -12,9 +12,22 @@ SOURCE559_REFERENCE_PATCH_SHA256 = "f4c611735a6dc7731d84bd4c01eacacf67bf1f93ef02
 SOURCE559_REFERENCE_DATASET = "livesweagent/claude-sonnet-4-5_swebench_pro_traj"
 SOURCE559_REFERENCE_REVISION = "e9c3cf3611956d75ad8a78b9cce5b4a524828e22"
 SOURCE559_REFERENCE_FILE_OID = "7d910a550fc80f16647b795e2ab23fa032ac91fa"
+SOURCE595_INSTANCE_ID = (
+    "instance_ansible__ansible-de5858f48dc9e1ce9117034e0d7e76806f420ca8-v1055803c3a812189a1133297f7f5468579283f86"
+)
+SOURCE595_DATASET_PATCH_SHA256 = "f984e4a44cf8ce42671e5a4740656f99da379f829d312c6885f9d13ffb875c22"
+SOURCE595_SELECTED_TEST_FILES = (
+    '["test/integration/targets/ansible-galaxy-collection/library/setup_collections.py", '
+    '"test/units/galaxy/test_api.py"]'
+)
+SOURCE595_EFFECTIVE_TEST_FILES = '["test/units/galaxy/test_api.py"]'
 OFFICIAL_EVALUATION_DOCKER_PROXY = "docker_proxy"
 OFFICIAL_EVALUATION_PROXY_BYPASSED = "proxy_bypassed_for_test_isolation"
 OfficialEvaluationTransport = Literal["docker_proxy", "proxy_bypassed_for_test_isolation"]
+OfficialEvaluationTestSelection = Literal[
+    "dataset_selected_files",
+    "required_unit_tests_only_for_invalid_integration_target",
+]
 
 # This patch is embedded to make the override deterministic and offline.
 SOURCE559_REFERENCE_PATCH = """diff --git a/lib/client/keyagent.go b/lib/client/keyagent.go
@@ -146,6 +159,8 @@ class GoldValidationSelection:
     reference_validation_status: str
     attempt_gold_validation_status: str = "pending"
     official_evaluation_transport: OfficialEvaluationTransport = OFFICIAL_EVALUATION_DOCKER_PROXY
+    official_evaluation_test_selection: OfficialEvaluationTestSelection = "dataset_selected_files"
+    evaluator_selected_test_files_to_run: str | None = None
     source_dataset: str | None = None
     source_revision: str | None = None
     source_file_oid: str | None = None
@@ -162,6 +177,7 @@ class GoldValidationSelection:
             "reference_validation_status": self.reference_validation_status,
             "attempt_gold_validation_status": self.attempt_gold_validation_status,
             "official_evaluation_transport": self.official_evaluation_transport,
+            "official_evaluation_test_selection": self.official_evaluation_test_selection,
             "source_dataset": self.source_dataset,
             "source_revision": self.source_revision,
             "source_file_oid": self.source_file_oid,
@@ -177,12 +193,32 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def select_gold_validation(instance_id: str, dataset_patch: str) -> GoldValidationSelection:
+def select_gold_validation(
+    instance_id: str,
+    dataset_patch: str,
+    selected_test_files_to_run: str | None = None,
+) -> GoldValidationSelection:
     """Select the exact Gold patch without changing the supplied source row."""
 
     if not isinstance(instance_id, str) or not isinstance(dataset_patch, str):
         raise TypeError("Gold validation identity and patch must be text")
     dataset_hash = _sha256(dataset_patch)
+    if instance_id == SOURCE595_INSTANCE_ID:
+        if dataset_hash != SOURCE595_DATASET_PATCH_SHA256:
+            raise GoldValidationOverrideError("source595 dataset Gold patch hash does not match the pinned source")
+        if selected_test_files_to_run != SOURCE595_SELECTED_TEST_FILES:
+            raise GoldValidationOverrideError("source595 selected test files do not match the pinned source")
+        return GoldValidationSelection(
+            instance_id=instance_id,
+            mode="dataset_patch",
+            dataset_patch_sha256=dataset_hash,
+            validation_patch=dataset_patch,
+            validation_patch_sha256=dataset_hash,
+            dataset_patch_status="unverified",
+            reference_validation_status="not_applicable",
+            official_evaluation_test_selection="required_unit_tests_only_for_invalid_integration_target",
+            evaluator_selected_test_files_to_run=SOURCE595_EFFECTIVE_TEST_FILES,
+        )
     if instance_id != SOURCE559_INSTANCE_ID:
         return GoldValidationSelection(
             instance_id=instance_id,

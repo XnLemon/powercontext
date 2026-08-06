@@ -235,12 +235,18 @@ def _run_swebench_pro_instance(
     evaluator_row["PASS_TO_PASS"] = list(required_pass_to_pass)
     evaluator_row["fail_to_pass"] = json.dumps(required_fail_to_pass, ensure_ascii=False, separators=(",", ":"))
     evaluator_row["pass_to_pass"] = json.dumps(required_pass_to_pass, ensure_ascii=False, separators=(",", ":"))
+    gold_selection = select_gold_validation(
+        instance.instance_id,
+        instance.patch,
+        instance.selected_test_files_to_run,
+    )
+    if gold_selection.evaluator_selected_test_files_to_run is not None:
+        evaluator_row["selected_test_files_to_run"] = gold_selection.evaluator_selected_test_files_to_run
     evaluator_copy = run_store.create_text(
         "evaluator-instance.jsonl",
         json.dumps(evaluator_row, ensure_ascii=False, separators=(",", ":")) + "\n",
     )
 
-    gold_selection = select_gold_validation(instance.instance_id, instance.patch)
     if gold_selection.official_evaluation_transport == OFFICIAL_EVALUATION_DOCKER_PROXY:
         evaluator = OfficialEvaluator(
             process,
