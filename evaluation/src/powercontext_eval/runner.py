@@ -25,6 +25,7 @@ from powercontext_eval.benchmarks.swebench_pro.adapter import (
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialEvaluation, OfficialEvaluator
 from powercontext_eval.benchmarks.swebench_pro.gold_overrides import (
     OFFICIAL_EVALUATION_DOCKER_PROXY,
+    SOURCE595_INSTANCE_ID,
     select_gold_validation,
 )
 from powercontext_eval.benchmarks.swebench_pro.prediction import encode_predictions
@@ -86,6 +87,8 @@ _NODEBB_LEGACY_TEST_NAME_REPLACEMENTS = {
     f'{_NODEBB_DIGEST_TEST_PREFIX}"off': f'{_NODEBB_DIGEST_TEST_PREFIX}"off"',
     _NODEBB_BIG_ARRAY_TEST: f"{_NODEBB_BIG_ARRAY_TEST} ",
 }
+_SOURCE595_LEGACY_CACHE_INVALID_TEST = 'test/units/galaxy/test_api.py::test_cache_invalid_cache_content[{"de'
+_SOURCE595_PARSED_CACHE_INVALID_TEST = f'{_SOURCE595_LEGACY_CACHE_INVALID_TEST}"'
 
 
 class RunPhase(StrEnum):
@@ -424,6 +427,11 @@ def _evaluator_test_requirements(
     remapped_fail_to_pass = tuple(
         _NODEBB_LEGACY_TEST_NAME_REPLACEMENTS.get(name, name) for name in instance.fail_to_pass
     )
+    if instance.instance_id == SOURCE595_INSTANCE_ID:
+        remapped_fail_to_pass = tuple(
+            _SOURCE595_PARSED_CACHE_INVALID_TEST if name == _SOURCE595_LEGACY_CACHE_INVALID_TEST else name
+            for name in remapped_fail_to_pass
+        )
     remapped_pass_to_pass = tuple(replacements.get(name, name) for name in instance.pass_to_pass)
     return remapped_fail_to_pass, remapped_pass_to_pass
 

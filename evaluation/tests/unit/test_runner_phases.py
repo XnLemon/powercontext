@@ -58,6 +58,8 @@ SOURCE595_SELECTED_TEST_FILES = (
     '"test/units/galaxy/test_api.py"]'
 )
 SOURCE595_EFFECTIVE_TEST_FILES = '["test/units/galaxy/test_api.py"]'
+SOURCE595_LEGACY_CACHE_INVALID_TEST = 'test/units/galaxy/test_api.py::test_cache_invalid_cache_content[{"de'
+SOURCE595_PARSED_CACHE_INVALID_TEST = f'{SOURCE595_LEGACY_CACHE_INVALID_TEST}"'
 OPENLIBRARY_DYNAMIC_YEAR_PREFIX = (
     "openlibrary/catalog/add_book/tests/test_add_book.py::TestNormalizeImportRecord::"
     "test_future_publication_dates_are_deleted"
@@ -690,6 +692,29 @@ def test_nodebb_legacy_test_name_reconciliation_only_rewrites_exact_names() -> N
         f"{NODEBB_BIG_ARRAY_TEST} extra",
     )
     assert required_pass_to_pass == instance.pass_to_pass
+
+
+def test_source595_reconciles_only_the_exact_legacy_cache_invalid_node_id() -> None:
+    raw = _instance().official_row()
+    raw["instance_id"] = SOURCE595_INSTANCE_ID
+    raw["FAIL_TO_PASS"] = [
+        SOURCE595_LEGACY_CACHE_INVALID_TEST,
+        f"{SOURCE595_LEGACY_CACHE_INVALID_TEST}-extra",
+    ]
+    instance = SweBenchProInstance.from_public_raw(raw)
+
+    required_fail_to_pass, required_pass_to_pass = _evaluator_test_requirements(instance, evaluation_year=2042)
+
+    assert required_fail_to_pass == (
+        SOURCE595_PARSED_CACHE_INVALID_TEST,
+        f"{SOURCE595_LEGACY_CACHE_INVALID_TEST}-extra",
+    )
+    assert required_pass_to_pass == instance.pass_to_pass
+
+    raw["instance_id"] = f"{SOURCE595_INSTANCE_ID}-other"
+    other_instance = SweBenchProInstance.from_public_raw(raw)
+    other_fail_to_pass, _other_pass_to_pass = _evaluator_test_requirements(other_instance, evaluation_year=2042)
+    assert other_fail_to_pass == tuple(raw["FAIL_TO_PASS"])
 
 
 def test_runner_removes_a_task_image_imported_for_a_completed_run(
