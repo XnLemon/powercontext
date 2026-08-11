@@ -949,7 +949,10 @@ def test_known_failures_have_fixed_safe_mapping(
     assert failed.failure_summary == summary
 
 
-def test_unknown_failure_never_persists_exception_text(tmp_path: Path) -> None:
+def test_unknown_failure_never_persists_exception_text(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     config = _config(tmp_path)
     store = _store(config)
     task = _create(store)
@@ -965,6 +968,8 @@ def test_unknown_failure_never_persists_exception_text(tmp_path: Path) -> None:
     assert failed.failure_phase is TaskPhase.RUNNING_ON
     assert failed.failure_summary == "The evaluation worker failed unexpectedly. Inspect the retained m0 logs."
     assert credential not in config.database_path.read_bytes().decode(errors="ignore")
+    assert "error_type=RuntimeError" in caplog.text
+    assert credential not in caplog.text
 
 
 def test_existing_artifacts_fail_before_runner_without_overwrite(tmp_path: Path) -> None:

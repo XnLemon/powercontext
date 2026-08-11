@@ -192,6 +192,13 @@ class TaskPairWorker:
         except (TaskOwnershipError, TaskConflict):
             ownership_lost.set()
         except Exception as error:  # noqa: BLE001 - the worker boundary must sanitize every runner failure
+            _LOGGER.error(
+                "Evaluation task execution failed (task_id=%s attempt_number=%s phase=%s error_type=%s)",
+                task.task_id,
+                task.attempt_number,
+                phase.value if phase is not None else "none",
+                type(error).__name__,
+            )
             failure = _safe_failure(
                 error,
                 phase,

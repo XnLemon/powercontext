@@ -94,7 +94,7 @@ class SucceededWorkspaceReclaimer:
         run_root: Path,
         *,
         interval_seconds: float,
-        batch_size: int = 1000,
+        batch_size: int = 1,
         artifact_validator: ArtifactValidator = load_report,
     ) -> None:
         if interval_seconds <= 0:
@@ -134,15 +134,17 @@ class SucceededWorkspaceReclaimer:
 
         while not stop.is_set():
             try:
-                reclaimed = self.run_once()
+                self.run_once()
             except Exception as error:  # noqa: BLE001 - a maintenance fault must not stop evaluation slots
                 _LOGGER.warning(
                     "Evaluation workspace reclaimer poll failed (error_type=%s)",
                     type(error).__name__,
                 )
-                reclaimed = 0
-            if reclaimed == 0:
-                stop.wait(self._interval_seconds)
+            # Deleting Git workspaces can release millions of inodes and put sustained
+            # metadata pressure on the same filesystem used by active evaluations.  A
+            # maintenance success is therefore still rate limited; it must never turn
+            # into a tight historical-cleanup loop beside the Worker slots.
+            stop.wait(self._interval_seconds)
 
     def _reclaim_task(self, task: TaskRecord) -> bool:
         if task.result is None or task.attempt_id is None:

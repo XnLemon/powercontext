@@ -8,6 +8,8 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
+import time
 from base64 import b64encode, urlsafe_b64encode
 from collections.abc import Sequence
 from dataclasses import replace
@@ -2269,6 +2271,138 @@ def test_pair_reuses_one_relay_and_network_and_runs_off_then_on(tmp_path: Path) 
     ]
     proxy_values = [next(value for value in command if value.startswith("HTTPS_PROXY=")) for command in task_runs]
     assert proxy_values == ["HTTPS_PROXY=http://172.29.0.1:17890"] * 2
+
+
+def test_pair_marks_off_before_network_preflight_and_retries_transient_create(tmp_path: Path) -> None:
+    off_paths = make_paths(tmp_path / "off")
+    on_paths = make_paths(tmp_path / "on")
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    sleeps: list[float] = []
+    started_arms: list[Arm] = []
+
+    class TransientNetworkDocker(TranscriptDocker):
+        create_attempts = 0
+
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if argv[:3] == ("docker", "network", "create"):
+                self.commands.append(argv)
+                self.create_attempts += 1
+                if self.create_attempts == 1:
+                    raise CommandTimedOut("injected control socket timeout", command_result("", returncode=124))
+                return command_result("network-id\n")
+            if argv[:4] == ("docker", "network", "inspect", "--format"):
+                self.commands.append(argv)
+                return command_result("", returncode=1)
+            return super().run(argv, **kwargs)
+
+    docker = TransientNetworkDocker()
+    outcomes = DockerSut(docker, relay_factory=FakeRelay, sleeper=sleeps.append).run_pair(
+        config,
+        paths={Arm.OFF: off_paths, Arm.ON: on_paths},
+        prompts={Arm.OFF: b"same", Arm.ON: b"same"},
+        stores={
+            Arm.OFF: ArtifactStore(off_paths.result_root),
+            Arm.ON: ArtifactStore(on_paths.result_root),
+        },
+        before_arm=started_arms.append,
+    )
+
+    assert set(outcomes) == {Arm.OFF, Arm.ON}
+    assert started_arms == [Arm.OFF, Arm.ON]
+    assert docker.create_attempts == 2
+    assert sleeps == [0.25]
+
+
+def test_network_create_timeout_adopts_only_exact_owned_network(tmp_path: Path) -> None:
+    config = sut_config(tmp_path)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+
+    class CreatedBeforeTimeoutDocker(TranscriptDocker):
+        create_attempts = 0
+
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if argv[:3] == ("docker", "network", "create"):
+                self.commands.append(argv)
+                self.create_attempts += 1
+                raise CommandTimedOut("injected response loss", command_result("", returncode=124))
+            if argv[:4] == ("docker", "network", "inspect", "--format"):
+                self.commands.append(argv)
+                return command_result(config.run_id + "\n")
+            return super().run(argv, **kwargs)
+
+    docker = CreatedBeforeTimeoutDocker()
+    relay = FakeRelay()
+    with DockerSut(docker, relay_factory=lambda: relay)._run_network(
+        config,
+        config.source_checkout,
+    ):
+        pass
+
+    assert docker.create_attempts == 1
+    assert ("docker", "network", "rm", f"powercontext-eval-{config.run_id}") in docker.commands
+
+
+def test_parallel_pairs_serialize_docker_network_control_plane(tmp_path: Path) -> None:
+    guard = threading.Lock()
+    start = threading.Barrier(3)
+    current = 0
+    maximum = 0
+    errors: list[BaseException] = []
+
+    class PressureDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            nonlocal current, maximum
+            is_network_control = argv[:3] in {
+                ("docker", "network", "create"),
+                ("docker", "network", "inspect"),
+                ("docker", "network", "rm"),
+            }
+            if is_network_control:
+                with guard:
+                    current += 1
+                    maximum = max(maximum, current)
+                time.sleep(0.02)
+                try:
+                    return super().run(argv, **kwargs)
+                finally:
+                    with guard:
+                        current -= 1
+            return super().run(argv, **kwargs)
+
+    def run_pair(index: int) -> None:
+        root = tmp_path / f"pair-{index}"
+        off_paths = make_paths(root / "off")
+        on_paths = make_paths(root / "on")
+        config = replace(sut_config(root), run_id=f"run-{index}")
+        config.codex_binary.write_text("binary")
+        config.uv_binary.write_text("binary")
+        try:
+            start.wait()
+            DockerSut(PressureDocker(), relay_factory=FakeRelay).run_pair(
+                config,
+                paths={Arm.OFF: off_paths, Arm.ON: on_paths},
+                prompts={Arm.OFF: b"same", Arm.ON: b"same"},
+                stores={
+                    Arm.OFF: ArtifactStore(off_paths.result_root),
+                    Arm.ON: ArtifactStore(on_paths.result_root),
+                },
+            )
+        except BaseException as error:  # noqa: BLE001 - thread failures must reach the assertion
+            errors.append(error)
+
+    threads = [threading.Thread(target=run_pair, args=(index,)) for index in (1, 2)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert maximum == 1
 
 
 @pytest.mark.parametrize("fail_at", ["run", "exec", "evidence"])

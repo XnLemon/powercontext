@@ -14,6 +14,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -60,6 +61,9 @@ _SAFE_RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 _SAFE_DOCKER_NETWORK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _INVALID_DOCKER_COPY_SYMLINK = re.compile(r'invalid symlink "[^"\r\n]+" -> "[^"\r\n]+"')
+_DOCKER_NETWORK_CONTROL_LOCK = threading.Lock()
+_DOCKER_NETWORK_CREATE_ATTEMPTS = 3
+_DOCKER_NETWORK_CREATE_RETRY_SECONDS = 0.25
 _CONTAINER_CODEX = "/tools/codex-dir/codex"
 _CONTAINER_TOKENSFLOW = "/tools/tokensflow-dir/tokensflow"
 _CONTAINER_TOKENSFLOW_WRAPPER_DIR = "/tools/tokensflow-wrapper"
@@ -683,13 +687,18 @@ class DockerSut:
             or len({os.path.realpath(value.runtime) for value in paths.values()}) != 2
         ):
             raise UnsafeSutConfiguration("OFF and ON must use distinct fresh roots")
+        # Attribute source/network/relay preflight failures to the treatment runtime,
+        # not to the already-completed Gold evaluation.  The callback remains exactly
+        # once per arm, but OFF begins before shared Docker control-plane work.
+        if before_arm is not None:
+            before_arm(Arm.OFF)
         source_provenance = self._verify_source(config)
         for arm in (Arm.OFF, Arm.ON):
             self._validate_tokensflow_inputs(config, paths[arm])
         with self._run_network(config, config.source_checkout) as (network, relay_url):
             outcomes: dict[Arm, SutOutcome] = {}
             for arm in (Arm.OFF, Arm.ON):
-                if before_arm is not None:
+                if before_arm is not None and arm is Arm.ON:
                     before_arm(arm)
                 outcomes[arm] = self._execute_arm(
                     config,
@@ -710,37 +719,73 @@ class DockerSut:
         network_created = False
         preserve_for_diagnosis = False
         try:
-            self._docker.run(
-                (
-                    "docker",
-                    "network",
-                    "create",
-                    "--internal",
-                    "--label",
-                    f"powercontext-eval.run={config.run_id}",
-                    network,
-                ),
-                cwd=cwd,
-                timeout=30,
-            )
-            network_created = True
-            gateway = self.network_gateway(network, cwd)
-            relay_url = relay.start(gateway, config.proxy)
+            # Docker's control socket becomes unreliable when many task threads create
+            # bridges and start relays simultaneously.  Serialize only the short
+            # control-plane section; OFF/ON execution remains fully parallel.
+            with _DOCKER_NETWORK_CONTROL_LOCK:
+                self._create_network(config, network, cwd)
+                network_created = True
+                gateway = self.network_gateway(network, cwd)
+                relay_url = relay.start(gateway, config.proxy)
             yield network, relay_url
         except BaseException:
             preserve_for_diagnosis = network_created
             raise
         finally:
+            with _DOCKER_NETWORK_CONTROL_LOCK:
+                try:
+                    relay.stop()
+                finally:
+                    if network_created and not preserve_for_diagnosis:
+                        self._docker.run(
+                            ("docker", "network", "rm", network),
+                            cwd=cwd,
+                            timeout=30,
+                            check=False,
+                        )
+
+    def _create_network(self, config: SutConfig, network: str, cwd: Path) -> None:
+        command = (
+            "docker",
+            "network",
+            "create",
+            "--internal",
+            "--label",
+            f"powercontext-eval.run={config.run_id}",
+            network,
+        )
+        last_error: CommandError | None = None
+        for attempt in range(_DOCKER_NETWORK_CREATE_ATTEMPTS):
             try:
-                relay.stop()
-            finally:
-                if network_created and not preserve_for_diagnosis:
-                    self._docker.run(
-                        ("docker", "network", "rm", network),
-                        cwd=cwd,
-                        timeout=30,
-                        check=False,
-                    )
+                self._docker.run(command, cwd=cwd, timeout=30)
+                return
+            except CommandError as error:
+                last_error = error
+                if self._network_has_exact_owner(network, config.run_id, cwd):
+                    return
+                if attempt + 1 < _DOCKER_NETWORK_CREATE_ATTEMPTS:
+                    self._sleeper(_DOCKER_NETWORK_CREATE_RETRY_SECONDS * (attempt + 1))
+        assert last_error is not None
+        raise last_error
+
+    def _network_has_exact_owner(self, network: str, run_id: str, cwd: Path) -> bool:
+        try:
+            result = self._docker.run(
+                (
+                    "docker",
+                    "network",
+                    "inspect",
+                    "--format",
+                    '{{ index .Labels "powercontext-eval.run" }}',
+                    network,
+                ),
+                cwd=cwd,
+                timeout=30,
+                check=False,
+            )
+        except (CommandError, OSError):
+            return False
+        return result.returncode == 0 and result.stdout.strip() == run_id
 
     def _execute_arm(
         self,

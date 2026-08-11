@@ -210,3 +210,37 @@ def test_reclaimer_pages_past_old_successes_with_absent_workspaces(tmp_path: Pat
     assert retained_workspace.is_dir()
     assert reclaimer.run_once() == 1
     assert not retained_workspace.exists()
+
+
+def test_reclaimer_waits_after_each_successful_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, store = _store(tmp_path)
+    reclaimer = SucceededWorkspaceReclaimer(store, config.run_root, interval_seconds=7)
+    runs = 0
+
+    def run_once() -> int:
+        nonlocal runs
+        runs += 1
+        return 1
+
+    class StopAfterWait:
+        def __init__(self) -> None:
+            self.stopped = False
+            self.waits: list[float] = []
+
+        def is_set(self) -> bool:
+            return self.stopped
+
+        def wait(self, seconds: float) -> None:
+            self.waits.append(seconds)
+            self.stopped = True
+
+    stop = StopAfterWait()
+    monkeypatch.setattr(reclaimer, "run_once", run_once)
+
+    reclaimer.run_forever(stop)  # type: ignore[arg-type]
+
+    assert runs == 1
+    assert stop.waits == [7]
