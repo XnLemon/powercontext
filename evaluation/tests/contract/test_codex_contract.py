@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from base64 import b64encode, urlsafe_b64encode
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -658,6 +658,68 @@ def test_workspace_initialization_budget_is_released_after_failure(
     successful_paths = make_paths(tmp_path / "successful")
     successful_paths.prepare()
     DockerSut(TranscriptDocker())._initialize_workspace(sut_config(tmp_path / "successful"), Arm.OFF, successful_paths)
+
+
+def test_workspace_initialization_and_codex_exec_share_one_docker_budget(tmp_path: Path) -> None:
+    guard = threading.Lock()
+    start = threading.Barrier(10)
+    eight_entered = threading.Event()
+    release = threading.Event()
+    current = 0
+    maximum = 0
+    errors: list[BaseException] = []
+
+    class BlockingDocker:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            nonlocal current, maximum
+            heavy = argv[:2] == ("docker", "create") or argv[:3] == ("docker", "exec", "-i")
+            if heavy:
+                with guard:
+                    current += 1
+                    maximum = max(maximum, current)
+                    if current == 8:
+                        eight_entered.set()
+                try:
+                    assert release.wait(timeout=5)
+                finally:
+                    with guard:
+                        current -= 1
+            return command_result("")
+
+    jobs: list[Callable[[], object]] = []
+    for index in range(4):
+        root = tmp_path / f"workspace-{index}"
+        paths = make_paths(root)
+        paths.prepare()
+        config = replace(sut_config(root), run_id=f"workspace-{index}")
+        sut = DockerSut(BlockingDocker())
+        jobs.append(lambda sut=sut, config=config, paths=paths: sut._initialize_workspace(config, Arm.OFF, paths))
+    for index in range(5):
+        runner = _DockerExecRunner(BlockingDocker(), f"container-{index}")
+        jobs.append(lambda runner=runner: runner.run(("codex", "exec"), cwd=tmp_path))
+
+    def run_job(job: Callable[[], object]) -> None:
+        try:
+            start.wait()
+            job()
+        except BaseException as error:  # noqa: BLE001 - thread failures must reach the assertion
+            errors.append(error)
+
+    threads = [threading.Thread(target=run_job, args=(job,)) for job in jobs]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    try:
+        assert eight_entered.wait(timeout=2)
+        time.sleep(0.05)
+        assert maximum == 8
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
 
 
 def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(tmp_path: Path) -> None:

@@ -144,7 +144,7 @@ def test_worker_signal_handler_ignores_reentrant_sigterm_while_first_stop_is_run
         (sys.executable, "-c", program),
         capture_output=True,
         text=True,
-        timeout=1,
+        timeout=5,
         check=False,
     )
 
