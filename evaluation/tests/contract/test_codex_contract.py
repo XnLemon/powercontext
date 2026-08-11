@@ -583,7 +583,7 @@ def test_workspace_initialization_recovers_from_docker_cp_rejecting_an_escaping_
 def test_parallel_workspace_initialization_shares_a_bounded_docker_budget(tmp_path: Path) -> None:
     guard = threading.Lock()
     start = threading.Barrier(10)
-    eight_entered = threading.Event()
+    budget_entered = threading.Event()
     release = threading.Event()
     current = 0
     maximum = 0
@@ -596,8 +596,8 @@ def test_parallel_workspace_initialization_shares_a_bounded_docker_budget(tmp_pa
                 with guard:
                     current += 1
                     maximum = max(maximum, current)
-                    if current == 8:
-                        eight_entered.set()
+                    if current == 4:
+                        budget_entered.set()
                 try:
                     assert release.wait(timeout=5)
                 finally:
@@ -627,9 +627,9 @@ def test_parallel_workspace_initialization_shares_a_bounded_docker_budget(tmp_pa
         thread.start()
     start.wait()
     try:
-        assert eight_entered.wait(timeout=2)
+        assert budget_entered.wait(timeout=2)
         time.sleep(0.05)
-        assert maximum == 8
+        assert maximum == 4
     finally:
         release.set()
         for thread in threads:
@@ -663,7 +663,7 @@ def test_workspace_initialization_budget_is_released_after_failure(
 def test_workspace_initialization_and_codex_exec_share_one_docker_budget(tmp_path: Path) -> None:
     guard = threading.Lock()
     start = threading.Barrier(10)
-    eight_entered = threading.Event()
+    budget_entered = threading.Event()
     release = threading.Event()
     current = 0
     maximum = 0
@@ -677,8 +677,8 @@ def test_workspace_initialization_and_codex_exec_share_one_docker_budget(tmp_pat
                 with guard:
                     current += 1
                     maximum = max(maximum, current)
-                    if current == 8:
-                        eight_entered.set()
+                    if current == 4:
+                        budget_entered.set()
                 try:
                     assert release.wait(timeout=5)
                 finally:
@@ -710,9 +710,9 @@ def test_workspace_initialization_and_codex_exec_share_one_docker_budget(tmp_pat
         thread.start()
     start.wait()
     try:
-        assert eight_entered.wait(timeout=2)
+        assert budget_entered.wait(timeout=2)
         time.sleep(0.05)
-        assert maximum == 8
+        assert maximum == 4
     finally:
         release.set()
         for thread in threads:
@@ -2552,7 +2552,7 @@ def test_parallel_pairs_serialize_docker_network_control_plane(tmp_path: Path) -
 def test_parallel_codex_execs_share_a_bounded_attach_budget(tmp_path: Path) -> None:
     guard = threading.Lock()
     start = threading.Barrier(10)
-    eight_entered = threading.Event()
+    budget_entered = threading.Event()
     release = threading.Event()
     current = 0
     maximum = 0
@@ -2565,8 +2565,8 @@ def test_parallel_codex_execs_share_a_bounded_attach_budget(tmp_path: Path) -> N
             with guard:
                 current += 1
                 maximum = max(maximum, current)
-                if current == 8:
-                    eight_entered.set()
+                if current == 4:
+                    budget_entered.set()
             try:
                 assert release.wait(timeout=5)
                 return command_result("")
@@ -2589,9 +2589,9 @@ def test_parallel_codex_execs_share_a_bounded_attach_budget(tmp_path: Path) -> N
         thread.start()
     start.wait()
     try:
-        assert eight_entered.wait(timeout=2)
+        assert budget_entered.wait(timeout=2)
         time.sleep(0.05)
-        assert maximum == 8
+        assert maximum == 4
     finally:
         release.set()
         for thread in threads:
