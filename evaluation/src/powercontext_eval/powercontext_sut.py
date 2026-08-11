@@ -64,6 +64,8 @@ _INVALID_DOCKER_COPY_SYMLINK = re.compile(r'invalid symlink "[^"\r\n]+" -> "[^"\
 _DOCKER_NETWORK_CONTROL_LOCK = threading.Lock()
 _DOCKER_NETWORK_CREATE_ATTEMPTS = 3
 _DOCKER_NETWORK_CREATE_RETRY_SECONDS = 0.25
+_DOCKER_WORKSPACE_INIT_MAX_CONCURRENCY = 8
+_DOCKER_WORKSPACE_INIT_SEMAPHORE = threading.BoundedSemaphore(_DOCKER_WORKSPACE_INIT_MAX_CONCURRENCY)
 _DOCKER_CODEX_EXEC_MAX_CONCURRENCY = 8
 _DOCKER_CODEX_EXEC_SEMAPHORE = threading.BoundedSemaphore(_DOCKER_CODEX_EXEC_MAX_CONCURRENCY)
 _CONTAINER_CODEX = "/tools/codex-dir/codex"
@@ -1574,6 +1576,12 @@ class DockerSut:
         return False
 
     def _initialize_workspace(self, config: SutConfig, arm: Arm, paths: ArmPaths) -> None:
+        # Concurrent image extraction is another Docker control-plane and metadata
+        # hotspot. Keep task scheduling at 20, while bounding only create/cp setup.
+        with _DOCKER_WORKSPACE_INIT_SEMAPHORE:
+            self._initialize_workspace_with_docker(config, arm, paths)
+
+    def _initialize_workspace_with_docker(self, config: SutConfig, arm: Arm, paths: ArmPaths) -> None:
         name = f"powercontext-eval-{config.run_id}-{arm.value}-init"
         created = False
         try:

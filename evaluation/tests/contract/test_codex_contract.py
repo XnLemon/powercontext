@@ -580,6 +580,86 @@ def test_workspace_initialization_recovers_from_docker_cp_rejecting_an_escaping_
     assert not paths.workspace.joinpath("partial-copy").exists()
 
 
+def test_parallel_workspace_initialization_shares_a_bounded_docker_budget(tmp_path: Path) -> None:
+    guard = threading.Lock()
+    start = threading.Barrier(10)
+    eight_entered = threading.Event()
+    release = threading.Event()
+    current = 0
+    maximum = 0
+    errors: list[BaseException] = []
+
+    class BlockingDocker:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            nonlocal current, maximum
+            if argv[:2] == ("docker", "create"):
+                with guard:
+                    current += 1
+                    maximum = max(maximum, current)
+                    if current == 8:
+                        eight_entered.set()
+                try:
+                    assert release.wait(timeout=5)
+                finally:
+                    with guard:
+                        current -= 1
+            return command_result("")
+
+    entries = []
+    for index in range(9):
+        root = tmp_path / str(index)
+        paths = make_paths(root)
+        paths.prepare()
+        config = sut_config(root)
+        config = replace(config, run_id=f"run-{index}")
+        entries.append((DockerSut(BlockingDocker()), config, paths))
+
+    def initialize(entry: tuple[DockerSut, SutConfig, ArmPaths]) -> None:
+        try:
+            start.wait()
+            sut, config, paths = entry
+            sut._initialize_workspace(config, Arm.OFF, paths)
+        except BaseException as error:  # noqa: BLE001 - thread failures must reach the assertion
+            errors.append(error)
+
+    threads = [threading.Thread(target=initialize, args=(entry,)) for entry in entries]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    try:
+        assert eight_entered.wait(timeout=2)
+        time.sleep(0.05)
+        assert maximum == 8
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+
+
+def test_workspace_initialization_budget_is_released_after_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(powercontext_sut, "_DOCKER_WORKSPACE_INIT_SEMAPHORE", threading.BoundedSemaphore(1))
+
+    class FailingDocker:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if argv[:2] == ("docker", "create"):
+                raise CommandFailed("injected", command_result("", returncode=70))
+            return command_result("")
+
+    failed_paths = make_paths(tmp_path / "failed")
+    failed_paths.prepare()
+    with pytest.raises(CommandFailed):
+        DockerSut(FailingDocker())._initialize_workspace(sut_config(tmp_path / "failed"), Arm.OFF, failed_paths)
+
+    successful_paths = make_paths(tmp_path / "successful")
+    successful_paths.prepare()
+    DockerSut(TranscriptDocker())._initialize_workspace(sut_config(tmp_path / "successful"), Arm.OFF, successful_paths)
+
+
 def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     docker = TranscriptDocker()
