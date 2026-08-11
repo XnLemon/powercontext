@@ -21,6 +21,7 @@ from urllib.request import urlopen
 
 import pytest
 
+from powercontext_eval import powercontext_sut
 from powercontext_eval.artifacts import ArtifactStore, SecretDetected
 from powercontext_eval.codex import (
     CodexCapacityError,
@@ -42,6 +43,7 @@ from powercontext_eval.powercontext_sut import (
     SutConfig,
     TreatmentEvidence,
     UnsafeSutConfiguration,
+    _DockerExecRunner,
     auth_secret_variants,
     loopback_proxy_environment,
     run_codex_contract_smoke,
@@ -2403,6 +2405,77 @@ def test_parallel_pairs_serialize_docker_network_control_plane(tmp_path: Path) -
     assert not any(thread.is_alive() for thread in threads)
     assert errors == []
     assert maximum == 1
+
+
+def test_parallel_codex_execs_share_a_bounded_attach_budget(tmp_path: Path) -> None:
+    guard = threading.Lock()
+    start = threading.Barrier(10)
+    eight_entered = threading.Event()
+    release = threading.Event()
+    current = 0
+    maximum = 0
+    errors: list[BaseException] = []
+
+    class BlockingDocker:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            nonlocal current, maximum
+            assert argv[:3] == ("docker", "exec", "-i")
+            with guard:
+                current += 1
+                maximum = max(maximum, current)
+                if current == 8:
+                    eight_entered.set()
+            try:
+                assert release.wait(timeout=5)
+                return command_result("")
+            finally:
+                with guard:
+                    current -= 1
+
+    def run_codex(index: int) -> None:
+        try:
+            start.wait()
+            _DockerExecRunner(BlockingDocker(), f"container-{index}").run(
+                ("codex", "exec"),
+                cwd=tmp_path,
+            )
+        except BaseException as error:  # noqa: BLE001 - thread failures must reach the assertion
+            errors.append(error)
+
+    threads = [threading.Thread(target=run_codex, args=(index,)) for index in range(9)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    try:
+        assert eight_entered.wait(timeout=2)
+        time.sleep(0.05)
+        assert maximum == 8
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+
+
+def test_codex_exec_attach_budget_is_released_after_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(powercontext_sut, "_DOCKER_CODEX_EXEC_SEMAPHORE", threading.BoundedSemaphore(1))
+
+    class FailingDocker:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            raise CommandFailed("injected", command_result("", returncode=70))
+
+    with pytest.raises(CommandFailed):
+        _DockerExecRunner(FailingDocker(), "failed-container").run(("codex", "exec"), cwd=tmp_path)
+
+    class SuccessfulDocker:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            return command_result("")
+
+    result = _DockerExecRunner(SuccessfulDocker(), "successful-container").run(("codex", "exec"), cwd=tmp_path)
+
+    assert result.returncode == 0
 
 
 @pytest.mark.parametrize("fail_at", ["run", "exec", "evidence"])

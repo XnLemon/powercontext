@@ -64,6 +64,8 @@ _INVALID_DOCKER_COPY_SYMLINK = re.compile(r'invalid symlink "[^"\r\n]+" -> "[^"\
 _DOCKER_NETWORK_CONTROL_LOCK = threading.Lock()
 _DOCKER_NETWORK_CREATE_ATTEMPTS = 3
 _DOCKER_NETWORK_CREATE_RETRY_SECONDS = 0.25
+_DOCKER_CODEX_EXEC_MAX_CONCURRENCY = 8
+_DOCKER_CODEX_EXEC_SEMAPHORE = threading.BoundedSemaphore(_DOCKER_CODEX_EXEC_MAX_CONCURRENCY)
 _CONTAINER_CODEX = "/tools/codex-dir/codex"
 _CONTAINER_TOKENSFLOW = "/tools/tokensflow-dir/tokensflow"
 _CONTAINER_TOKENSFLOW_WRAPPER_DIR = "/tools/tokensflow-wrapper"
@@ -570,10 +572,14 @@ class _DockerExecRunner(ProcessRunner):
         docker_environment: tuple[str, ...] = ()
         if environment:
             docker_environment = tuple(part for item in environment.items() for part in ("-e", f"{item[0]}={item[1]}"))
-        return self._delegate.run(
-            ("docker", "exec", "-i", *docker_environment, self._container, *tuple(argv)),
-            **kwargs,
-        )
+        # Docker's attached exec streams become unreliable when all 20 task pairs
+        # enter Codex at once.  Keep the worker capacity at 20, while bounding only
+        # the long-lived attach streams that share the daemon control socket.
+        with _DOCKER_CODEX_EXEC_SEMAPHORE:
+            return self._delegate.run(
+                ("docker", "exec", "-i", *docker_environment, self._container, *tuple(argv)),
+                **kwargs,
+            )
 
 
 class DockerSut:
