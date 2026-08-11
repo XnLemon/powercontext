@@ -97,6 +97,9 @@ export function AppShell({ api, path, batchId, navigate, children }: AppShellPro
                 任务对 {health.active_task_pairs} / {health.task_parallelism}
               </span>
               <span className="queue-count">队列 {health.queued_tasks}</span>
+              <span className={`health ${health.resource_admission_open ? "health--ok" : "health--error"}`}>
+                {health.resource_admission_open ? "资源门禁开放" : "资源门禁关闭"}
+              </span>
             </>
           )}
         </header>

@@ -1060,6 +1060,53 @@ class TaskStore:
                 self._summary(self._record(connection, row)) for row in connection.execute(sql, parameters).fetchall()
             ]
 
+    def list_succeeded_tasks_for_workspace_reclaim(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[TaskRecord]:
+        """List successful current attempts whose deferred cleanup is safely terminal."""
+
+        if limit < 1:
+            raise ValueError("Workspace reclaim limit must be positive")
+        if offset < 0:
+            raise ValueError("Workspace reclaim offset must not be negative")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT tasks.*
+                FROM tasks
+                JOIN task_attempts
+                  ON task_attempts.task_id = tasks.task_id
+                 AND task_attempts.attempt_number = (
+                     SELECT MAX(current_attempt.attempt_number)
+                     FROM task_attempts AS current_attempt
+                     WHERE current_attempt.task_id = tasks.task_id
+                 )
+                WHERE tasks.status = ?
+                  AND task_attempts.status = ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM tokensflow_finalizations
+                      WHERE tokensflow_finalizations.attempt_id = task_attempts.attempt_id
+                        AND tokensflow_finalizations.state NOT IN (?, ?, ?)
+                  )
+                ORDER BY tasks.queue_seq ASC
+                LIMIT ? OFFSET ?
+                """,
+                (
+                    TaskStatus.SUCCEEDED.value,
+                    TaskStatus.SUCCEEDED.value,
+                    FinalizationState.PASSED.value,
+                    FinalizationState.TIMED_OUT.value,
+                    FinalizationState.CAPACITY_EVICTED.value,
+                    limit,
+                    offset,
+                ),
+            ).fetchall()
+            return [self._record(connection, row) for row in rows]
+
     def queue_position(self, task_id: str) -> int | None:
         """Return the one-based position among currently queued tasks."""
         with self._connection() as connection:
@@ -2559,6 +2606,8 @@ def _pause_event(
         return BatchControlEventType.QUOTA_LIMIT_REACHED, "system"
     if reason is BatchPauseReason.INFRASTRUCTURE_FAILURE:
         return BatchControlEventType.INFRASTRUCTURE_FAILURE, "system"
+    if reason is BatchPauseReason.RESOURCE_PRESSURE:
+        return BatchControlEventType.RESOURCE_PRESSURE, "system"
     raise ValueError("Unsupported batch pause reason")
 
 

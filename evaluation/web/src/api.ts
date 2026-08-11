@@ -236,7 +236,14 @@ const healthSchema = z.strictObject({
   queued_tasks: nonnegativeIntegerSchema,
   running_tasks: nonnegativeIntegerSchema,
   active_task_pairs: nonnegativeIntegerSchema,
-  task_parallelism: z.number().int().min(1).max(10),
+  task_parallelism: z.number().int().min(1).max(20),
+  resource_admission_open: z.boolean(),
+  filesystem_free_bytes: nonnegativeIntegerSchema.nullable(),
+  filesystem_total_bytes: nonnegativeIntegerSchema.nullable(),
+  filesystem_min_free_bytes: z.number().int().positive(),
+  filesystem_free_inodes: nonnegativeIntegerSchema.nullable(),
+  filesystem_total_inodes: nonnegativeIntegerSchema.nullable(),
+  filesystem_min_free_inodes: z.number().int().positive(),
 });
 
 function armSchema<Arm extends "off" | "on">(arm: Arm) {
@@ -355,6 +362,7 @@ const batchControlSchema = z.strictObject({
       "quota_limit",
       "infrastructure_failure",
       "codex_capacity",
+      "resource_pressure",
     ])
     .nullable(),
   updated_at: timestampSchema,
@@ -501,7 +509,9 @@ const batchControlEventSchema = z.strictObject({
     "usage_threshold_reached",
     "usage_unavailable",
     "quota_limit_reached",
+    "infrastructure_failure",
     "batch_completed",
+    "resource_pressure",
     "task_retry_requested",
   ]),
   actor: z.enum(["user", "system"]),

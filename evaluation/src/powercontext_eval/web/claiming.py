@@ -10,6 +10,7 @@ from typing import Protocol
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.controls import BatchPauseReason
 from powercontext_eval.web.models import TaskRecord
+from powercontext_eval.web.resources import FilesystemResourceProbe, ResourceProbe, ResourceUnavailable
 from powercontext_eval.web.store import TaskStore
 from powercontext_eval.web.usage import UsageSnapshot, UsageUnavailable, is_fresh
 
@@ -28,10 +29,12 @@ class ClaimCoordinator:
         *,
         usage_probe: UsageProbe,
         clock: Callable[[], datetime],
+        resource_probe: ResourceProbe | None = None,
     ) -> None:
         self._config = config
         self._store = store
         self._usage_probe = usage_probe
+        self._resource_probe = resource_probe or FilesystemResourceProbe(config.run_root)
         self._clock = clock
         self._lock = threading.Lock()
         self._claim_commit_lock = threading.Lock()
@@ -53,6 +56,21 @@ class ClaimCoordinator:
                 return None
             now = self._clock()
             self._store.recover_expired(now=now)
+            try:
+                capacity = self._resource_probe.read()
+            except ResourceUnavailable:
+                capacity = None
+            if capacity is None or not capacity.admission_open(
+                min_free_bytes=self._config.filesystem_claim_min_free_bytes,
+                min_free_inodes=self._config.filesystem_claim_min_free_inodes,
+            ):
+                if self._stopped.is_set():
+                    return None
+                self._store.pause_runnable_batches(
+                    reason=BatchPauseReason.RESOURCE_PRESSURE,
+                    now=now,
+                )
+                return None
             try:
                 snapshot = self._usage_before_claim(now)
             except UsageUnavailable:

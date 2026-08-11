@@ -13,7 +13,7 @@ One report is one immutable `swebench-pro-public-v2` batch:
 - one PowerContext revision resolved to one full commit SHA for the complete batch;
 - one `gpt-5.6-sol` / `medium` Codex configuration;
 - one OFF and one ON execution for every task;
-- between one and four physical OFF/ON task pairs running concurrently, with every other child retained in the
+- between one and twenty physical OFF/ON task pairs running concurrently, with every other child retained in the
   durable queue.
 
 The pinned dataset SHA-256 is
@@ -36,8 +36,8 @@ A real batch requires explicit final approval after the non-mutating preview sho
 
 ## Configurable task-pair parallelism
 
-`POWERCONTEXT_EVAL_TASK_PARALLELISM` accepts an integer from `1` through `10` and defaults to `1`. Setting it to `4`
-runs up to four concurrent task pairs; higher values may be selected up to the validated limit of ten. Parallelism is
+`POWERCONTEXT_EVAL_TASK_PARALLELISM` accepts an integer from `1` through `20` and defaults to `1`. Setting it to `20`
+runs up to twenty concurrent task pairs. Parallelism is
 across independent SWE-bench tasks only: each task remains one
 ordered OFF-then-ON comparison pair, followed by official evaluation and reporting.
 
@@ -51,24 +51,23 @@ atomically pauses a runnable batch and records a sanitized control event, while 
 is always explicit after the failure is resolved, usage is freshly observed below the threshold, and service health
 is verified.
 
-`/api/health` reports `active_task_pairs` and `task_parallelism` in addition to the queue counts. Validate a capacity
-increase with this controlled four-task wave:
+`/api/health` reports `active_task_pairs`, `task_parallelism`, `resource_admission_open`, and allowlisted filesystem
+byte/inode capacity in addition to queue counts. Validate a capacity increase at a clean task boundary:
 
-1. keep the batch paused with zero running tasks, set `POWERCONTEXT_EVAL_TASK_PARALLELISM=4`, and restart only the
+1. keep the batch paused with zero running tasks, set `POWERCONTEXT_EVAL_TASK_PARALLELISM` to the intended capacity,
+   and restart only the
    evaluation Worker;
 2. verify Web/Worker and existing services are healthy, account usage is freshly below the threshold, and health
-   reports `active_task_pairs: 0` with `task_parallelism: 4`;
-3. explicitly resume the batch, observe exactly four distinct running attempts, then immediately request pause so no
-   fifth task is claimed;
-4. let the four active task pairs finish naturally and wait until health and the database both report zero running;
+   reports `active_task_pairs: 0`, the selected `task_parallelism`, and `resource_admission_open: true`;
+3. explicitly resume the batch and verify distinct running attempts never exceed the selected capacity;
+4. if a bounded validation wave is required, request pause and let every active task pair finish naturally;
 5. verify isolated workspaces, runtimes, Codex homes, PowerContext homes, Docker networks and scopes, official
    evaluation, cleanup, retained evidence, service health, and a fresh below-threshold usage observation;
-6. only after every check passes, explicitly resume sustained processing at four task pairs.
+6. only after every check passes, explicitly resume sustained processing at the selected capacity.
 
 If the wave has an infrastructure failure, keep the batch paused, preserve every failed attempt and its evidence,
 set parallelism back to `1`, restart only the Worker, diagnose and fix the failure, and retry only the infrastructure
-failure items. Do not resume other queued work until those retries succeed and all safety checks pass. Do not raise
-the supported maximum above four from an in-progress evaluation.
+failure items. Do not resume other queued work until those retries succeed and all safety checks pass.
 
 ## Subscription usage and batch controls
 
@@ -83,13 +82,22 @@ The deployment defaults are:
 | `POWERCONTEXT_EVAL_USAGE_PROBE_SECONDS` | `60` | Normal interval between account-usage observations |
 | `POWERCONTEXT_EVAL_USAGE_PROBE_TIMEOUT_SECONDS` | `15` | Maximum duration of one bounded usage probe |
 | `POWERCONTEXT_EVAL_USAGE_SNAPSHOT_MAX_AGE_SECONDS` | `120` | Oldest observation accepted by preview, start, resume, and retry |
-| `POWERCONTEXT_EVAL_TASK_PARALLELISM` | `1` | Concurrent independent OFF/ON task pairs; allowed range is 1 through 10 |
+| `POWERCONTEXT_EVAL_FILESYSTEM_MIN_FREE_BYTES` | `10737418240` | Base byte reserve; claim admission also reserves 4 GiB per configured task slot |
+| `POWERCONTEXT_EVAL_FILESYSTEM_MIN_FREE_INODES` | `1000000` | Base inode reserve; claim admission also reserves 250,000 inodes per configured task slot |
+| `POWERCONTEXT_EVAL_WORKSPACE_RECLAIM_INTERVAL_SECONDS` | `10` | Successful scratch reclaim poll interval; retained `/runs` and non-success workspaces are never removed |
+| `POWERCONTEXT_EVAL_TASK_PARALLELISM` | `1` | Concurrent independent OFF/ON task pairs; allowed range is 1 through 20 |
 | `POWERCONTEXT_EVAL_TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS` | `600` | Deadline after durable arm handoff before forced cleanup |
 | `POWERCONTEXT_EVAL_TOKENSFLOW_FINALIZER_POLL_SECONDS` | `5` | Interruptible durable finalizer poll interval |
 | `POWERCONTEXT_EVAL_CODEX_MODELS` | `gpt-5.6-sol` | Comma-separated models admitted for newly created batches and tasks; the default Sol model must remain present |
 
 Changing the model allowlist affects only new submissions. Existing batches keep their immutable model and remain
 readable, runnable, and retryable even when that model is no longer admitted for new work.
+Before each claim, the Worker reserves both bytes and inodes for the configured parallelism. If either reserve is
+unavailable or below its hard boundary, runnable batches pause with `resource_pressure`; recovery never resumes them
+implicitly. A separate Worker maintenance loop removes only a succeeded attempt's reproducible `/work/<run-id>`
+scratch after validating its durable report and terminal deferred cleanup. It never removes `/runs`, failed,
+interrupted, queued, running, or cleanup-pending evidence. Scanning is cyclic, so completed tasks from older batches
+cannot starve newer successful workspaces from reclamation.
 TokensFlow finalization capacity is always twice `POWERCONTEXT_EVAL_TASK_PARALLELISM`; it is not independently
 configurable. When the durable queue exceeds that bound, the oldest excess jobs are force-cleaned in the same poll.
 

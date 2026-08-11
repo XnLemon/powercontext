@@ -95,4 +95,5 @@ def test_pause_reasons_are_stable_public_values() -> None:
         "quota_limit",
         "infrastructure_failure",
         "codex_capacity",
+        "resource_pressure",
     ]

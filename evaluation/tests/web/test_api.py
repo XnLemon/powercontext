@@ -27,6 +27,7 @@ from powercontext_eval.report import ArmReport, GoldValidationAudit, MetricSet, 
 from powercontext_eval.web.api import TaskEventStream, create_app
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskCreate, TaskPhase, TaskRecord, TaskResult
+from powercontext_eval.web.resources import FilesystemCapacity, ResourceUnavailable
 from powercontext_eval.web.store import FinalizationState, TaskStore, TokensFlowFinalizationCreate
 from powercontext_eval.web.usage import UsageSnapshot
 
@@ -94,7 +95,15 @@ def test_health_and_capabilities_are_server_owned_and_secret_free(client: TestCl
     health = client.get("/api/health")
     capabilities = client.get("/api/capabilities")
 
-    assert health.json() == {
+    health_payload = health.json()
+    assert health_payload.pop("resource_admission_open") is True
+    assert health_payload.pop("filesystem_free_bytes") > 0
+    assert health_payload.pop("filesystem_total_bytes") > 0
+    assert health_payload.pop("filesystem_min_free_bytes") == 10 * 1024**3
+    assert health_payload.pop("filesystem_free_inodes") > 0
+    assert health_payload.pop("filesystem_total_inodes") > 0
+    assert health_payload.pop("filesystem_min_free_inodes") == 1_000_000
+    assert health_payload == {
         "service": "ok",
         "worker_lease_active": False,
         "active_task_pairs": 0,
@@ -111,6 +120,27 @@ def test_health_and_capabilities_are_server_owned_and_secret_free(client: TestCl
     }
     assert_safe(health)
     assert_safe(capabilities)
+
+
+def test_health_fails_resource_admission_closed_when_capacity_is_unavailable(
+    config: WebConfig,
+    store: TaskStore,
+) -> None:
+    class UnavailableResourceProbe:
+        def read(self) -> FilesystemCapacity:
+            raise ResourceUnavailable("do not expose filesystem details")
+
+    health = TestClient(create_app(config, store, resource_probe=UnavailableResourceProbe())).get("/api/health")
+
+    assert health.status_code == 200
+    payload = health.json()
+    assert payload["service"] == "ok"
+    assert payload["resource_admission_open"] is False
+    assert payload["filesystem_free_bytes"] is None
+    assert payload["filesystem_total_bytes"] is None
+    assert payload["filesystem_free_inodes"] is None
+    assert payload["filesystem_total_inodes"] is None
+    assert "do not expose" not in health.text
 
 
 def test_capabilities_and_new_task_inputs_share_the_configured_model_allowlist(
@@ -273,7 +303,15 @@ def test_health_reads_four_active_pairs_and_published_capacity_from_store(
 
     health = TestClient(create_app(config, store)).get("/api/health")
 
-    assert health.json() == {
+    health_payload = health.json()
+    assert health_payload.pop("resource_admission_open") is True
+    assert health_payload.pop("filesystem_free_bytes") > 0
+    assert health_payload.pop("filesystem_total_bytes") > 0
+    assert health_payload.pop("filesystem_min_free_bytes") == 16 * 1024**3
+    assert health_payload.pop("filesystem_free_inodes") > 0
+    assert health_payload.pop("filesystem_total_inodes") > 0
+    assert health_payload.pop("filesystem_min_free_inodes") == 1_000_000
+    assert health_payload == {
         "service": "ok",
         "worker_lease_active": True,
         "active_task_pairs": 4,

@@ -156,6 +156,13 @@ export interface HealthResponse {
   running_tasks: number;
   active_task_pairs: number;
   task_parallelism: number;
+  resource_admission_open: boolean;
+  filesystem_free_bytes: number | null;
+  filesystem_total_bytes: number | null;
+  filesystem_min_free_bytes: number;
+  filesystem_free_inodes: number | null;
+  filesystem_total_inodes: number | null;
+  filesystem_min_free_inodes: number;
 }
 
 export interface ArmResponse {
@@ -237,7 +244,7 @@ export interface ReportResponse {
   on: ArmResponse & { arm: "on" };
   comparison: ComparisonResponse;
   evidence: EvidenceResponse;
-  gold_validation?: GoldValidationAudit | null;
+  gold_validation?: GoldValidationAudit | null | undefined;
   revisions: Record<string, string>;
   configuration: Record<string, string>;
   generated_at: string;
@@ -276,7 +283,8 @@ export type BatchPauseReason =
   | "usage_unavailable"
   | "quota_limit"
   | "infrastructure_failure"
-  | "codex_capacity";
+  | "codex_capacity"
+  | "resource_pressure";
 
 export interface UsageSnapshot {
   limit_id: "codex";
@@ -468,7 +476,9 @@ export interface BatchControlEvent {
     | "usage_threshold_reached"
     | "usage_unavailable"
     | "quota_limit_reached"
+    | "infrastructure_failure"
     | "batch_completed"
+    | "resource_pressure"
     | "task_retry_requested";
   actor: "user" | "system";
   details: Record<string, number | string | null>;

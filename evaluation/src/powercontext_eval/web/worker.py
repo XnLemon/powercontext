@@ -44,6 +44,7 @@ from powercontext_eval.web.controls import BatchPauseReason
 from powercontext_eval.web.finalization import DockerFinalizationRuntime, TokensFlowFinalizer
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskPhase, TaskRecord, TaskResult
 from powercontext_eval.web.reporting import ReportingError, load_report
+from powercontext_eval.web.resources import ResourceProbe, default_workspace_reclaimer
 from powercontext_eval.web.store import (
     TaskConflict,
     TaskOwnershipError,
@@ -81,6 +82,10 @@ class UsageProbe(Protocol):
 
 class FinalizerSupervisor(Protocol):
     def run_forever(self, stop: threading.Event, poll_seconds: float) -> None: ...
+
+
+class WorkspaceReclaimerSupervisor(Protocol):
+    def run_forever(self, stop: threading.Event) -> None: ...
 
 
 class TaskPairWorker:
@@ -412,6 +417,8 @@ class EvaluationWorker:
         sleep: Callable[[float], None] | None = None,
         thread_factory: ThreadFactory = threading.Thread,
         finalizer: FinalizerSupervisor | None = None,
+        workspace_reclaimer: WorkspaceReclaimerSupervisor | None = None,
+        resource_probe: ResourceProbe | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -428,6 +435,7 @@ class EvaluationWorker:
             store,
             usage_probe=shared_probe,
             clock=self._clock,
+            resource_probe=resource_probe,
         )
         self._coordinator = coordinator
         self._finalizer = finalizer or TokensFlowFinalizer(
@@ -436,6 +444,7 @@ class EvaluationWorker:
             clock=self._clock,
             task_parallelism=config.task_parallelism,
         )
+        self._workspace_reclaimer = workspace_reclaimer or default_workspace_reclaimer(config, store)
         base_worker_id = worker_id or f"worker-{uuid4().hex}"
 
         def default_sleep(seconds: float) -> None:
@@ -512,6 +521,7 @@ class EvaluationWorker:
             )
             started: list[threading.Thread] = []
             finalizer_thread: threading.Thread | None = None
+            workspace_reclaimer_thread: threading.Thread | None = None
             try:
                 for thread in threads:
                     thread.start()
@@ -536,10 +546,26 @@ class EvaluationWorker:
                     "TokensFlow finalizer supervisor failed to start (error_type=%s)",
                     type(error).__name__,
                 )
+            try:
+                workspace_reclaimer_thread = threading.Thread(
+                    target=self._workspace_reclaimer.run_forever,
+                    args=(self._stop,),
+                    daemon=False,
+                    name="succeeded-workspace-reclaimer",
+                )
+                workspace_reclaimer_thread.start()
+            except Exception as error:  # noqa: BLE001 - capacity gate remains fail closed if maintenance cannot start
+                workspace_reclaimer_thread = None
+                _LOGGER.warning(
+                    "Evaluation workspace reclaimer failed to start (error_type=%s)",
+                    type(error).__name__,
+                )
             for thread in started:
                 thread.join()
             if finalizer_thread is not None:
                 finalizer_thread.join()
+            if workspace_reclaimer_thread is not None:
+                workspace_reclaimer_thread.join()
             if failures:
                 raise RuntimeError("Evaluation worker slot failed") from None
 

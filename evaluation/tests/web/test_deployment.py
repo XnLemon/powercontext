@@ -205,7 +205,7 @@ def test_operator_guide_documents_configurable_task_pair_parallelism() -> None:
     required = {
         "POWERCONTEXT_EVAL_TASK_PARALLELISM",
         "defaults to `1`",
-        "four concurrent task pairs",
+        "twenty concurrent task pairs",
         "stop new claims",
         "active task pairs finish",
         "infrastructure failure",

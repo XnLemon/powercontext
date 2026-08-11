@@ -49,6 +49,13 @@ export const health: HealthResponse = {
   running_tasks: 1,
   active_task_pairs: 3,
   task_parallelism: 4,
+  resource_admission_open: true,
+  filesystem_free_bytes: 200_000_000_000,
+  filesystem_total_bytes: 400_000_000_000,
+  filesystem_min_free_bytes: 20_000_000_000,
+  filesystem_free_inodes: 20_000_000,
+  filesystem_total_inodes: 40_000_000,
+  filesystem_min_free_inodes: 1_000_000,
 };
 
 export const report: ReportResponse = {

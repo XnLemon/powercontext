@@ -21,6 +21,7 @@ describe("App batch report navigation", () => {
     expect(await screen.findByText("Worker 工作中")).toBeVisible();
     expect(screen.getByText("任务对 3 / 4")).toBeVisible();
     expect(screen.getByText("队列 1")).toBeVisible();
+    expect(screen.getByText("资源门禁开放")).toBeVisible();
     expect(screen.getByText("Worker 按配置并行运行独立任务对")).toBeVisible();
     expect(screen.queryByText("全局同时只运行一个任务，其余任务排队")).not.toBeInTheDocument();
   });
@@ -34,6 +35,13 @@ describe("App batch report navigation", () => {
         running_tasks: 0,
         active_task_pairs: 0,
         task_parallelism: 4,
+        resource_admission_open: true,
+        filesystem_free_bytes: 200_000_000_000,
+        filesystem_total_bytes: 400_000_000_000,
+        filesystem_min_free_bytes: 20_000_000_000,
+        filesystem_free_inodes: 20_000_000,
+        filesystem_total_inodes: 40_000_000,
+        filesystem_min_free_inodes: 1_000_000,
       }),
     });
 
@@ -41,6 +49,30 @@ describe("App batch report navigation", () => {
 
     expect(await screen.findByText("Worker 空闲")).toBeVisible();
     expect(screen.queryByText("Worker 未连接")).not.toBeInTheDocument();
+  });
+
+  it("shows when filesystem resource admission is closed", async () => {
+    const api = apiStub({
+      getHealth: vi.fn().mockResolvedValue({
+        service: "ok",
+        worker_lease_active: false,
+        queued_tasks: 1,
+        running_tasks: 0,
+        active_task_pairs: 0,
+        task_parallelism: 20,
+        resource_admission_open: false,
+        filesystem_free_bytes: 1,
+        filesystem_total_bytes: 400_000_000_000,
+        filesystem_min_free_bytes: 80 * 1024 ** 3,
+        filesystem_free_inodes: 1,
+        filesystem_total_inodes: 40_000_000,
+        filesystem_min_free_inodes: 5_000_000,
+      }),
+    });
+
+    render(<App api={api} />);
+
+    expect(await screen.findByText("资源门禁关闭")).toBeVisible();
   });
 
   it("navigates a newly created batch to its aggregate report", async () => {

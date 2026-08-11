@@ -50,6 +50,7 @@ from powercontext_eval.web.reporting import (
     load_raw_report,
     load_report,
 )
+from powercontext_eval.web.resources import FilesystemResourceProbe, ResourceProbe, ResourceUnavailable
 from powercontext_eval.web.store import BatchNotFound, TaskAdmissionRejected, TaskConflict, TaskNotFound, TaskStore
 from powercontext_eval.web.usage import UsageSnapshot, is_fresh
 
@@ -328,12 +329,14 @@ def create_app(
     store: TaskStore | None = None,
     *,
     catalog: BenchmarkCatalog | None = None,
+    resource_probe: ResourceProbe | None = None,
 ) -> FastAPI:
     """Create an API application; evaluation execution remains worker-owned."""
     task_store = store or TaskStore(config.database_path, lease_duration=timedelta(seconds=config.lease_seconds))
     task_store.initialize()
     benchmark_catalog = catalog
     powercontext_source = GitSource(cache_root=config.run_root / "cache" / "powercontext-git")
+    filesystem_probe = resource_probe or FilesystemResourceProbe(config.run_root)
 
     def get_catalog() -> BenchmarkCatalog:
         nonlocal benchmark_catalog
@@ -409,7 +412,29 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> HealthResponse:
-        return HealthResponse(service="ok", **task_store.health_snapshot(now=datetime.now(UTC)))
+        queue_health = task_store.health_snapshot(now=datetime.now(UTC))
+        task_parallelism = queue_health["task_parallelism"]
+        min_free_bytes = config.filesystem_min_free_bytes_for(task_parallelism)
+        min_free_inodes = config.filesystem_min_free_inodes_for(task_parallelism)
+        try:
+            capacity = filesystem_probe.read()
+        except ResourceUnavailable:
+            capacity = None
+        admission_open = capacity is not None and capacity.admission_open(
+            min_free_bytes=min_free_bytes,
+            min_free_inodes=min_free_inodes,
+        )
+        return HealthResponse(
+            service="ok",
+            **queue_health,
+            resource_admission_open=admission_open,
+            filesystem_free_bytes=None if capacity is None else capacity.free_bytes,
+            filesystem_total_bytes=None if capacity is None else capacity.total_bytes,
+            filesystem_min_free_bytes=min_free_bytes,
+            filesystem_free_inodes=None if capacity is None else capacity.free_inodes,
+            filesystem_total_inodes=None if capacity is None else capacity.total_inodes,
+            filesystem_min_free_inodes=min_free_inodes,
+        )
 
     @app.get("/api/capabilities")
     def capabilities() -> Capabilities:

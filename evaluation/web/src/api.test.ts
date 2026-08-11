@@ -81,6 +81,24 @@ describe("EvaluationApi HTTP", () => {
     await expect(api.listBatches()).resolves.toEqual([batch]);
   });
 
+  it("accepts the infrastructure failure event that accompanies a system pause", async () => {
+    const event = {
+      sequence: 1,
+      batch_id: "batch-luna",
+      event_type: "infrastructure_failure",
+      actor: "system",
+      details: {
+        task_id: "task-1",
+        attempt_id: "task-1.attempt-0001",
+        failure_category: "worker_interruption",
+      },
+      occurred_at: "2026-08-03T00:00:00Z",
+    } as const;
+    const { api } = apiWithResponse(jsonResponse([event]));
+
+    await expect(api.listBatchControlEvents("batch-luna")).resolves.toEqual([event]);
+  });
+
   it("accepts batches paused by an exhausted upstream capacity retry budget", async () => {
     const batch = {
       batch_id: "batch-luna",
@@ -179,6 +197,13 @@ describe("EvaluationApi HTTP", () => {
       running_tasks: 0,
       active_task_pairs: 3,
       task_parallelism: 4,
+      resource_admission_open: true,
+      filesystem_free_bytes: 200_000_000_000,
+      filesystem_total_bytes: 400_000_000_000,
+      filesystem_min_free_bytes: 20_000_000_000,
+      filesystem_free_inodes: 20_000_000,
+      filesystem_total_inodes: 40_000_000,
+      filesystem_min_free_inodes: 1_000_000,
     };
     const summary = {
       task_id: "task-1",

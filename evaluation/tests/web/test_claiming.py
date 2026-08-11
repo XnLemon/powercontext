@@ -13,6 +13,7 @@ from powercontext_eval.web.claiming import ClaimCoordinator
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.controls import BatchPauseReason
 from powercontext_eval.web.models import TaskRecord
+from powercontext_eval.web.resources import FilesystemCapacity, ResourceUnavailable
 from powercontext_eval.web.store import TaskStore
 from powercontext_eval.web.usage import UsageSnapshot, UsageUnavailable
 
@@ -159,6 +160,70 @@ def test_unavailable_usage_pauses_batch_and_returns_no_claim(tmp_path: Path) -> 
     assert batch.control.pause_reason is BatchPauseReason.USAGE_UNAVAILABLE
 
 
+class FixedResourceProbe:
+    def __init__(self, observation: FilesystemCapacity | Exception) -> None:
+        self.observation = observation
+        self.calls = 0
+
+    def read(self) -> FilesystemCapacity:
+        self.calls += 1
+        if isinstance(self.observation, Exception):
+            raise self.observation
+        return self.observation
+
+
+@pytest.mark.parametrize(
+    "capacity",
+    [
+        FilesystemCapacity(free_bytes=1, total_bytes=100, free_inodes=10_000_000, total_inodes=20_000_000),
+        FilesystemCapacity(
+            free_bytes=200 * 1024**3,
+            total_bytes=300 * 1024**3,
+            free_inodes=1,
+            total_inodes=20_000_000,
+        ),
+    ],
+)
+def test_resource_pressure_pauses_before_usage_or_claim(tmp_path: Path, capacity: FilesystemCapacity) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    batch_id = _batch(store, key=f"claim-resource-{capacity.free_bytes}-{capacity.free_inodes}", count=1)
+    usage = CountingProbe([_usage(9)])
+    resources = FixedResourceProbe(capacity)
+    coordinator = ClaimCoordinator(
+        config,
+        store,
+        usage_probe=usage,
+        resource_probe=resources,
+        clock=lambda: NOW,
+    )
+
+    assert coordinator.claim("slot-0") is None
+    batch = store.get_batch(batch_id)
+    assert batch.status is BatchStatus.PAUSED
+    assert batch.control.pause_reason is BatchPauseReason.RESOURCE_PRESSURE
+    assert resources.calls == 1
+    assert usage.calls == []
+
+
+def test_unavailable_resource_probe_fails_closed_before_usage(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    batch_id = _batch(store, key="claim-resource-unavailable", count=1)
+    usage = CountingProbe([_usage(9)])
+    coordinator = ClaimCoordinator(
+        config,
+        store,
+        usage_probe=usage,
+        resource_probe=FixedResourceProbe(ResourceUnavailable("unavailable")),
+        clock=lambda: NOW,
+    )
+
+    assert coordinator.claim("slot-0") is None
+    assert store.get_batch(batch_id).control.pause_reason is BatchPauseReason.RESOURCE_PRESSURE
+    assert usage.calls == []
+
+
 def test_stop_closes_the_shared_claim_gate_before_any_replacement(tmp_path: Path) -> None:
     config = _config(tmp_path)
     store = _store(config)
@@ -191,7 +256,20 @@ def test_stop_does_not_wait_for_inflight_probe_or_allow_its_claim(tmp_path: Path
             return _usage(9, observed_at=now)
 
     probe = BlockingProbe()
-    coordinator = ClaimCoordinator(config, store, usage_probe=probe, clock=lambda: NOW)
+    coordinator = ClaimCoordinator(
+        config,
+        store,
+        usage_probe=probe,
+        resource_probe=FixedResourceProbe(
+            FilesystemCapacity(
+                free_bytes=1024**5,
+                total_bytes=2 * 1024**5,
+                free_inodes=100_000_000,
+                total_inodes=200_000_000,
+            )
+        ),
+        clock=lambda: NOW,
+    )
     first_claim: list[object] = []
     stop_started = threading.Event()
     stop_finished = threading.Event()
@@ -245,7 +323,20 @@ def test_stop_rejects_waiting_parallel_claims_without_starting_more_probes(tmp_p
             return _usage(9, observed_at=now)
 
     probe = BlockingProbe()
-    coordinator = ClaimCoordinator(config, store, usage_probe=probe, clock=lambda: NOW)
+    coordinator = ClaimCoordinator(
+        config,
+        store,
+        usage_probe=probe,
+        resource_probe=FixedResourceProbe(
+            FilesystemCapacity(
+                free_bytes=1024**5,
+                total_bytes=2 * 1024**5,
+                free_inodes=100_000_000,
+                total_inodes=200_000_000,
+            )
+        ),
+        clock=lambda: NOW,
+    )
     claims: list[object] = []
     claims_lock = threading.Lock()
 

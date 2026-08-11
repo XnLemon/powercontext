@@ -32,6 +32,7 @@ const reasonLabels = {
   quota_limit: "Codex 额度限制",
   infrastructure_failure: "基础设施失败",
   codex_capacity: "上游模型容量不足（自动重试耗尽）",
+  resource_pressure: "评测文件系统容量不足",
 } as const;
 
 export function BatchControls({ api, batch, report, onUpdated }: BatchControlsProps) {

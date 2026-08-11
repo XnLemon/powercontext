@@ -98,6 +98,7 @@ class BatchControlEventType(StrEnum):
     USAGE_UNAVAILABLE = "usage_unavailable"
     QUOTA_LIMIT_REACHED = "quota_limit_reached"
     INFRASTRUCTURE_FAILURE = "infrastructure_failure"
+    RESOURCE_PRESSURE = "resource_pressure"
     BATCH_COMPLETED = "batch_completed"
     TASK_RETRY_REQUESTED = "task_retry_requested"
 

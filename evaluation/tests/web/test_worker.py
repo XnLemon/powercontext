@@ -24,6 +24,7 @@ from powercontext_eval.web.batches import BatchControlEventType, BatchCreate, Ba
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.controls import BatchControlIntent, BatchPauseReason
 from powercontext_eval.web.models import FailureCategory, SafeFailure, TaskCreate, TaskPhase, TaskStatus
+from powercontext_eval.web.resources import FilesystemCapacity, FilesystemResourceProbe
 from powercontext_eval.web.store import TaskStore
 from powercontext_eval.web.usage import CodexUsageProbe, UsageSnapshot, UsageUnavailable
 from powercontext_eval.web.worker import EvaluationWorker, TaskPairWorker
@@ -63,6 +64,16 @@ def _default_safe_usage_probe(monkeypatch: pytest.MonkeyPatch) -> None:
         CodexUsageProbe,
         "read",
         lambda _self, *, now: _usage(9, observed_at=now),
+    )
+    monkeypatch.setattr(
+        FilesystemResourceProbe,
+        "read",
+        lambda _self: FilesystemCapacity(
+            free_bytes=1024**5,
+            total_bytes=2 * 1024**5,
+            free_inodes=100_000_000,
+            total_inodes=200_000_000,
+        ),
     )
 
 

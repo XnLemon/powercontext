@@ -15,6 +15,10 @@ _SAFE_DOCKER_NETWORK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 MAX_TASK_PARALLELISM = 20
 MAX_TOKENSFLOW_FINALIZER_TIMEOUT_SECONDS = 600
 MAX_CODEX_CAPACITY_RETRY_MAX = 20
+DEFAULT_FILESYSTEM_MIN_FREE_BYTES = 10 * 1024**3
+DEFAULT_FILESYSTEM_MIN_FREE_INODES = 1_000_000
+FILESYSTEM_MIN_FREE_BYTES_PER_TASK = 4 * 1024**3
+FILESYSTEM_MIN_FREE_INODES_PER_TASK = 250_000
 
 
 class _EnvironmentNumbers(BaseModel):
@@ -33,6 +37,9 @@ class _EnvironmentNumbers(BaseModel):
     )
     tokensflow_finalizer_poll_seconds: Annotated[float, Field(gt=0, le=60)] = 5.0
     codex_capacity_retry_max: Annotated[int, Field(ge=0, le=MAX_CODEX_CAPACITY_RETRY_MAX)] = 5
+    filesystem_min_free_bytes: Annotated[int, Field(ge=1)] = DEFAULT_FILESYSTEM_MIN_FREE_BYTES
+    filesystem_min_free_inodes: Annotated[int, Field(ge=1)] = DEFAULT_FILESYSTEM_MIN_FREE_INODES
+    workspace_reclaim_interval_seconds: Annotated[float, Field(gt=0, le=3600)] = 10.0
 
     @field_validator("task_parallelism", mode="before")
     @classmethod
@@ -77,6 +84,9 @@ class WebConfig(BaseModel):
     )
     tokensflow_finalizer_poll_seconds: Annotated[float, Field(gt=0, le=60)] = 5.0
     codex_capacity_retry_max: Annotated[int, Field(ge=0, le=MAX_CODEX_CAPACITY_RETRY_MAX)] = 5
+    filesystem_min_free_bytes: Annotated[int, Field(ge=1)] = DEFAULT_FILESYSTEM_MIN_FREE_BYTES
+    filesystem_min_free_inodes: Annotated[int, Field(ge=1)] = DEFAULT_FILESYSTEM_MIN_FREE_INODES
+    workspace_reclaim_interval_seconds: Annotated[float, Field(gt=0, le=3600)] = 10.0
     codex_models: tuple[str, ...] = (DEFAULT_CODEX_MODEL,)
 
     @field_validator(
@@ -157,6 +167,9 @@ class WebConfig(BaseModel):
         tokensflow_finalizer_timeout_seconds: int = 600,
         tokensflow_finalizer_poll_seconds: float = 5.0,
         codex_capacity_retry_max: int = 5,
+        filesystem_min_free_bytes: int = DEFAULT_FILESYSTEM_MIN_FREE_BYTES,
+        filesystem_min_free_inodes: int = DEFAULT_FILESYSTEM_MIN_FREE_INODES,
+        workspace_reclaim_interval_seconds: float = 10.0,
         codex_models: tuple[str, ...] = (DEFAULT_CODEX_MODEL,),
     ) -> Self:
         return cls(
@@ -190,6 +203,9 @@ class WebConfig(BaseModel):
             tokensflow_finalizer_timeout_seconds=tokensflow_finalizer_timeout_seconds,
             tokensflow_finalizer_poll_seconds=tokensflow_finalizer_poll_seconds,
             codex_capacity_retry_max=codex_capacity_retry_max,
+            filesystem_min_free_bytes=filesystem_min_free_bytes,
+            filesystem_min_free_inodes=filesystem_min_free_inodes,
+            workspace_reclaim_interval_seconds=workspace_reclaim_interval_seconds,
             codex_models=codex_models,
         )
 
@@ -217,6 +233,13 @@ class WebConfig(BaseModel):
                 ),
                 "tokensflow_finalizer_poll_seconds": environ.get(f"{prefix}TOKENSFLOW_FINALIZER_POLL_SECONDS", "5"),
                 "codex_capacity_retry_max": environ.get(f"{prefix}CODEX_CAPACITY_RETRY_MAX", "5"),
+                "filesystem_min_free_bytes": environ.get(
+                    f"{prefix}FILESYSTEM_MIN_FREE_BYTES", str(DEFAULT_FILESYSTEM_MIN_FREE_BYTES)
+                ),
+                "filesystem_min_free_inodes": environ.get(
+                    f"{prefix}FILESYSTEM_MIN_FREE_INODES", str(DEFAULT_FILESYSTEM_MIN_FREE_INODES)
+                ),
+                "workspace_reclaim_interval_seconds": environ.get(f"{prefix}WORKSPACE_RECLAIM_INTERVAL_SECONDS", "10"),
             }
         )
 
@@ -249,6 +272,9 @@ class WebConfig(BaseModel):
             tokensflow_finalizer_timeout_seconds=numbers.tokensflow_finalizer_timeout_seconds,
             tokensflow_finalizer_poll_seconds=numbers.tokensflow_finalizer_poll_seconds,
             codex_capacity_retry_max=numbers.codex_capacity_retry_max,
+            filesystem_min_free_bytes=numbers.filesystem_min_free_bytes,
+            filesystem_min_free_inodes=numbers.filesystem_min_free_inodes,
+            workspace_reclaim_interval_seconds=numbers.workspace_reclaim_interval_seconds,
             codex_models=tuple(environ.get(f"{prefix}CODEX_MODELS", DEFAULT_CODEX_MODEL).split(",")),
         )
 
@@ -262,3 +288,29 @@ class WebConfig(BaseModel):
         """Apply the current admission policy to newly submitted work only."""
 
         return is_safe_codex_model(model) and model in self.codex_models
+
+    @property
+    def filesystem_claim_min_free_bytes(self) -> int:
+        """Scale the byte reserve with the maximum number of concurrent task pairs."""
+
+        return self.filesystem_min_free_bytes_for(self.task_parallelism)
+
+    @property
+    def filesystem_claim_min_free_inodes(self) -> int:
+        """Scale the inode reserve with the maximum number of concurrent task pairs."""
+
+        return self.filesystem_min_free_inodes_for(self.task_parallelism)
+
+    def filesystem_min_free_bytes_for(self, task_parallelism: int) -> int:
+        """Return the effective byte reserve for one published Worker capacity."""
+
+        if not 1 <= task_parallelism <= MAX_TASK_PARALLELISM:
+            raise ValueError("Task parallelism is outside the supported range")
+        return max(self.filesystem_min_free_bytes, task_parallelism * FILESYSTEM_MIN_FREE_BYTES_PER_TASK)
+
+    def filesystem_min_free_inodes_for(self, task_parallelism: int) -> int:
+        """Return the effective inode reserve for one published Worker capacity."""
+
+        if not 1 <= task_parallelism <= MAX_TASK_PARALLELISM:
+            raise ValueError("Task parallelism is outside the supported range")
+        return max(self.filesystem_min_free_inodes, task_parallelism * FILESYSTEM_MIN_FREE_INODES_PER_TASK)

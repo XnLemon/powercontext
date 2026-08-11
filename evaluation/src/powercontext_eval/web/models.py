@@ -276,6 +276,13 @@ class HealthResponse(FrozenModel):
     task_parallelism: Annotated[int, Field(ge=1, le=20)]
     queued_tasks: Annotated[int, Field(ge=0)]
     running_tasks: Annotated[int, Field(ge=0)]
+    resource_admission_open: bool
+    filesystem_free_bytes: Annotated[int, Field(ge=0)] | None
+    filesystem_total_bytes: Annotated[int, Field(ge=0)] | None
+    filesystem_min_free_bytes: Annotated[int, Field(ge=1)]
+    filesystem_free_inodes: Annotated[int, Field(ge=0)] | None
+    filesystem_total_inodes: Annotated[int, Field(ge=0)] | None
+    filesystem_min_free_inodes: Annotated[int, Field(ge=1)]
 
 
 class MetricValue(FrozenModel):
