@@ -594,6 +594,19 @@ def _nonblocking_worker_lock(database_path: Path) -> Iterator[bool]:
             not stat.S_ISREG(metadata.st_mode)
             or stat.S_ISLNK(metadata.st_mode)
             or (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise RuntimeError("Evaluation worker lock is unsafe")
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            try:
+                os.fchmod(descriptor, 0o600)
+            except OSError:
+                raise RuntimeError("Evaluation worker lock is unsafe") from None
+        metadata = lock_path.lstat()
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino)
             or stat.S_IMODE(metadata.st_mode) & 0o077
         ):
             raise RuntimeError("Evaluation worker lock is unsafe")

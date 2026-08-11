@@ -882,6 +882,34 @@ def test_only_one_worker_can_claim_a_task(tmp_path: Path) -> None:
     assert calls == [task.task_id]
 
 
+def test_worker_tightens_an_existing_regular_lock_file_before_use(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    lock_path = config.database_path.with_name(f"{config.database_path.name}.worker.lock")
+    lock_path.write_text("")
+    lock_path.chmod(0o755)
+    worker = EvaluationWorker(config, store, worker_id="permission-recovery")
+
+    assert worker.run_once() is False
+    assert lock_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_worker_never_repairs_a_symlink_lock_target(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    target = tmp_path / "outside-lock"
+    target.write_text("")
+    target.chmod(0o755)
+    lock_path = config.database_path.with_name(f"{config.database_path.name}.worker.lock")
+    lock_path.symlink_to(target)
+    worker = EvaluationWorker(config, store, worker_id="symlink-rejection")
+
+    with pytest.raises((OSError, RuntimeError)):
+        worker.run_once()
+    assert lock_path.is_symlink()
+    assert target.stat().st_mode & 0o777 == 0o755
+
+
 @pytest.mark.parametrize(
     ("error", "category", "summary"),
     [
