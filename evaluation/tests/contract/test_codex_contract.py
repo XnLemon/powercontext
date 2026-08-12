@@ -795,6 +795,58 @@ def test_prewarm_and_codex_exec_share_one_docker_budget(tmp_path: Path) -> None:
     assert errors == []
 
 
+def test_all_sut_docker_execs_share_one_docker_budget(tmp_path: Path) -> None:
+    guard = threading.Lock()
+    start = threading.Barrier(10)
+    budget_entered = threading.Event()
+    release = threading.Event()
+    current = 0
+    maximum = 0
+    errors: list[BaseException] = []
+
+    class BlockingDocker:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            nonlocal current, maximum
+            assert argv[:2] == ("docker", "exec")
+            with guard:
+                current += 1
+                maximum = max(maximum, current)
+                if current == 4:
+                    budget_entered.set()
+            try:
+                assert release.wait(timeout=5)
+                return command_result(
+                    '{"available": [], "installed": '
+                    '[{"pluginId": "powercontext", "version": "1.0.0", "installed": true}]}\n'
+                )
+            finally:
+                with guard:
+                    current -= 1
+
+    def list_plugins(index: int) -> None:
+        try:
+            start.wait()
+            DockerSut(BlockingDocker())._plugin_list(f"container-{index}", make_paths(tmp_path / str(index)))
+        except BaseException as error:  # noqa: BLE001 - thread failures must reach the assertion
+            errors.append(error)
+
+    threads = [threading.Thread(target=list_plugins, args=(index,)) for index in range(9)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    try:
+        assert budget_entered.wait(timeout=2)
+        time.sleep(0.05)
+        assert maximum == 4
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+
+
 def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     docker = TranscriptDocker()

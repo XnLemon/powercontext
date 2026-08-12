@@ -581,6 +581,17 @@ class _DockerExecRunner(ProcessRunner):
             )
 
 
+class _DockerPressureRunner(ProcessRunner):
+    """Route every Docker SUT command through the shared daemon budget."""
+
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+
+    def run(self, argv: Any, **kwargs: Any) -> CommandResult:
+        with docker_pressure.heavy_operation():
+            return self._delegate.run(argv, **kwargs)
+
+
 class DockerSut:
     """Execute one arm while owning only run-prefixed Docker resources."""
 
@@ -592,7 +603,7 @@ class DockerSut:
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
-        self._docker = docker
+        self._docker = _DockerPressureRunner(docker)
         self._relay_factory = relay_factory
         self._clock = clock
         self._sleeper = sleeper
