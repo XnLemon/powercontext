@@ -65,7 +65,10 @@ _INVALID_DOCKER_COPY_SYMLINK = re.compile(r'invalid symlink "[^"\r\n]+" -> "[^"\
 _DOCKER_NETWORK_CONTROL_LOCK = threading.Lock()
 _DOCKER_NETWORK_CREATE_ATTEMPTS = 3
 _DOCKER_NETWORK_CREATE_RETRY_SECONDS = 0.25
-_DOCKER_NETWORK_POOL = ipaddress.ip_network("198.18.0.0/15")
+# Use RFC1918 space that behaves like the host's existing Docker bridges.  The
+# RFC 2544 benchmark block can be created by Docker but is not permitted to
+# reach the host-bound proxy relay on the evaluation fleet.
+_DOCKER_NETWORK_POOL = ipaddress.ip_network("172.30.0.0/15")
 _DOCKER_NETWORK_PREFIX_LENGTH = 28
 _DOCKER_NETWORK_SUBNET_ATTEMPTS = 64
 _DOCKER_NETWORK_SUBNET_COLLISION_MARKERS = (

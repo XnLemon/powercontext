@@ -2654,7 +2654,7 @@ def test_network_create_uses_dedicated_pool_and_probes_after_subnet_collision(tm
     subnets = [ipaddress.ip_network(command[command.index("--subnet") + 1]) for command in creates]
     gateways = [ipaddress.ip_address(command[command.index("--gateway") + 1]) for command in creates]
     assert subnets[0] != subnets[1]
-    assert all(subnet.prefixlen == 28 and subnet.subnet_of(ipaddress.ip_network("198.18.0.0/15")) for subnet in subnets)
+    assert all(subnet.prefixlen == 28 and subnet.subnet_of(ipaddress.ip_network("172.30.0.0/15")) for subnet in subnets)
     assert gateways == [subnet.network_address + 1 for subnet in subnets]
 
 
