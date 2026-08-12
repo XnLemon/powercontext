@@ -1377,6 +1377,64 @@ def test_finalizer_supervisor_is_independent_from_task_pair_slots_and_stops_prom
     assert worker._stop.is_set()
 
 
+def test_usage_refresher_supervisor_runs_independently_and_stops_promptly(tmp_path: Path) -> None:
+    config = _config(tmp_path, task_parallelism=4, usage_probe_seconds=60)
+    store = _store(config)
+    entered = threading.Event()
+    observed: list[tuple[threading.Event, float]] = []
+
+    class FakeUsageRefresher:
+        def run_forever(self, stop: threading.Event, poll_seconds: float) -> None:
+            observed.append((stop, poll_seconds))
+            entered.set()
+            stop.wait(timeout=2)
+
+    worker = EvaluationWorker(config, store, usage_refresher=FakeUsageRefresher(), clock=lambda: NOW)
+    supervisor = threading.Thread(target=worker.run_forever)
+    supervisor.start()
+    assert entered.wait(timeout=2)
+
+    worker.stop()
+    supervisor.join(timeout=2)
+
+    assert not supervisor.is_alive()
+    assert observed == [(worker._stop, config.usage_probe_seconds)]
+
+
+def test_usage_refresher_supervisor_failure_pauses_runnable_batch_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, task_parallelism=2, usage_probe_seconds=60)
+    store = _store(config)
+    batch = _create_batch(store, key="usage-refresher-failure", instance_ids=("instance_owner__repo-a",))
+    failed = threading.Event()
+
+    class FailingUsageRefresher:
+        def run_forever(self, stop: threading.Event, poll_seconds: float) -> None:
+            del stop, poll_seconds
+            failed.set()
+            raise RuntimeError("private usage refresh detail")
+
+    worker = EvaluationWorker(config, store, usage_refresher=FailingUsageRefresher(), clock=lambda: NOW)
+    for slot in worker._slots:
+        monkeypatch.setattr(slot, "run_forever", lambda stop: stop.wait(timeout=2))
+    supervisor = threading.Thread(target=worker.run_forever)
+    supervisor.start()
+    assert failed.wait(timeout=2)
+    deadline = time.monotonic() + 2
+    while store.get_batch(batch.batch_id).status is not BatchStatus.PAUSED and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    worker.stop()
+    supervisor.join(timeout=2)
+
+    assert not supervisor.is_alive()
+    paused = store.get_batch(batch.batch_id)
+    assert paused.status is BatchStatus.PAUSED
+    assert paused.control.pause_reason is BatchPauseReason.USAGE_UNAVAILABLE
+
+
 @pytest.mark.parametrize("parallelism", [4, 10])
 def test_supervisor_respects_configured_isolated_task_pair_capacity_and_stop_prevents_replacement(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, parallelism: int

@@ -99,15 +99,26 @@ class ClaimCoordinator:
 
         with self._lock:
             now = self._clock()
-            try:
-                snapshot = self._usage_probe.read(now=now)
-                self._store.apply_usage_snapshot(snapshot, now=now)
-            except UsageUnavailable:
-                self._store.pause_runnable_batches(
-                    reason=BatchPauseReason.USAGE_UNAVAILABLE,
-                    now=now,
-                )
+            self._refresh_usage_locked(now)
             self._store.finalize_batch_intent_after_attempt(batch_id, now=now)
+
+    def refresh_usage(self) -> bool:
+        """Refresh account usage independently of task claim and completion traffic."""
+
+        with self._lock:
+            return self._refresh_usage_locked(self._clock())
+
+    def _refresh_usage_locked(self, now: datetime) -> bool:
+        try:
+            snapshot = self._usage_probe.read(now=now)
+            self._store.apply_usage_snapshot(snapshot, now=now)
+        except UsageUnavailable:
+            self._store.pause_runnable_batches(
+                reason=BatchPauseReason.USAGE_UNAVAILABLE,
+                now=now,
+            )
+            return False
+        return True
 
     def _usage_before_claim(self, now: datetime) -> UsageSnapshot:
         snapshot = self._store.latest_usage_snapshot()
@@ -118,3 +129,19 @@ class ClaimCoordinator:
         ):
             return snapshot
         return self._usage_probe.read(now=now)
+
+
+class PeriodicUsageRefresher:
+    """Keep the account snapshot fresh while every task-pair slot is busy."""
+
+    def __init__(self, coordinator: ClaimCoordinator) -> None:
+        self._coordinator = coordinator
+
+    def run_forever(self, stop: threading.Event, poll_seconds: float) -> None:
+        """Refresh immediately and then at the configured interruptible interval."""
+
+        if poll_seconds <= 0:
+            raise ValueError("Usage refresh interval must be positive")
+        while not stop.is_set():
+            self._coordinator.refresh_usage()
+            stop.wait(poll_seconds)

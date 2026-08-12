@@ -38,7 +38,7 @@ from powercontext_eval.runner import (
     run_swebench_pro_instance,
 )
 from powercontext_eval.tokensflow import TokensFlowFinalizationDescriptor, TokensFlowFinalizationRegistrar
-from powercontext_eval.web.claiming import ClaimCoordinator
+from powercontext_eval.web.claiming import ClaimCoordinator, PeriodicUsageRefresher
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.controls import BatchPauseReason
 from powercontext_eval.web.finalization import DockerFinalizationRuntime, TokensFlowFinalizer
@@ -86,6 +86,10 @@ class FinalizerSupervisor(Protocol):
 
 class WorkspaceReclaimerSupervisor(Protocol):
     def run_forever(self, stop: threading.Event) -> None: ...
+
+
+class UsageRefreshSupervisor(Protocol):
+    def run_forever(self, stop: threading.Event, poll_seconds: float) -> None: ...
 
 
 class TaskPairWorker:
@@ -429,6 +433,7 @@ class EvaluationWorker:
         thread_factory: ThreadFactory = threading.Thread,
         finalizer: FinalizerSupervisor | None = None,
         workspace_reclaimer: WorkspaceReclaimerSupervisor | None = None,
+        usage_refresher: UsageRefreshSupervisor | None = None,
         resource_probe: ResourceProbe | None = None,
     ) -> None:
         self._config = config
@@ -456,6 +461,7 @@ class EvaluationWorker:
             task_parallelism=config.task_parallelism,
         )
         self._workspace_reclaimer = workspace_reclaimer or default_workspace_reclaimer(config, store)
+        self._usage_refresher = usage_refresher or PeriodicUsageRefresher(coordinator)
         base_worker_id = worker_id or f"worker-{uuid4().hex}"
 
         def default_sleep(seconds: float) -> None:
@@ -521,6 +527,19 @@ class EvaluationWorker:
                     self.stop()
                     pause_after_slot_failure()
 
+            def run_usage_refresher() -> None:
+                try:
+                    self._usage_refresher.run_forever(self._stop, self._config.usage_probe_seconds)
+                except Exception as error:  # noqa: BLE001 - usage gating must fail closed on supervisor defects
+                    self._store.pause_runnable_batches(
+                        reason=BatchPauseReason.USAGE_UNAVAILABLE,
+                        now=self._clock(),
+                    )
+                    _LOGGER.warning(
+                        "Account usage refresher stopped unexpectedly (error_type=%s)",
+                        type(error).__name__,
+                    )
+
             threads = tuple(
                 threading.Thread(
                     target=run_slot,
@@ -531,6 +550,7 @@ class EvaluationWorker:
                 for index, slot in enumerate(self._slots)
             )
             started: list[threading.Thread] = []
+            usage_refresh_thread: threading.Thread | None = None
             finalizer_thread: threading.Thread | None = None
             workspace_reclaimer_thread: threading.Thread | None = None
             try:
@@ -543,6 +563,23 @@ class EvaluationWorker:
                 for thread in started:
                     thread.join()
                 raise RuntimeError("Evaluation worker slot failed") from None
+            try:
+                usage_refresh_thread = threading.Thread(
+                    target=run_usage_refresher,
+                    daemon=False,
+                    name="account-usage-refresher",
+                )
+                usage_refresh_thread.start()
+            except Exception as error:  # noqa: BLE001 - claims remain fail closed if refreshing cannot start
+                usage_refresh_thread = None
+                self._store.pause_runnable_batches(
+                    reason=BatchPauseReason.USAGE_UNAVAILABLE,
+                    now=self._clock(),
+                )
+                _LOGGER.warning(
+                    "Account usage refresher failed to start (error_type=%s)",
+                    type(error).__name__,
+                )
             try:
                 finalizer_thread = threading.Thread(
                     target=self._finalizer.run_forever,
@@ -573,6 +610,8 @@ class EvaluationWorker:
                 )
             for thread in started:
                 thread.join()
+            if usage_refresh_thread is not None:
+                usage_refresh_thread.join()
             if finalizer_thread is not None:
                 finalizer_thread.join()
             if workspace_reclaimer_thread is not None:

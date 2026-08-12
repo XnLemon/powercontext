@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from powercontext_eval.web.batches import BatchControlEventType, BatchCreate, BatchStatus
-from powercontext_eval.web.claiming import ClaimCoordinator
+from powercontext_eval.web.claiming import ClaimCoordinator, PeriodicUsageRefresher
 from powercontext_eval.web.config import WebConfig
 from powercontext_eval.web.controls import BatchPauseReason
 from powercontext_eval.web.models import TaskRecord
@@ -129,6 +129,56 @@ def test_concurrent_claims_share_one_fresh_account_usage_probe(tmp_path: Path) -
     assert probe.maximum_active == 1
     assert len(tasks) == 4
     assert len({task.task_id for task in tasks}) == 4
+
+
+def test_periodic_usage_refresh_keeps_snapshot_current_without_new_claims(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    stop = threading.Event()
+    observations = iter((NOW, NOW + timedelta(seconds=60)))
+
+    class StopAfterSecondProbe(CountingProbe):
+        def read(self, *, now: datetime) -> UsageSnapshot:
+            snapshot = super().read(now=now)
+            if len(self.calls) == 2:
+                stop.set()
+            return snapshot
+
+    probe = StopAfterSecondProbe([_usage(9), _usage(10)])
+    coordinator = ClaimCoordinator(config, store, usage_probe=probe, clock=lambda: next(observations))
+    refresher = PeriodicUsageRefresher(coordinator)
+    thread = threading.Thread(target=refresher.run_forever, args=(stop, 0.01))
+
+    thread.start()
+    try:
+        deadline = time.monotonic() + 2
+        while len(probe.calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert probe.calls == [NOW, NOW + timedelta(seconds=60)]
+    assert store.latest_usage_snapshot() == _usage(10, observed_at=NOW + timedelta(seconds=60))
+    assert store.list_batches() == []
+
+
+def test_periodic_usage_refresh_fails_closed_when_probe_is_unavailable(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    batch_id = _batch(store, key="periodic-usage-unavailable", count=1)
+    coordinator = ClaimCoordinator(
+        config,
+        store,
+        usage_probe=CountingProbe([UsageUnavailable("unavailable")]),
+        clock=lambda: NOW,
+    )
+
+    assert coordinator.refresh_usage() is False
+    batch = store.get_batch(batch_id)
+    assert batch.status is BatchStatus.PAUSED
+    assert batch.control.pause_reason is BatchPauseReason.USAGE_UNAVAILABLE
 
 
 def test_threshold_snapshot_pauses_batch_and_returns_no_claim(tmp_path: Path) -> None:
