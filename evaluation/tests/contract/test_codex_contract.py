@@ -724,6 +724,77 @@ def test_workspace_initialization_and_codex_exec_share_one_docker_budget(tmp_pat
     assert errors == []
 
 
+def test_prewarm_and_codex_exec_share_one_docker_budget(tmp_path: Path) -> None:
+    guard = threading.Lock()
+    start = threading.Barrier(10)
+    budget_entered = threading.Event()
+    release = threading.Event()
+    current = 0
+    maximum = 0
+    errors: list[BaseException] = []
+
+    class BlockingDocker:
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            nonlocal current, maximum
+            with guard:
+                current += 1
+                maximum = max(maximum, current)
+                if current == 4:
+                    budget_entered.set()
+            try:
+                assert release.wait(timeout=5)
+                return command_result("")
+            finally:
+                with guard:
+                    current -= 1
+
+    jobs: list[Callable[[], object]] = []
+    for index in range(5):
+        root = tmp_path / f"prewarm-{index}"
+        paths = make_paths(root)
+        paths.prepare()
+        config = replace(sut_config(root), run_id=f"prewarm-{index}")
+        for binary in (config.codex_binary, config.uv_binary):
+            binary.write_text("binary")
+            binary.chmod(0o755)
+        sut = DockerSut(BlockingDocker())
+        jobs.append(
+            lambda sut=sut, config=config, paths=paths: sut._prewarm(
+                config,
+                Arm.OFF,
+                paths,
+                "powercontext-eval-test-network",
+                "http://127.0.0.1:12345",
+            )
+        )
+    for index in range(4):
+        runner = _DockerExecRunner(BlockingDocker(), f"container-{index}")
+        jobs.append(lambda runner=runner: runner.run(("codex", "exec"), cwd=tmp_path))
+
+    def run_job(job: Callable[[], object]) -> None:
+        try:
+            start.wait()
+            job()
+        except BaseException as error:  # noqa: BLE001 - thread failures must reach the assertion
+            errors.append(error)
+
+    threads = [threading.Thread(target=run_job, args=(job,)) for job in jobs]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    try:
+        assert budget_entered.wait(timeout=2)
+        time.sleep(0.05)
+        assert maximum == 4
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+
+
 def test_sut_transcript_has_hardening_mount_allowlist_shared_network_and_scope(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     docker = TranscriptDocker()

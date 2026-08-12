@@ -1812,6 +1812,20 @@ class DockerSut:
         network: str,
         relay_url: str,
     ) -> None:
+        # Dependency installation and plugin setup start several attached Docker
+        # runs. Keep the whole prewarm sequence in the shared daemon budget so
+        # completed Gold jobs cannot accumulate an unbounded second wave here.
+        with docker_pressure.heavy_operation():
+            self._prewarm_with_docker(config, arm, paths, network, relay_url)
+
+    def _prewarm_with_docker(
+        self,
+        config: SutConfig,
+        arm: Arm,
+        paths: ArmPaths,
+        network: str,
+        relay_url: str,
+    ) -> None:
         del arm
         common_environment = {
             **loopback_proxy_environment(relay_url),
@@ -2024,13 +2038,14 @@ class DockerSut:
             "--port",
             "8000",
         )
-        self._docker.run(
-            command,
-            cwd=paths.runtime,
-            timeout=60,
-            env=tokensflow_environment,
-            secrets=tokensflow_command_secrets,
-        )
+        with docker_pressure.heavy_operation():
+            self._docker.run(
+                command,
+                cwd=paths.runtime,
+                timeout=60,
+                env=tokensflow_environment,
+                secrets=tokensflow_command_secrets,
+            )
 
     def _readiness(self, container: str, paths: ArmPaths) -> None:
         command = (
@@ -2055,11 +2070,12 @@ class DockerSut:
         raise InvalidTreatment("PowerContext Server did not become ready")
 
     def _verify_codex_version(self, container: str, paths: ArmPaths, store: ArtifactStore) -> None:
-        result = self._docker.run(
-            ("docker", "exec", container, _CONTAINER_CODEX, "--version"),
-            cwd=paths.runtime,
-            timeout=30,
-        )
+        with docker_pressure.heavy_operation():
+            result = self._docker.run(
+                ("docker", "exec", container, _CONTAINER_CODEX, "--version"),
+                cwd=paths.runtime,
+                timeout=30,
+            )
         match = re.fullmatch(r"codex-cli ([0-9]+\.[0-9]+\.[0-9]+)\n?", result.stdout)
         if match is None or match.group(1) != EXPECTED_CODEX_VERSION:
             raise InvalidTreatment("Codex CLI version does not match the pinned experiment")
