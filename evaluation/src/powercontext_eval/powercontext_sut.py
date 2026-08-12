@@ -774,6 +774,7 @@ class DockerSut:
     def _create_network(self, config: SutConfig, network: str, cwd: Path) -> None:
         last_error: CommandError | None = None
         for subnet in _docker_network_subnet_candidates(config.run_id):
+            gateway = str(ipaddress.ip_network(subnet).network_address + 1)
             command = (
                 "docker",
                 "network",
@@ -781,6 +782,8 @@ class DockerSut:
                 "--internal",
                 "--subnet",
                 subnet,
+                "--gateway",
+                gateway,
                 "--label",
                 f"powercontext-eval.run={config.run_id}",
                 network,
