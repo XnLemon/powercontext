@@ -245,6 +245,38 @@ def test_recall_does_not_write_an_evaluation_trace_by_default(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_recall_uses_the_eval_home_when_codex_filters_the_trace_path(
+    recall_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("POWERCONTEXT_EVAL_TRACE_PATH", raising=False)
+    monkeypatch.setenv("POWERCONTEXT_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        recall_module,
+        "_prepare_context",
+        lambda *_args, **_kwargs: _prepared("PowerContext recalled context: Use the retained audit."),
+    )
+    monkeypatch.setattr(recall_module, "derive_scope_id", lambda *_args, **_kwargs: "eval:run-1:on")
+    monkeypatch.setattr(recall_module, "_capture_prompt", lambda *_args, **_kwargs: {"position": 1})
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps({"hook_event_name": "UserPromptSubmit", "cwd": "/workspace", "prompt": "audit injection"})
+        ),
+    )
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+
+    assert recall_module.main() == 0
+
+    trace = tmp_path / "evaluation-injections.jsonl"
+    event = json.loads(trace.read_text())
+    assert event["event_type"] == "powercontext_injection"
+    assert event["scope_id"] == "eval:run-1:on"
+    assert event["injected_text"] == "PowerContext recalled context: Use the retained audit."
+
+
 @pytest.mark.parametrize("event_name", ["UserPromptSubmit", "user_prompt_submit"])
 def test_hook_accepts_codex_event_name_variants(
     recall_module: ModuleType,

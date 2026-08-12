@@ -343,7 +343,13 @@ def _record_evaluation_trace(
 
     raw_path = os.environ.get("POWERCONTEXT_EVAL_TRACE_PATH")
     if raw_path is None or not raw_path.strip():
-        return
+        eval_home = os.environ.get("POWERCONTEXT_HOME")
+        if not scope_id.startswith("eval:") or eval_home is None or not eval_home.strip():
+            return
+        home = Path(eval_home)
+        if not home.is_absolute():
+            return
+        raw_path = os.fspath(home / "evaluation-injections.jsonl")
     event: dict[str, object] = {
         "event_type": "powercontext_injection",
         "observed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
