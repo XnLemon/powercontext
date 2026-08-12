@@ -59,6 +59,13 @@ def test_dashboard_is_the_authenticated_server_ui_entry(tmp_path) -> None:
     assert removed_dashboard_alias.status_code == 404
     assert missing_scopes.status_code == 401
     assert scopes.status_code == 200
+    assert 'data-server-session="missing"' in home.text
+    assert 'id="auth-shell"' in home.text
+    assert 'id="auth-shell" hidden' not in home.text
+    assert 'id="page-status" hidden' in home.text
+    assert 'class="server-content" id="dashboard"' in home.text
+    assert 'id="dashboard" hidden' not in home.text
+    assert "dashboard.js?v=state-races" in home.text
     assert scopes.json() == [
         {"scope_id": "person:psiace", "display_name": "PsiACE"},
         {"scope_id": "project:powercontext", "display_name": "PowerContext"},
