@@ -164,17 +164,12 @@ def test_recall_records_exact_injected_context_only_when_eval_trace_is_enabled(
 ) -> None:
     trace = tmp_path / "evaluation-injections.jsonl"
     monkeypatch.setenv("POWERCONTEXT_EVAL_TRACE_PATH", str(trace))
-    search_response = {
-        "hits": [
-            {
-                "citation": {"memory_ref": "memory://decision-1@2", "entry_id": "decision-1", "revision": 2},
-                "text": "Refresh namespace after writes.",
-                "score": 0.91,
-                "matched_by": ["lexical", "semantic"],
-            }
-        ]
-    }
-    monkeypatch.setattr(recall_module, "_search", lambda *_args, **_kwargs: search_response)
+    prepared_context = "PowerContext recalled context: Refresh namespace after writes."
+    monkeypatch.setattr(
+        recall_module,
+        "_prepare_context",
+        lambda *_args, **_kwargs: _prepared(prepared_context),
+    )
     monkeypatch.setattr(
         recall_module,
         "derive_scope_id",
@@ -206,13 +201,12 @@ def test_recall_records_exact_injected_context_only_when_eval_trace_is_enabled(
         "observed_at": event["observed_at"],
         "query": "fix namespace refresh",
         "injected_text": injected,
-        "hits": search_response["hits"],
+        "hits": [],
         "scope_id": "eval:run-1:on",
         "session_id": "session-1",
         "turn_id": "turn-2",
     }
-    assert event["injected_text"].startswith("PowerContext recalled")
-    assert event["hits"][0]["citation"]["entry_id"] == "decision-1"
+    assert event["injected_text"] == prepared_context
     assert event["observed_at"].endswith("Z")
     assert stat.S_IMODE(trace.stat().st_mode) == 0o600
 
@@ -223,7 +217,11 @@ def test_recall_does_not_write_an_evaluation_trace_by_default(
     tmp_path: Path,
 ) -> None:
     monkeypatch.delenv("POWERCONTEXT_EVAL_TRACE_PATH", raising=False)
-    monkeypatch.setattr(recall_module, "_search", lambda *_args, **_kwargs: {"hits": [{"text": "Use memory."}]})
+    monkeypatch.setattr(
+        recall_module,
+        "_prepare_context",
+        lambda *_args, **_kwargs: _prepared("PowerContext recalled context: Use memory."),
+    )
     monkeypatch.setattr(
         recall_module,
         "derive_scope_id",
