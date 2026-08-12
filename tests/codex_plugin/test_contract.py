@@ -125,13 +125,14 @@ def test_codex_settings_normalize_the_mcp_path_to_http_base(
     assert settings_module._http_base_url("https://memory.example/api/mcp/") == "https://memory.example/api"
 
 
-def test_project_context_skill_preserves_the_explicit_handoff_boundary() -> None:
+def test_project_context_skill_uses_the_high_level_work_continuity_loop() -> None:
     content = (PLUGIN_ROOT / "skills" / "project-context" / "SKILL.md").read_text()
 
-    assert "capture_content_source" in content
-    assert "activate_handoff" in content
-    assert "`boundary_source`" in content
+    assert "create_work_contract" in content
+    assert "handoff_current_work" in content
+    assert "acknowledge_handoff" in content
+    assert "record_task_outcome" in content
     assert "canonical temporary" in content
-    assert "finalize_handoff" in content
     assert 'selection: "prepared"' in content
     assert "Call `commit_handoff` only when" in content
+    assert "Do not treat every session stop as task completion" in content

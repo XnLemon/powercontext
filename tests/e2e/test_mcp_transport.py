@@ -113,16 +113,20 @@ def test_mcp_projects_curated_tools_at_the_configured_server_path(tmp_path: Path
     tools = asyncio.run(exercise_tools())
 
     assert tools == {
+        "acknowledge_handoff",
         "activate_handoff",
         "approve_artifact_candidate",
         "capture_content_source",
         "commit_handoff",
         "continue_handoff",
+        "create_work_contract",
         "finalize_handoff",
         "get_artifact_candidate",
         "get_memory_entry",
+        "handoff_current_work",
         "list_artifact_candidates",
         "list_memory_entries",
+        "record_task_outcome",
         "reject_artifact_candidate",
         "remember_memory",
         "retire_memory_entry",

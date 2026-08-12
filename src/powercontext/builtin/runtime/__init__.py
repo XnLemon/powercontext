@@ -42,9 +42,11 @@ from powercontext.builtin.runtime.application import (
     ScopedSkillApplication,
     ScopedSourceApplication,
     ScopedStatisticsApplication,
+    ScopedWorkApplication,
     SkillApplication,
     SourceApplication,
     StatisticsApplication,
+    WorkApplication,
 )
 from powercontext.builtin.runtime.composition import (
     BuiltinConfigurationError,
@@ -237,6 +239,7 @@ __all__ = [
     "ScopedSkillApplication",
     "ScopedSourceApplication",
     "ScopedStatisticsApplication",
+    "ScopedWorkApplication",
     "SearchMemoryRequest",
     "SkillApplication",
     "SkillCandidate",
@@ -248,6 +251,7 @@ __all__ = [
     "StatisticsApplication",
     "StatisticsPeriod",
     "UsageStatistics",
+    "WorkApplication",
     "open_builtin_contexts",
     "open_builtin_runtime",
 ]

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import ValidationError
+
 from powercontext.artifacts import ArtifactRef
 from powercontext.builtin.artifacts.experience import Experience, ExperienceContent
 from powercontext.builtin.artifacts.handoff import HandoffCitation as RuntimeHandoffCitation
@@ -39,6 +41,7 @@ from powercontext.builtin.runtime import (
     HandoffResolution,
     HandoffSourceCitation,
     HandoffStatement,
+    InvalidRuntimeRequestError,
     MemoryChange,
     MemoryChangesPage,
     MemoryEntriesPage,
@@ -111,7 +114,30 @@ from powercontext.builtin.runtime import (
     Statistics as RuntimeStatistics,
 )
 from powercontext.builtin.sources import ExternalSkillImportMode as RuntimeExternalSkillImportMode
+from powercontext.builtin.work import (
+    AcknowledgeHandoff as RuntimeAcknowledgeHandoff,
+)
+from powercontext.builtin.work import (
+    CreateWorkContract as RuntimeCreateWorkContract,
+)
+from powercontext.builtin.work import (
+    CurrentWorkHandoff as RuntimeCurrentWorkHandoff,
+)
+from powercontext.builtin.work import (
+    HandoffAcknowledgement as RuntimeHandoffAcknowledgement,
+)
+from powercontext.builtin.work import (
+    HandoffCurrentWork as RuntimeHandoffCurrentWork,
+)
+from powercontext.builtin.work import PreparedWorkHandoff as RuntimePreparedWorkHandoff
+from powercontext.builtin.work import RecordTaskOutcome as RuntimeRecordTaskOutcome
+from powercontext.builtin.work import TaskCheck as RuntimeTaskCheck
+from powercontext.builtin.work import TaskOutcome as RuntimeTaskOutcome
+from powercontext.builtin.work import WorkClaim as RuntimeWorkClaim
+from powercontext.builtin.work import WorkContract as RuntimeWorkContract
+from powercontext.builtin.work import WorkSourceReceipt as RuntimeWorkSourceReceipt
 from powercontext.http import (
+    AcknowledgeHandoffRequest,
     ActivateHandoffRequest,
     ApproveArtifactCandidateRequest,
     ArtifactCandidate,
@@ -123,6 +149,7 @@ from powercontext.http import (
     CaptureContentSourceResponse,
     CaptureStatus,
     CommittedHandoff,
+    CreateWorkContractRequest,
     EntryChange,
     EntryChangeOperation,
     ExperienceArtifact,
@@ -140,8 +167,10 @@ from powercontext.http import (
     GetExperienceRequest,
     GetMemoryEntryRequest,
     GetSkillRequest,
+    HandoffAcknowledgement,
     HandoffActivationStatus,
     HandoffClaim,
+    HandoffCurrentWorkRequest,
     HandoffDisposition,
     HandoffEvidenceStatus,
     HandoffResolutionStatus,
@@ -162,9 +191,11 @@ from powercontext.http import (
     PreparedContextSchema,
     PreparedContextStatus,
     PreparedHandoffSchema,
+    PreparedWorkHandoff,
     PrepareHandoffRequest,
     ProposeExperienceRequest,
     ProposeSkillRequest,
+    RecordTaskOutcomeRequest,
     RejectArtifactCandidateRequest,
     ResolveExternalSkillRequest,
     RetireMemoryEntryRequest,
@@ -179,6 +210,10 @@ from powercontext.http import (
     SkillProposal,
     SkillValidationItem,
     SourceReference,
+    TaskCheck,
+    WorkClaim,
+    WorkSourceKind,
+    WorkSourceReceipt,
 )
 from powercontext.http import (
     HandoffActivation as TransportHandoffActivation,
@@ -236,6 +271,116 @@ def capture_request(value: CaptureContentSourceRequest) -> CaptureSource:
         source_id=value.source_id,
         content=value.content,
         metadata={} if value.metadata is None else value.metadata,
+    )
+
+
+def create_work_contract_request(value: CreateWorkContractRequest) -> RuntimeCreateWorkContract:
+    try:
+        return RuntimeCreateWorkContract(
+            source_id=value.source_id,
+            contract=RuntimeWorkContract(
+                objective=value.contract.objective,
+                facts=tuple(_runtime_work_claim(claim) for claim in value.contract.facts),
+                in_scope=tuple(item.root for item in value.contract.in_scope),
+                exclusions=tuple(item.root for item in value.contract.exclusions),
+                completion_criteria=tuple(item.root for item in value.contract.completion_criteria),
+                authorization_notes=tuple(item.root for item in value.contract.authorization_notes),
+                open_questions=tuple(item.root for item in value.contract.open_questions),
+            ),
+        )
+    except ValidationError as error:
+        raise InvalidRuntimeRequestError("work-contract") from error
+
+
+def handoff_current_work_request(value: HandoffCurrentWorkRequest) -> RuntimeHandoffCurrentWork:
+    try:
+        return RuntimeHandoffCurrentWork(
+            source_id=value.source_id,
+            handoff=RuntimeCurrentWorkHandoff(
+                objective=value.handoff.objective,
+                state=tuple(_runtime_work_claim(claim) for claim in value.handoff.state),
+                disposition=value.handoff.disposition.value,
+                next_action=(
+                    None if value.handoff.next_action is None else _runtime_work_claim(value.handoff.next_action)
+                ),
+                omissions=tuple(item.root for item in value.handoff.omissions),
+            ),
+        )
+    except ValidationError as error:
+        raise InvalidRuntimeRequestError("current-work-handoff") from error
+
+
+def record_task_outcome_request(value: RecordTaskOutcomeRequest) -> RuntimeRecordTaskOutcome:
+    try:
+        return RuntimeRecordTaskOutcome(
+            source_id=value.source_id,
+            outcome=RuntimeTaskOutcome(
+                objective=value.outcome.objective,
+                status=value.outcome.status.value,
+                summary=value.outcome.summary,
+                observations=tuple(_runtime_work_claim(claim) for claim in value.outcome.observations),
+                checks=tuple(_runtime_task_check(check) for check in value.outcome.checks),
+                produced_artifacts=tuple(runtime_artifact_reference(ref) for ref in value.outcome.produced_artifacts),
+                remaining_work=tuple(item.root for item in value.outcome.remaining_work),
+            ),
+        )
+    except ValidationError as error:
+        raise InvalidRuntimeRequestError("task-outcome") from error
+
+
+def acknowledge_handoff_request(value: AcknowledgeHandoffRequest) -> RuntimeAcknowledgeHandoff:
+    try:
+        return RuntimeAcknowledgeHandoff(
+            source_id=value.source_id,
+            receiver=value.receiver,
+            status=value.status.value,
+            selection=value.selection.value,
+            prepared=None if value.prepared is None else runtime_prepared_handoff(value.prepared),
+            revision=None if value.revision is None else runtime_artifact_reference(value.revision),
+            message=value.message,
+        )
+    except ValidationError as error:
+        raise InvalidRuntimeRequestError("handoff-acknowledgement") from error
+
+
+def work_source_receipt_response(value: RuntimeWorkSourceReceipt) -> WorkSourceReceipt:
+    return WorkSourceReceipt(
+        kind=WorkSourceKind(value.kind),
+        source=source_reference(value.source_ref),
+        position=value.position,
+        content_digest=value.content_digest,
+    )
+
+
+def prepared_work_handoff_response(value: RuntimePreparedWorkHandoff) -> PreparedWorkHandoff:
+    return PreparedWorkHandoff(
+        boundary=work_source_receipt_response(value.boundary),
+        handoff=prepared_handoff_response(value.handoff),
+    )
+
+
+def handoff_acknowledgement_response(value: RuntimeHandoffAcknowledgement) -> HandoffAcknowledgement:
+    return HandoffAcknowledgement(
+        resolution=handoff_resolution_response(value.resolution),
+        receipt=work_source_receipt_response(value.receipt),
+    )
+
+
+def _runtime_work_claim(value: WorkClaim) -> RuntimeWorkClaim:
+    return RuntimeWorkClaim(
+        text=value.text,
+        basis=value.basis.value,
+        evidence=tuple(runtime_handoff_citation(citation) for citation in value.evidence),
+    )
+
+
+def _runtime_task_check(value: TaskCheck) -> RuntimeTaskCheck:
+    return RuntimeTaskCheck(
+        name=value.name,
+        status=value.status.value,
+        details=value.details,
+        basis=value.basis.value,
+        evidence=tuple(runtime_handoff_citation(citation) for citation in value.evidence),
     )
 
 

@@ -32,17 +32,22 @@ from powercontext.builtin.runtime import InferenceConfig
 from powercontext.builtin.sources import ContentSource
 from powercontext.client import PowerContextClient, ServerResponseError
 from powercontext.http import (
+    AcknowledgeHandoffRequest,
     ActivateHandoffRequest,
     CaptureContentSourceRequest,
     CommitHandoffRequest,
     ContinueHandoffRequest,
+    CreateWorkContractRequest,
     FinalizeHandoffRequest,
     FlushMemoryRequest,
     GetMemoryEntryRequest,
+    HandoffCurrentWorkRequest,
     HandoffSelection,
+    HandoffSourceCitation,
     ListMemoryChangesRequest,
     ListMemoryEntriesRequest,
     PrepareContextRequest,
+    RecordTaskOutcomeRequest,
     RememberMemoryRequest,
     RetireMemoryEntryRequest,
     ReviseMemoryEntryRequest,
@@ -278,6 +283,138 @@ def test_sdk_handoff_lifecycle_reaches_generation_and_persistence(tmp_path: Path
         assert exact.selected_revision == committed.reference
         assert latest.selection == "latest"
         assert latest.selected_revision == committed.reference
+
+    asyncio.run(scenario())
+
+
+def test_sdk_closes_the_delegation_handoff_and_outcome_loop(tmp_path: Path) -> None:
+    scope_id = "work-continuity-e2e"
+    app = create_server_app(settings=_server_settings(tmp_path / "work-continuity.db"))
+
+    async def scenario() -> None:
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://testserver",
+            ) as transport,
+        ):
+            client = PowerContextClient("http://testserver", http_client=transport)
+            contract = await client.create_work_contract(
+                CreateWorkContractRequest.model_validate({
+                    "scope_id": scope_id,
+                    "source_id": "contract-1",
+                    "contract": {
+                        "schema": "powercontext.work-contract.v1",
+                        "trust": "untrusted_input",
+                        "objective": "Implement and verify the work-continuity loop.",
+                        "facts": [
+                            {
+                                "text": "The repository already has an explicit Handoff lifecycle.",
+                                "basis": "declared",
+                                "evidence": [],
+                            }
+                        ],
+                        "in_scope": ["Reuse the existing Handoff Artifact."],
+                        "exclusions": ["Do not add an Agent scheduler."],
+                        "completion_criteria": ["A receiver can acknowledge exact Handoff evidence."],
+                        "authorization_notes": ["This record does not grant tool execution authority."],
+                        "open_questions": [],
+                    },
+                })
+            )
+            prepared = await client.handoff_current_work(
+                HandoffCurrentWorkRequest.model_validate({
+                    "scope_id": scope_id,
+                    "source_id": "boundary-1",
+                    "handoff": {
+                        "schema": "powercontext.current-work-handoff.v1",
+                        "trust": "untrusted_input",
+                        "objective": "Implement and verify the work-continuity loop.",
+                        "state": [
+                            {
+                                "text": "The high-level Runtime path is implemented.",
+                                "basis": "declared",
+                                "evidence": [],
+                            }
+                        ],
+                        "disposition": "continuable",
+                        "next_action": {
+                            "text": "Run the public Server acceptance test.",
+                            "basis": "declared",
+                            "evidence": [],
+                        },
+                        "omissions": ["Live OceanBase validation is not part of this SQLite acceptance test."],
+                    },
+                })
+            )
+            temporary_acknowledgement = await client.acknowledge_handoff(
+                AcknowledgeHandoffRequest.model_validate({
+                    "scope_id": scope_id,
+                    "source_id": "receipt-temporary-1",
+                    "receiver": "codex-receiver",
+                    "status": "accepted",
+                    "selection": HandoffSelection.PREPARED,
+                    "prepared": prepared.handoff,
+                })
+            )
+            committed = await client.commit_handoff(CommitHandoffRequest(scope_id=scope_id, handoff=prepared.handoff))
+            durable_acknowledgement = await client.acknowledge_handoff(
+                AcknowledgeHandoffRequest.model_validate({
+                    "scope_id": scope_id,
+                    "source_id": "receipt-durable-1",
+                    "receiver": "human-reviewer",
+                    "status": "accepted",
+                    "selection": HandoffSelection.LATEST,
+                })
+            )
+            outcome = await client.record_task_outcome(
+                RecordTaskOutcomeRequest.model_validate({
+                    "scope_id": scope_id,
+                    "source_id": "outcome-1",
+                    "outcome": {
+                        "schema": "powercontext.task-outcome.v1",
+                        "trust": "untrusted_observation",
+                        "objective": "Implement and verify the work-continuity loop.",
+                        "status": "succeeded",
+                        "summary": "The public SQLite Server journey completed.",
+                        "observations": [
+                            {
+                                "text": "Both temporary and committed Handoffs were acknowledged.",
+                                "basis": "declared",
+                                "evidence": [],
+                            }
+                        ],
+                        "checks": [
+                            {
+                                "name": "SQLite Server acceptance",
+                                "status": "passed",
+                                "basis": "declared",
+                                "evidence": [],
+                            }
+                        ],
+                        "produced_artifacts": [],
+                        "remaining_work": [],
+                    },
+                })
+            )
+
+        assert contract.kind == "work-contract"
+        assert contract.position == 1
+        assert prepared.boundary.kind == "handoff-boundary"
+        assert prepared.boundary.position == 2
+        citation = prepared.handoff.content.state[0].citations[0].root
+        assert isinstance(citation, HandoffSourceCitation)
+        assert citation.source_ref == prepared.boundary.source
+        assert temporary_acknowledgement.resolution.selection == "prepared"
+        assert temporary_acknowledgement.receipt.kind == "handoff-receipt"
+        assert temporary_acknowledgement.receipt.position == 3
+        assert committed.source_refs == [prepared.boundary.source]
+        assert durable_acknowledgement.resolution.selection == "latest"
+        assert durable_acknowledgement.resolution.selected_revision == committed.reference
+        assert durable_acknowledgement.receipt.position == 4
+        assert outcome.kind == "task-outcome"
+        assert outcome.position == 5
 
     asyncio.run(scenario())
 

@@ -8,7 +8,15 @@ The integration uses each public surface for the job it fits:
 - the `UserPromptSubmit` hook first calls `POST /v1/context/prepare`, then
   independently captures the current prompt with `POST /v1/sources/content`;
 - Streamable HTTP MCP at `http://127.0.0.1:8000/mcp` gives Codex the curated
-  memory tools.
+  Memory and work-continuity tools.
+
+The `project-context` skill uses four high-level work operations instead of
+assembling the low-level Handoff lifecycle manually: `create_work_contract`,
+`handoff_current_work`, `acknowledge_handoff`, and `record_task_outcome`.
+Persistent Handoff milestones still require an explicit `commit_handoff`.
+Acknowledgements and historical authorization notes never grant Codex new
+execution authority, and the prompt hook does not infer completion from Stop or
+SessionEnd.
 
 Managed Skills use a separate, explicit handoff. A reviewer approves the exact
 Candidate through HTTP or the Client CLI, then the user exports that immutable

@@ -14,13 +14,44 @@ All remote interfaces operate on the same Server and persistent Artifact storage
 | Python Client SDK | Typed async calls to a running Server | `powercontext[client]` |
 | Core SDK | In-process Source, Artifact, Trigger, and composition contracts | base package |
 | HTTP | Service integration from any language | `powercontext[server]` |
-| MCP | Agent tools for Memory and Candidate Review | enabled by Server |
+| MCP | Agent tools for Memory and work continuity | enabled by Server |
 
 ## Codex plugin
 
-The project-context skill tells Codex when to search, remember, revise, or retire Memory. The prompt hook recalls
-relevant entries and captures user input as Source evidence. MCP tools perform explicit operations. The plugin never
-starts or embeds the Server.
+The project-context skill tells Codex when to search, remember, revise, retire, delegate, hand off, acknowledge, or
+record an outcome. The prompt hook recalls relevant entries and captures user input as Source evidence. MCP tools
+perform explicit operations. The plugin never starts or embeds the Server.
+
+## Work continuity
+
+The Server exposes one high-level loop across HTTP, the Python Client, and MCP:
+
+```text
+create_work_contract
+  -> work
+  -> handoff_current_work
+  -> continue_handoff + acknowledge_handoff
+  -> record_task_outcome
+```
+
+`create_work_contract` records the objective, scope, completion criteria, authority notes, and consequential open
+questions for newly delegated work. `handoff_current_work` captures caller-inspected state and returns a temporary
+Prepared Handoff; it does not publish a milestone. Call `commit_handoff` separately when the user wants a durable
+milestone.
+
+The receiver calls `continue_handoff` with a prepared, exact, or latest selection before acknowledging it.
+`acknowledge_handoff(status="accepted")` resolves that selection again and refuses acceptance when any Handoff evidence
+is unavailable. A receiver can instead record `needs_clarification` or `declined`. The receipt records an observation;
+it grants no tool or execution authority.
+
+`record_task_outcome` preserves `succeeded`, `partial`, `blocked`, `failed`, `cancelled`, or `unknown` and exact check
+states. It stores a `task-outcome` Source that existing Experience incubation can inspect, but it does not generate or
+approve an Experience by itself. Integrations should call it only at a real completion or interruption boundary, not
+solely because a prompt, Stop event, or Session ended.
+
+Claims and checks are either `declared` with no evidence or `verified` with exact same-scope citations. A readable
+citation proves identity and availability, not freshness. Current instructions, live workspace state, capabilities,
+and authorization still take precedence over all Work and Handoff records.
 
 ## CLI
 
