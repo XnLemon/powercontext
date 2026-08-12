@@ -642,7 +642,9 @@ def test_parallel_workspace_initialization_shares_a_bounded_docker_budget(tmp_pa
 def test_workspace_initialization_budget_is_released_after_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(powercontext_sut, "_DOCKER_WORKSPACE_INIT_SEMAPHORE", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(
+        powercontext_sut.docker_pressure, "_DOCKER_HEAVY_OPERATION_SEMAPHORE", threading.BoundedSemaphore(1)
+    )
 
     class FailingDocker:
         def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
@@ -2602,7 +2604,9 @@ def test_parallel_codex_execs_share_a_bounded_attach_budget(tmp_path: Path) -> N
 
 
 def test_codex_exec_attach_budget_is_released_after_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(powercontext_sut, "_DOCKER_CODEX_EXEC_SEMAPHORE", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(
+        powercontext_sut.docker_pressure, "_DOCKER_HEAVY_OPERATION_SEMAPHORE", threading.BoundedSemaphore(1)
+    )
 
     class FailingDocker:
         def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:

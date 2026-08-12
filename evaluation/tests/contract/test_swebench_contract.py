@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
 import threading
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import BinaryIO, cast
@@ -169,6 +171,88 @@ def test_official_evaluator_uses_exact_cli_and_retains_raw_output(tmp_path: Path
         "redo": True,
         "block_network": False,
     }
+
+
+def test_official_evaluator_and_codex_exec_share_docker_pressure_budget(tmp_path: Path) -> None:
+    guard = threading.Lock()
+    start = threading.Barrier(10)
+    budget_entered = threading.Event()
+    release = threading.Event()
+    current = 0
+    maximum = 0
+    errors: list[BaseException] = []
+
+    class BlockingProcess:
+        def __init__(self, instance_id: str | None = None) -> None:
+            self.instance_id = instance_id
+
+        def run(self, argv: Sequence[str], **kwargs: object) -> CommandResult:
+            nonlocal current, maximum
+            with guard:
+                current += 1
+                maximum = max(maximum, current)
+                if current == 4:
+                    budget_entered.set()
+            try:
+                assert release.wait(timeout=5)
+                if self.instance_id is not None:
+                    arguments = tuple(argv)
+                    output_dir = Path(arguments[arguments.index("--output_dir") + 1])
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    (output_dir / "eval_results.json").write_text(json.dumps({self.instance_id: True}))
+                return CommandResult(tuple(argv), os.fspath(kwargs.get("cwd", "")), 0, "", "")
+            finally:
+                with guard:
+                    current -= 1
+
+    jobs: list[Callable[[], object]] = []
+    for index in range(5):
+        root = tmp_path / f"official-{index}"
+        harness = root / "harness"
+        harness.mkdir(parents=True)
+        raw = root / "instance.jsonl"
+        prediction = root / "predictions.json"
+        raw.write_text("{}\n")
+        prediction.write_text("[]")
+        instance_id = f"instance-{index}"
+        evaluator = OfficialEvaluator(BlockingProcess(instance_id), python_executable=sys.executable)
+        jobs.append(
+            lambda evaluator=evaluator, harness=harness, raw=raw, prediction=prediction, root=root, instance_id=instance_id: (
+                evaluator.evaluate(
+                    harness_root=harness,
+                    raw_sample_path=raw,
+                    prediction_path=prediction,
+                    output_dir=root / "output",
+                    instance_id=instance_id,
+                )
+            )
+        )
+    for index in range(4):
+        runner = sut_module._DockerExecRunner(BlockingProcess(), f"container-{index}")
+        jobs.append(lambda runner=runner: runner.run(("codex", "exec"), cwd=tmp_path))
+
+    def run_job(job: Callable[[], object]) -> None:
+        try:
+            start.wait()
+            job()
+        except BaseException as error:  # noqa: BLE001 - thread failures must reach the assertion
+            errors.append(error)
+
+    threads = [threading.Thread(target=run_job, args=(job,)) for job in jobs]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    try:
+        assert budget_entered.wait(timeout=2)
+        time.sleep(0.05)
+        assert maximum == 4
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
 
 
 def _official_evaluator_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:

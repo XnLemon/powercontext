@@ -25,6 +25,7 @@ from types import MappingProxyType
 from typing import Any, Protocol
 from urllib.parse import quote, quote_plus, urlsplit
 
+from powercontext_eval import docker_pressure
 from powercontext_eval.artifacts import ArtifactStore
 from powercontext_eval.codex import (
     DEFAULT_CODEX_MODEL,
@@ -64,10 +65,6 @@ _INVALID_DOCKER_COPY_SYMLINK = re.compile(r'invalid symlink "[^"\r\n]+" -> "[^"\
 _DOCKER_NETWORK_CONTROL_LOCK = threading.Lock()
 _DOCKER_NETWORK_CREATE_ATTEMPTS = 3
 _DOCKER_NETWORK_CREATE_RETRY_SECONDS = 0.25
-_DOCKER_HEAVY_OPERATION_MAX_CONCURRENCY = 4
-_DOCKER_HEAVY_OPERATION_SEMAPHORE = threading.BoundedSemaphore(_DOCKER_HEAVY_OPERATION_MAX_CONCURRENCY)
-_DOCKER_WORKSPACE_INIT_SEMAPHORE = _DOCKER_HEAVY_OPERATION_SEMAPHORE
-_DOCKER_CODEX_EXEC_SEMAPHORE = _DOCKER_HEAVY_OPERATION_SEMAPHORE
 _CONTAINER_CODEX = "/tools/codex-dir/codex"
 _CONTAINER_TOKENSFLOW = "/tools/tokensflow-dir/tokensflow"
 _CONTAINER_TOKENSFLOW_WRAPPER_DIR = "/tools/tokensflow-wrapper"
@@ -574,10 +571,10 @@ class _DockerExecRunner(ProcessRunner):
         docker_environment: tuple[str, ...] = ()
         if environment:
             docker_environment = tuple(part for item in environment.items() for part in ("-e", f"{item[0]}={item[1]}"))
-        # Docker's attached exec streams become unreliable when all 20 task pairs
-        # enter Codex at once.  Keep the worker capacity at 20, while bounding only
-        # the long-lived attach streams that share the daemon control socket.
-        with _DOCKER_CODEX_EXEC_SEMAPHORE:
+        # Docker's attached exec streams become unreliable under a full 20-task
+        # wave. Keep worker capacity at 20 while sharing one process-wide daemon
+        # budget with official harnesses and workspace extraction.
+        with docker_pressure.heavy_operation():
             return self._delegate.run(
                 ("docker", "exec", "-i", *docker_environment, self._container, *tuple(argv)),
                 **kwargs,
@@ -1577,8 +1574,8 @@ class DockerSut:
 
     def _initialize_workspace(self, config: SutConfig, arm: Arm, paths: ArmPaths) -> None:
         # Concurrent image extraction is another Docker control-plane and metadata
-        # hotspot. Keep task scheduling at 20, while bounding only create/cp setup.
-        with _DOCKER_WORKSPACE_INIT_SEMAPHORE:
+        # hotspot. Share the process-wide daemon budget while scheduling 20 tasks.
+        with docker_pressure.heavy_operation():
             self._initialize_workspace_with_docker(config, arm, paths)
 
     def _initialize_workspace_with_docker(self, config: SutConfig, arm: Arm, paths: ArmPaths) -> None:

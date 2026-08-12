@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from powercontext_eval import docker_pressure
 from powercontext_eval.errors import PowerContextEvalError
 from powercontext_eval.powercontext_sut import (
     LOOPBACK_NO_PROXY,
@@ -183,12 +184,16 @@ class OfficialEvaluator:
         harness_root: Path,
         environment: dict[str, str],
     ) -> CommandResult:
-        return self._runner.run(
-            argv,
-            cwd=harness_root,
-            timeout=4_200,
-            env=environment,
-        )
+        # The official harness uses Docker SDK attached exec streams internally.
+        # Share the same process-wide budget as workspace extraction and Codex
+        # attaches so a 20-task wave cannot overload the Docker daemon socket.
+        with docker_pressure.heavy_operation():
+            return self._runner.run(
+                argv,
+                cwd=harness_root,
+                timeout=4_200,
+                env=environment,
+            )
 
 
 def _write_docker_proxy_config(path: Path, relay_url: str) -> None:
