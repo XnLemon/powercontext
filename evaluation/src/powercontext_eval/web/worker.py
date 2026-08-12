@@ -192,12 +192,16 @@ class TaskPairWorker:
         except (TaskOwnershipError, TaskConflict):
             ownership_lost.set()
         except Exception as error:  # noqa: BLE001 - the worker boundary must sanitize every runner failure
+            command_kind, returncode = _safe_command_failure_fields(error)
             _LOGGER.error(
-                "Evaluation task execution failed (task_id=%s attempt_number=%s phase=%s error_type=%s)",
+                "Evaluation task execution failed "
+                "(task_id=%s attempt_number=%s phase=%s error_type=%s command_kind=%s returncode=%s)",
                 task.task_id,
                 task.attempt_number,
                 phase.value if phase is not None else "none",
                 type(error).__name__,
+                command_kind,
+                returncode,
             )
             failure = _safe_failure(
                 error,
@@ -658,6 +662,21 @@ def _safe_failure(error: Exception, phase: TaskPhase | None, *, auto_retry_allow
     else:
         fixed = FailureCategory.INTERNAL, _INTERNAL_SUMMARY
     return SafeFailure(category=fixed[0], phase=phase, summary=fixed[1])
+
+
+def _safe_command_failure_fields(error: Exception) -> tuple[str, str]:
+    """Return fixed-shape diagnostics without exposing arguments, paths, or output."""
+
+    if not isinstance(error, CommandError):
+        return "none", "none"
+    argv = error.result.argv
+    command_kind = "unknown"
+    if argv:
+        executable = Path(argv[0]).name
+        if executable in {"docker", "git"}:
+            operation = argv[1] if len(argv) > 1 and argv[1].isalpha() else "unknown"
+            command_kind = f"{executable}.{operation}"
+    return command_kind, str(error.result.returncode)
 
 
 def _phase_failure(phase: TaskPhase | None) -> tuple[FailureCategory, str]:

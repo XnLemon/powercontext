@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import shutil
@@ -2582,6 +2583,11 @@ def test_pair_marks_off_before_network_preflight_and_retries_transient_create(tm
     assert started_arms == [Arm.OFF, Arm.ON]
     assert docker.create_attempts == 2
     assert sleeps == [0.25]
+    creates = [command for command in docker.commands if command[:3] == ("docker", "network", "create")]
+    assert [command[command.index("--subnet") + 1] for command in creates] == [
+        creates[0][creates[0].index("--subnet") + 1],
+        creates[0][creates[0].index("--subnet") + 1],
+    ]
 
 
 def test_network_create_timeout_adopts_only_exact_owned_network(tmp_path: Path) -> None:
@@ -2612,6 +2618,73 @@ def test_network_create_timeout_adopts_only_exact_owned_network(tmp_path: Path) 
 
     assert docker.create_attempts == 1
     assert ("docker", "network", "rm", f"powercontext-eval-{config.run_id}") in docker.commands
+
+
+def test_network_create_uses_dedicated_pool_and_probes_after_subnet_collision(tmp_path: Path) -> None:
+    config = sut_config(tmp_path)
+
+    class CollidingSubnetDocker:
+        def __init__(self) -> None:
+            self.commands: list[tuple[str, ...]] = []
+            self.creates = 0
+
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            self.commands.append(argv)
+            if argv[:3] == ("docker", "network", "create"):
+                self.creates += 1
+                if self.creates == 1:
+                    raise CommandFailed(
+                        "injected subnet collision",
+                        command_result("", stderr="Pool overlaps with other one on this address space", returncode=1),
+                    )
+                return command_result("network-id\n")
+            if argv[:3] == ("docker", "network", "inspect"):
+                return command_result("", returncode=1)
+            raise AssertionError(argv)
+
+    docker = CollidingSubnetDocker()
+    DockerSut(docker, sleeper=lambda _seconds: None)._create_network(
+        config,
+        f"powercontext-eval-{config.run_id}",
+        tmp_path,
+    )
+
+    creates = [command for command in docker.commands if command[:3] == ("docker", "network", "create")]
+    assert len(creates) == 2
+    subnets = [ipaddress.ip_network(command[command.index("--subnet") + 1]) for command in creates]
+    assert subnets[0] != subnets[1]
+    assert all(subnet.prefixlen == 28 and subnet.subnet_of(ipaddress.ip_network("198.18.0.0/15")) for subnet in subnets)
+
+
+def test_failed_pair_removes_empty_owned_network_but_retains_failure(tmp_path: Path) -> None:
+    config = sut_config(tmp_path)
+
+    class EmptyNetworkDocker:
+        def __init__(self) -> None:
+            self.commands: list[tuple[str, ...]] = []
+
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            self.commands.append(argv)
+            if argv[:3] == ("docker", "network", "create"):
+                return command_result("network-id\n")
+            if argv[:3] == ("docker", "network", "inspect"):
+                if any("len .Containers" in part for part in argv):
+                    return command_result(f"{config.run_id} 0\n")
+                return command_result('[{"IPAM":{"Config":[{"Gateway":"198.18.0.1"}]}}]')
+            if argv[:3] == ("docker", "network", "rm"):
+                return command_result("")
+            raise AssertionError(argv)
+
+    docker = EmptyNetworkDocker()
+    network = f"powercontext-eval-{config.run_id}"
+
+    with (
+        pytest.raises(RuntimeError, match="injected pair failure"),
+        DockerSut(docker, relay_factory=FakeRelay)._run_network(config, tmp_path),
+    ):
+        raise RuntimeError("injected pair failure")
+
+    assert ("docker", "network", "rm", network) in docker.commands
 
 
 def test_parallel_pairs_serialize_docker_network_control_plane(tmp_path: Path) -> None:

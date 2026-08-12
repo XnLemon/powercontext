@@ -65,6 +65,13 @@ _INVALID_DOCKER_COPY_SYMLINK = re.compile(r'invalid symlink "[^"\r\n]+" -> "[^"\
 _DOCKER_NETWORK_CONTROL_LOCK = threading.Lock()
 _DOCKER_NETWORK_CREATE_ATTEMPTS = 3
 _DOCKER_NETWORK_CREATE_RETRY_SECONDS = 0.25
+_DOCKER_NETWORK_POOL = ipaddress.ip_network("198.18.0.0/15")
+_DOCKER_NETWORK_PREFIX_LENGTH = 28
+_DOCKER_NETWORK_SUBNET_ATTEMPTS = 64
+_DOCKER_NETWORK_SUBNET_COLLISION_MARKERS = (
+    "pool overlaps with other one on this address space",
+    "requested subnet overlaps",
+)
 _CONTAINER_CODEX = "/tools/codex-dir/codex"
 _CONTAINER_TOKENSFLOW = "/tools/tokensflow-dir/tokensflow"
 _CONTAINER_TOKENSFLOW_WRAPPER_DIR = "/tools/tokensflow-wrapper"
@@ -752,7 +759,11 @@ class DockerSut:
                 try:
                     relay.stop()
                 finally:
-                    if network_created and not preserve_for_diagnosis:
+                    remove_network = network_created and (
+                        not preserve_for_diagnosis
+                        or self._network_is_exact_owned_and_empty(network, config.run_id, cwd)
+                    )
+                    if remove_network:
                         self._docker.run(
                             ("docker", "network", "rm", network),
                             cwd=cwd,
@@ -761,25 +772,31 @@ class DockerSut:
                         )
 
     def _create_network(self, config: SutConfig, network: str, cwd: Path) -> None:
-        command = (
-            "docker",
-            "network",
-            "create",
-            "--internal",
-            "--label",
-            f"powercontext-eval.run={config.run_id}",
-            network,
-        )
         last_error: CommandError | None = None
-        for attempt in range(_DOCKER_NETWORK_CREATE_ATTEMPTS):
-            try:
-                self._docker.run(command, cwd=cwd, timeout=30)
-                return
-            except CommandError as error:
-                last_error = error
-                if self._network_has_exact_owner(network, config.run_id, cwd):
+        for subnet in _docker_network_subnet_candidates(config.run_id):
+            command = (
+                "docker",
+                "network",
+                "create",
+                "--internal",
+                "--subnet",
+                subnet,
+                "--label",
+                f"powercontext-eval.run={config.run_id}",
+                network,
+            )
+            for attempt in range(_DOCKER_NETWORK_CREATE_ATTEMPTS):
+                try:
+                    self._docker.run(command, cwd=cwd, timeout=30)
                     return
-                if attempt + 1 < _DOCKER_NETWORK_CREATE_ATTEMPTS:
+                except CommandError as error:
+                    last_error = error
+                    if self._network_has_exact_owner(network, config.run_id, cwd):
+                        return
+                    if _is_docker_network_subnet_collision(error):
+                        break
+                    if attempt + 1 == _DOCKER_NETWORK_CREATE_ATTEMPTS:
+                        raise
                     self._sleeper(_DOCKER_NETWORK_CREATE_RETRY_SECONDS * (attempt + 1))
         assert last_error is not None
         raise last_error
@@ -802,6 +819,25 @@ class DockerSut:
         except (CommandError, OSError):
             return False
         return result.returncode == 0 and result.stdout.strip() == run_id
+
+    def _network_is_exact_owned_and_empty(self, network: str, run_id: str, cwd: Path) -> bool:
+        try:
+            result = self._docker.run(
+                (
+                    "docker",
+                    "network",
+                    "inspect",
+                    "--format",
+                    '{{ index .Labels "powercontext-eval.run" }} {{ len .Containers }}',
+                    network,
+                ),
+                cwd=cwd,
+                timeout=30,
+                check=False,
+            )
+        except (CommandError, OSError):
+            return False
+        return result.returncode == 0 and result.stdout.strip() == f"{run_id} 0"
 
     def _execute_arm(
         self,
@@ -2186,6 +2222,30 @@ def _validated_gateway(value: str) -> str:
     if address.is_loopback or address.is_unspecified or address.is_multicast or not address.is_private:
         raise UnsafeSutConfiguration("Docker gateway must be a private bridge address")
     return str(address)
+
+
+def _docker_network_subnet_candidates(run_id: str) -> tuple[str, ...]:
+    """Return a deterministic, bounded probe sequence from the evaluation-only pool."""
+
+    subnet_size = 1 << (32 - _DOCKER_NETWORK_PREFIX_LENGTH)
+    subnet_count = _DOCKER_NETWORK_POOL.num_addresses // subnet_size
+    start = int.from_bytes(hashlib.sha256(run_id.encode("ascii")).digest()[:8], "big") % subnet_count
+    return tuple(
+        str(
+            ipaddress.ip_network(
+                (
+                    int(_DOCKER_NETWORK_POOL.network_address) + ((start + offset) % subnet_count) * subnet_size,
+                    _DOCKER_NETWORK_PREFIX_LENGTH,
+                ),
+            )
+        )
+        for offset in range(min(_DOCKER_NETWORK_SUBNET_ATTEMPTS, subnet_count))
+    )
+
+
+def _is_docker_network_subnet_collision(error: CommandError) -> bool:
+    output = f"{error.result.stdout}\n{error.result.stderr}".casefold()
+    return any(marker in output for marker in _DOCKER_NETWORK_SUBNET_COLLISION_MARKERS)
 
 
 def _reserve_port(address: str) -> int:

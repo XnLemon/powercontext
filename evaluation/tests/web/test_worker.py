@@ -15,9 +15,10 @@ from powercontext_eval.benchmarks.base import GoldCheckFailed
 from powercontext_eval.benchmarks.swebench_pro.adapter import DatasetSchemaError, SweBenchProInstance
 from powercontext_eval.benchmarks.swebench_pro.evaluator import OfficialResultError
 from powercontext_eval.codex import CodexCapacityError, CodexInfrastructureError
-from powercontext_eval.errors import GitSourceError
+from powercontext_eval.errors import CommandFailed, GitSourceError
 from powercontext_eval.models import Arm
 from powercontext_eval.powercontext_sut import InvalidTreatment, UnsafeSutConfiguration
+from powercontext_eval.process import CommandResult
 from powercontext_eval.runner import MinimalRunConfig, MinimalRunResult, RunConfig, RunPhase
 from powercontext_eval.tokensflow import TokensFlowFinalizationDescriptor, TokensFlowInfrastructureError
 from powercontext_eval.web.batches import BatchControlEventType, BatchCreate, BatchStatus
@@ -969,6 +970,34 @@ def test_unknown_failure_never_persists_exception_text(
     assert failed.failure_summary == "The evaluation worker failed unexpectedly. Inspect the retained m0 logs."
     assert credential not in config.database_path.read_bytes().decode(errors="ignore")
     assert "error_type=RuntimeError" in caplog.text
+    assert credential not in caplog.text
+
+
+def test_command_failure_logs_only_safe_command_shape_and_return_code(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = _config(tmp_path)
+    store = _store(config)
+    _create(store)
+    credential = "sk-fake-credential"
+
+    def runner(config: Any, *, on_phase: Any) -> MinimalRunResult:
+        on_phase(RunPhase.RUNNING_OFF)
+        result = CommandResult(
+            argv=("docker", "cp", f"container:{credential}", "/private/path"),
+            cwd=f"/private/{credential}",
+            returncode=70,
+            stdout=credential,
+            stderr=credential,
+        )
+        raise CommandFailed("secret command failure", result)
+
+    EvaluationWorker(config, store, runner=runner, clock=lambda: NOW).run_once()
+
+    assert "error_type=CommandFailed" in caplog.text
+    assert "command_kind=docker.cp" in caplog.text
+    assert "returncode=70" in caplog.text
     assert credential not in caplog.text
 
 
