@@ -3,7 +3,7 @@
 - Start Date: 2026-08-13
 - Status: Draft
 - RFC PR: [oceanbase/powercontext#1223](https://github.com/oceanbase/powercontext/pull/1223)
-- Tracking Issue: 尚未分配
+- Tracking Issue: [oceanbase/powercontext#1224](https://github.com/oceanbase/powercontext/issues/1224)
 - Related RFCs: [RFC 0001](0001_product_definition_and_vision.md)、[RFC 0048](0048_handoff_artifact.md)、
   [RFC 0051](0051_experience_skill_artifact_families.md)、[RFC 0082](0082_handoff_report.md)
 
