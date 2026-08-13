@@ -175,6 +175,7 @@ def run_swebench_pro_instance(
     process = ProcessRunner()
     image_cwd = config.root.absolute().parent
     image_was_present = _inspect_task_image(process, instance.task_image, cwd=image_cwd) is not None
+    evaluation_failed = False
     try:
         return _run_swebench_pro_instance(
             config,
@@ -182,9 +183,16 @@ def run_swebench_pro_instance(
             on_phase=on_phase,
             process=process,
         )
+    except BaseException:
+        evaluation_failed = True
+        raise
     finally:
         if not image_was_present and _inspect_task_image(process, instance.task_image, cwd=image_cwd) is not None:
-            _remove_imported_task_image(process, instance.task_image, cwd=image_cwd)
+            try:
+                _remove_imported_task_image(process, instance.task_image, cwd=image_cwd)
+            except BaseException:
+                if not evaluation_failed:
+                    raise
 
 
 def _remove_imported_task_image(process: ProcessRunner, task_image: str, *, cwd: Path) -> None:

@@ -834,6 +834,21 @@ def test_runner_surfaces_imported_task_image_cleanup_failure(tmp_path: Path, mon
         )
 
 
+def test_runner_cleanup_failure_does_not_mask_the_evaluation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(RuntimeError, match="official evaluator failed"):
+        _run_with_fakes(
+            tmp_path,
+            monkeypatch,
+            [],
+            image_present=False,
+            evaluator_failure=RuntimeError("official evaluator failed"),
+            image_cleanup_failure=RuntimeError("image cleanup failed"),
+        )
+
+
 def test_runner_emits_phases_immediately_before_named_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[object] = []
 
