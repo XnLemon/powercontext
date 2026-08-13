@@ -212,6 +212,29 @@ def test_reclaimer_pages_past_old_successes_with_absent_workspaces(tmp_path: Pat
     assert not retained_workspace.exists()
 
 
+def test_reclaimer_default_scan_skips_absent_history_but_deletes_only_one_workspace(tmp_path: Path) -> None:
+    config, store = _store(tmp_path)
+    task_ids = [_succeed(store, f"default-scan-{index}") for index in range(5)]
+    first_workspace = config.run_root / "work" / task_ids[-2]
+    second_workspace = config.run_root / "work" / task_ids[-1]
+    for task_id, workspace in ((task_ids[-2], first_workspace), (task_ids[-1], second_workspace)):
+        workspace.mkdir(parents=True)
+        (config.run_root / "runs" / task_id).mkdir(parents=True)
+
+    reclaimer = SucceededWorkspaceReclaimer(
+        store,
+        config.run_root,
+        interval_seconds=1,
+        artifact_validator=lambda *_: None,
+    )
+
+    assert reclaimer.run_once() == 1
+    assert not first_workspace.exists()
+    assert second_workspace.is_dir()
+    assert reclaimer.run_once() == 1
+    assert not second_workspace.exists()
+
+
 def test_reclaimer_waits_after_each_successful_deletion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

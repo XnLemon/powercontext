@@ -94,17 +94,21 @@ class SucceededWorkspaceReclaimer:
         run_root: Path,
         *,
         interval_seconds: float,
-        batch_size: int = 1,
+        batch_size: int = 256,
+        max_reclaims_per_cycle: int = 1,
         artifact_validator: ArtifactValidator = load_report,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("Workspace reclaim interval must be positive")
         if batch_size < 1:
             raise ValueError("Workspace reclaim batch size must be positive")
+        if max_reclaims_per_cycle < 1:
+            raise ValueError("Workspace reclaim limit must be positive")
         self._store = store
         self._run_root = run_root
         self._interval_seconds = interval_seconds
         self._batch_size = batch_size
+        self._max_reclaims_per_cycle = max_reclaims_per_cycle
         self._artifact_validator = artifact_validator
         self._offset = 0
 
@@ -116,7 +120,9 @@ class SucceededWorkspaceReclaimer:
             limit=self._batch_size,
             offset=self._offset,
         )
+        processed = 0
         for task in tasks:
+            processed += 1
             try:
                 if self._reclaim_task(task):
                     reclaimed += 1
@@ -126,7 +132,9 @@ class SucceededWorkspaceReclaimer:
                     task.task_id,
                     type(error).__name__,
                 )
-        self._offset = 0 if len(tasks) < self._batch_size else self._offset + len(tasks)
+            if reclaimed >= self._max_reclaims_per_cycle:
+                break
+        self._offset = 0 if processed == len(tasks) and len(tasks) < self._batch_size else self._offset + processed
         return reclaimed
 
     def run_forever(self, stop: threading.Event) -> None:
