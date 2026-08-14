@@ -37,7 +37,9 @@ class _DeterministicHandoffPipeline:
         citations = tuple(item.citation for item in request.evidence)
         return HandoffDraft(
             objective=request.objective,
-            state=(HandoffStatement(text="Claude Code MCP exposes the explicit Handoff lifecycle.", citations=citations),),
+            state=(
+                HandoffStatement(text="Claude Code MCP exposes the explicit Handoff lifecycle.", citations=citations),
+            ),
             disposition="continuable",
             next_action=HandoffStatement(text="Continue from the inspected Prepared Handoff.", citations=citations),
         )

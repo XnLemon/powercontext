@@ -155,12 +155,7 @@ def test_claude_integration_does_not_embed_machine_specific_windows_paths() -> N
         REPOSITORY_ROOT / ".claude-plugin",
         REPOSITORY_ROOT / "integrations" / "claude-code",
     )
-    files = [
-        path
-        for root in roots
-        for path in root.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts
-    ]
+    files = [path for root in roots for path in root.rglob("*") if path.is_file() and "__pycache__" not in path.parts]
     matches = {
         str(path.relative_to(REPOSITORY_ROOT)): match.group(0).strip()
         for path in files
