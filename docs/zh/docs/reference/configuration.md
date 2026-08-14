@@ -138,8 +138,7 @@ OpenTelemetry 环境变量进行配置。不使用 `powercontext` command 的 pr
 `cli` extra。
 
 启用 tracing 后，PowerContext 自己构造的 generation 与 embedding 调用也会产生 span，且不记录 prompt、模型响应、
-Memory 内容或向量。可运行的配置和唯一一处已记录的例外见
-[用 Phoenix 查看 trace](../how-to/trace-with-phoenix.md)。
+Memory 内容或向量。可运行的配置见 [用 Phoenix 查看 trace](../how-to/trace-with-phoenix.md)。
 
 使用 OceanBase 时，通过环境或 secret manager 提供 URL：
 
@@ -240,3 +239,15 @@ Authorization 只能来自环境变量，不能加入 Server URL 或插件选项
 
 `UserPromptSubmit` Hook 的外层超时为十秒。召回与采集共用一个 wall-clock 时间预算，但会独立降级。
 明文 HTTP 只允许连接 loopback endpoint；远程 Server 必须使用 HTTPS。修改环境变量后需要重启 Claude Code。
+
+## DeepSeek Harness 插件
+
+| 变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `POWERCONTEXT_DSH_BASE_URL` | `http://127.0.0.1:8000` | 插件使用的 Server 地址 |
+| `POWERCONTEXT_DSH_SCOPE_ID` | 根据 Git remote 或项目路径生成 | 覆盖项目 scope |
+| `POWERCONTEXT_DSH_AUTHORIZATION` | 未设置 | 插件 HTTP 请求使用的完整 `Bearer <token>` header |
+| `POWERCONTEXT_DSH_CAPTURE_PROMPTS` | `true` | 把用户提示词采集为 Source 证据 |
+| `POWERCONTEXT_DSH_FLUSH_ON_CAPTURE` | `false` | 采集后等待 Source 处理 |
+
+`timeoutMs`、`requestTimeoutMs`、`maxBytes` 和 `flushMaxCalls` 是插件 patch 配置。Server 不可用时，召回和采集会降级；修改这些变量后需要重启 `dsh web`。

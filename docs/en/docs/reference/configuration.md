@@ -143,7 +143,7 @@ that do not use the `powercontext` command may omit the `cli` extra.
 
 Enabling tracing also produces spans for the generation and embedding calls that PowerContext constructs, without
 recording prompts, model responses, Memory content, or vectors. See
-[Trace with Phoenix](../how-to/trace-with-phoenix.md) for a working configuration and the one documented exception.
+[Trace with Phoenix](../how-to/trace-with-phoenix.md) for a working configuration.
 
 To use OceanBase, provide its URL through your environment or secret manager:
 
@@ -246,3 +246,15 @@ Authorization is environment-only and must not be added to the Server URL or plu
 The outer `UserPromptSubmit` Hook timeout is ten seconds. Recall and capture use one shared wall-clock budget but fail
 independently. Plain HTTP is accepted only for loopback endpoints; use HTTPS for a remote Server. Restart Claude Code
 after changing its environment.
+
+## DeepSeek Harness plugin
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `POWERCONTEXT_DSH_BASE_URL` | `http://127.0.0.1:8000` | Server base URL used by the plugin |
+| `POWERCONTEXT_DSH_SCOPE_ID` | derived from Git remote or project path | Override project scope |
+| `POWERCONTEXT_DSH_AUTHORIZATION` | unset | Complete `Bearer <token>` header for plugin HTTP requests |
+| `POWERCONTEXT_DSH_CAPTURE_PROMPTS` | `true` | Capture user prompts as Source evidence |
+| `POWERCONTEXT_DSH_FLUSH_ON_CAPTURE` | `false` | Wait for Source processing after capture |
+
+`timeoutMs`, `requestTimeoutMs`, `maxBytes`, and `flushMaxCalls` are plugin patch settings. Server unavailability fails open for recall and capture; restart `dsh web` after changing these variables.

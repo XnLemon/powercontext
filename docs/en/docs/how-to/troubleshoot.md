@@ -1,6 +1,6 @@
 ---
 title: Troubleshoot
-description: Diagnose PowerContext installation, Server, database, Codex, and Claude Code plugin problems.
+description: Diagnose PowerContext installation, Server, database, Codex, Claude Code, and DeepSeek Harness plugin problems.
 ---
 
 # Troubleshoot
@@ -13,11 +13,12 @@ powercontext doctor
 
 The command checks the package, Server liveness, and Server readiness. It exits with status 1 unless every check is
 `ok`; a `degraded` readiness result is usable but is not a complete diagnostic success. Add `--json` for automation;
-the top-level result and every check include `ok` and `status`. Check the optional Codex integration separately:
+the top-level result and every check include `ok` and `status`. Check optional host integrations separately:
 
 ```bash
 powercontext doctor codex
 powercontext doctor claude-code
+powercontext doctor dsh
 ```
 
 ## Installation cannot read the Git URL
@@ -31,7 +32,7 @@ git ls-remote https://github.com/oceanbase/powercontext.git HEAD
 If this fails, configure the credential helper or SSH key used by Git, then rerun `uv tool install`. `uv` uses Git's
 credential configuration; PowerContext does not accept or store repository credentials.
 
-## `powercontext`, `codex`, or `claude` is not found
+## `powercontext`, `codex`, `claude`, or `dsh` is not found
 
 Run:
 
@@ -40,11 +41,11 @@ uv tool dir --bin
 command -v powercontext
 command -v codex
 command -v claude
+command -v dsh
 ```
 
-Add the uv tool bin directory to `PATH` if needed. `powercontext setup codex` reports an error rather than installing a
-plugin when Codex CLI is unavailable.
-`powercontext setup claude-code` has the same fail-before-mutation behavior when Claude Code is unavailable.
+Add the uv tool bin directory to `PATH` if needed. `powercontext setup codex`, `powercontext setup claude-code`, and
+`powercontext setup dsh` report an error rather than installing a plugin when the host CLI is unavailable.
 
 ## The plugin is missing or stale
 
@@ -78,6 +79,17 @@ If setup fails while creating new user-scoped objects, it attempts to remove onl
 created by that invocation. Existing entries are preserved. Correct the reported Claude CLI or repository error and
 rerun the same setup command.
 
+For DeepSeek Harness, run:
+
+```bash
+powercontext doctor dsh
+powercontext setup dsh --source oceanbase/powercontext --ref <ref>
+dsh --profile web --dump-config
+```
+
+Then start a new DeepSeek Harness session and confirm dump-config lists `id: powercontext-dsh`. The DSH plugin
+directory must contain `lib/index.js`.
+
 ## The Server check fails
 
 Start the service:
@@ -94,9 +106,9 @@ powercontext doctor --server-url http://127.0.0.1:9000
 powercontext --server-url http://127.0.0.1:9000 ready
 ```
 
-The bundled Codex and Claude Code plugins use port 8000 by default. A liveness failure means the process cannot answer
-health requests, so readiness is not checked. `not_ready` with HTTP 503 means the Runtime or database cannot accept
-work. `degraded` with HTTP 200 means a configured inference capability failed while database-backed operations remain
+The bundled Codex and Claude Code plugins use port 8000 by default. A liveness failure means the process cannot answer health
+requests, so readiness is not checked. `not_ready` with HTTP 503 means the Runtime or database cannot accept work.
+`degraded` with HTTP 200 means a configured inference capability failed while database-backed operations remain
 available. Human and JSON output retain the Server's individual check statuses.
 
 ## The Server cannot open its database

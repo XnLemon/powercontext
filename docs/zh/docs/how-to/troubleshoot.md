@@ -1,6 +1,6 @@
 ---
 title: 排查问题
-description: 诊断 PowerContext 安装、Server、数据库、Codex 和 Claude Code 插件问题。
+description: 诊断 PowerContext 安装、Server、数据库、Codex、Claude Code 和 DeepSeek Harness 插件问题。
 ---
 
 # 排查问题
@@ -13,11 +13,12 @@ powercontext doctor
 
 该命令检查安装包、Server liveness 和 Server readiness；只有所有检查均为 `ok` 时才以状态码 0 退出。
 `degraded` 表示仍可使用，但不算完整诊断成功。自动化场景可添加 `--json`，顶层结果和每个检查都会包含
-`ok` 与 `status`。可单独检查可选的 Codex 集成：
+`ok` 与 `status`。可单独检查可选的宿主集成：
 
 ```bash
 powercontext doctor codex
 powercontext doctor claude-code
+powercontext doctor dsh
 ```
 
 ## 安装时无法读取 Git 地址
@@ -31,7 +32,7 @@ git ls-remote https://github.com/oceanbase/powercontext.git HEAD
 如果失败，请配置 Git 使用的 credential helper 或 SSH key，再重新运行 `uv tool install`。`uv` 使用 Git
 凭据配置；PowerContext 不接收或保存仓库凭据。
 
-## 找不到 `powercontext`、`codex` 或 `claude`
+## 找不到 `powercontext`、`codex`、`claude` 或 `dsh`
 
 执行：
 
@@ -40,11 +41,11 @@ uv tool dir --bin
 command -v powercontext
 command -v codex
 command -v claude
+command -v dsh
 ```
 
-必要时把 uv tool bin 目录加入 `PATH`。Codex CLI 不可用时，`powercontext setup codex` 会报告错误，不会继续
-安装插件。
-Claude Code CLI 不可用时，`powercontext setup claude-code` 同样会在修改配置前失败。
+必要时把 uv tool bin 目录加入 `PATH`。宿主 CLI 不可用时，`powercontext setup codex`、
+`powercontext setup claude-code` 和 `powercontext setup dsh` 会报告错误，不会继续安装插件。
 
 ## 插件缺失或版本不一致
 
@@ -77,6 +78,17 @@ claude plugin list --json
 如果 setup 在创建新的 user scope 对象时失败，它会尝试只删除本次调用创建的插件与 Marketplace 项，
 setup 前已有的对象会保留。修正命令报告的 Claude CLI 或仓库错误后，重新执行同一个 setup 命令。
 
+对于 DeepSeek Harness，执行：
+
+```bash
+powercontext doctor dsh
+powercontext setup dsh --source oceanbase/powercontext --ref <ref>
+dsh --profile web --dump-config
+```
+
+然后开启新的 DeepSeek Harness 会话，并确认 dump-config 含有 `id: powercontext-dsh`。DSH 插件目录必须包含
+`lib/index.js`。
+
 ## Server 检查失败
 
 启动服务：
@@ -92,9 +104,9 @@ powercontext doctor --server-url http://127.0.0.1:9000
 powercontext --server-url http://127.0.0.1:9000 ready
 ```
 
-随附的 Codex 和 Claude Code 插件默认使用 8000 端口。liveness 失败表示进程无法响应健康请求，此时不会继续
-检查 readiness。HTTP 503 的 `not_ready` 表示 Runtime 或数据库无法接受工作；HTTP 200 的 `degraded` 表示已配置
-的推理能力异常，但数据库操作仍然可用。Human 与 JSON 输出都会保留 Server 返回的各项检查状态。
+随附的 Codex 和 Claude Code 插件默认使用 8000 端口。liveness 失败表示进程无法响应健康请求，此时不会继续检查
+readiness。HTTP 503 的 `not_ready` 表示 Runtime 或数据库无法接受工作；HTTP 200 的 `degraded` 表示已配置的
+推理能力异常，但数据库操作仍然可用。Human 与 JSON 输出都会保留 Server 返回的各项检查状态。
 
 ## Server 无法打开数据库
 
