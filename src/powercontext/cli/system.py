@@ -101,6 +101,14 @@ class SetupError(RuntimeError):
         return cls("Claude Code did not report an enabled PowerContext plugin after installation.")
 
     @classmethod
+    def claude_marketplace_source_mismatch(cls, requested: str, existing: str) -> SetupError:
+        return cls(
+            f"Claude Code marketplace `{CLAUDE_MARKETPLACE_NAME}` uses {existing}, "
+            f"but setup requested {requested}. Remove it with "
+            f"`claude plugin marketplace remove {CLAUDE_MARKETPLACE_NAME} --scope user`, then rerun setup."
+        )
+
+    @classmethod
     def claude_server_url_credentials(cls) -> SetupError:
         return cls("PowerContext Server URL must not contain credentials.")
 
@@ -402,11 +410,20 @@ def install_claude_code_plugin(
         raise SetupError.claude_unavailable()
     server_url = _normalize_claude_server_url(server_url)
 
-    marketplaces = _run_claude_json("plugin", "marketplace", "list")
-    marketplace_existed = _claude_marketplace_installed(marketplaces, CLAUDE_MARKETPLACE_NAME)
-    plugins = _run_claude_json("plugin", "list")
-    plugin_existed = _installed_claude_plugin(plugins) is not None
     marketplace_source = _normalize_claude_marketplace_source(source, ref=ref)
+    marketplaces = _run_claude_json("plugin", "marketplace", "list")
+    marketplace = _claude_marketplace(marketplaces, CLAUDE_MARKETPLACE_NAME)
+    if marketplace is not None and not _claude_marketplace_matches(marketplace, marketplace_source):
+        raise SetupError.claude_marketplace_source_mismatch(
+            marketplace_source,
+            _describe_claude_marketplace_source(marketplace),
+        )
+    marketplace_existed = marketplace is not None
+
+    plugins = _run_claude_json("plugin", "list")
+    previous_plugin = _claude_plugin(plugins)
+    plugin_existed = previous_plugin is not None
+    settings_snapshot = _snapshot_claude_settings() if plugin_existed else None
     marketplace_added = False
     plugin_added = False
     try:
@@ -426,7 +443,7 @@ def install_claude_code_plugin(
         )
         plugin_added = not plugin_existed
         installed = _run_claude_json("plugin", "list")
-        plugin = _require_installed_claude_plugin(installed)
+        plugin = _require_enabled_claude_plugin(installed)
     except SetupError:
         if plugin_added:
             with suppress(SetupError):
@@ -437,6 +454,9 @@ def install_claude_code_plugin(
                     "--scope",
                     "user",
                 )
+        elif plugin_existed:
+            with suppress(OSError):
+                _restore_claude_settings(settings_snapshot)
         if marketplace_added:
             with suppress(SetupError):
                 _run_claude(
@@ -551,11 +571,12 @@ def run_claude_code_diagnostics() -> dict[str, Diagnostic]:
             "claude_code": Diagnostic(status=DiagnosticStatus.FAILED, detail=str(error)),
             "plugin": Diagnostic(status=DiagnosticStatus.SKIPPED, detail="plugin list is unavailable"),
         }
-    plugin = _installed_claude_plugin(result)
+    plugin = _claude_plugin(result)
+    plugin_enabled = plugin is not None and plugin.get("enabled") is True
     return {
         "claude_code": Diagnostic(status=DiagnosticStatus.OK, detail=executable),
         "plugin": Diagnostic(
-            status=DiagnosticStatus.OK if plugin is not None else DiagnosticStatus.FAILED,
+            status=DiagnosticStatus.OK if plugin_enabled else DiagnosticStatus.FAILED,
             detail=(
                 f"{plugin.get('id')} enabled={plugin.get('enabled')}"
                 if plugin is not None
@@ -743,28 +764,78 @@ def _write_claude_setup_plan(plan: dict[str, str]) -> None:
     )
 
 
-def _claude_marketplace_installed(value: object, name: str) -> bool:
-    return isinstance(value, list) and any(isinstance(item, dict) and item.get("name") == name for item in value)
-
-
-def _installed_claude_plugin(value: object) -> dict[str, Any] | None:
+def _claude_marketplace(value: object, name: str) -> dict[str, Any] | None:
     if not isinstance(value, list):
         return None
     for item in value:
-        if (
-            isinstance(item, dict)
-            and item.get("id") == f"{PLUGIN_NAME}@{CLAUDE_MARKETPLACE_NAME}"
-            and item.get("enabled") is True
-        ):
+        if isinstance(item, dict) and item.get("name") == name:
             return cast(dict[str, Any], item)
     return None
 
 
-def _require_installed_claude_plugin(value: object) -> dict[str, Any]:
-    plugin = _installed_claude_plugin(value)
-    if plugin is None:
+def _claude_marketplace_matches(marketplace: dict[str, Any], requested: str) -> bool:
+    source_kind = marketplace.get("source")
+    if source_kind == "directory":
+        existing_path = marketplace.get("path")
+        if not isinstance(existing_path, str):
+            return False
+        return os.path.normcase(str(Path(existing_path).resolve())) == os.path.normcase(str(Path(requested).resolve()))
+    if source_kind == "github":
+        requested_repo, separator, requested_ref = requested.partition("@")
+        existing_repo = marketplace.get("repo")
+        existing_ref = marketplace.get("ref")
+        return (
+            isinstance(existing_repo, str)
+            and existing_repo.casefold() == requested_repo.casefold()
+            and (existing_ref or "") == (requested_ref if separator else "")
+        )
+    if source_kind == "git":
+        requested_url, separator, requested_ref = requested.rpartition("#")
+        existing_url = marketplace.get("url")
+        existing_ref = marketplace.get("ref")
+        return (
+            isinstance(existing_url, str)
+            and existing_url == (requested_url if separator else requested)
+            and (existing_ref or "") == (requested_ref if separator else "")
+        )
+    return False
+
+
+def _describe_claude_marketplace_source(marketplace: dict[str, Any]) -> str:
+    fields = {name: marketplace[name] for name in ("source", "path", "repo", "url", "ref") if name in marketplace}
+    return json.dumps(fields, sort_keys=True)
+
+
+def _claude_plugin(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, list):
+        return None
+    for item in value:
+        if isinstance(item, dict) and item.get("id") == f"{PLUGIN_NAME}@{CLAUDE_MARKETPLACE_NAME}":
+            return cast(dict[str, Any], item)
+    return None
+
+
+def _require_enabled_claude_plugin(value: object) -> dict[str, Any]:
+    plugin = _claude_plugin(value)
+    if plugin is None or plugin.get("enabled") is not True:
         raise SetupError.claude_plugin_not_enabled()
     return plugin
+
+
+def _snapshot_claude_settings() -> bytes | None:
+    settings_file = _claude_config_dir() / "settings.json"
+    try:
+        return settings_file.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _restore_claude_settings(snapshot: bytes | None) -> None:
+    settings_file = _claude_config_dir() / "settings.json"
+    if snapshot is None:
+        settings_file.unlink(missing_ok=True)
+        return
+    settings_file.write_bytes(snapshot)
 
 
 def _run_codex_json(*arguments: str) -> dict[str, Any]:

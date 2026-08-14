@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -181,14 +182,14 @@ def test_claude_plugin_mcp_supports_explicit_memory_and_handoff_workflows(
 def _claude_mcp_connection(base_url: str, *, authorization: str | None) -> tuple[str, dict[str, str], str]:
     configuration = json.loads((CLAUDE_PLUGIN / ".mcp.json").read_text(encoding="utf-8"))["powercontext"]
     endpoint = configuration["url"].replace("${user_config.server_url}", base_url)
-    _, helper_script = configuration["headersHelper"].split(maxsplit=1)
+    helper_command = configuration["headersHelper"].replace("${CLAUDE_PLUGIN_ROOT}", CLAUDE_PLUGIN.as_posix())
     environment = dict(os.environ)
     environment.pop("POWERCONTEXT_CLAUDE_AUTHORIZATION", None)
     if authorization is not None:
         environment["POWERCONTEXT_CLAUDE_AUTHORIZATION"] = authorization
     completed = subprocess.run(
-        [sys.executable, str(CLAUDE_PLUGIN / helper_script)],
-        cwd=CLAUDE_PLUGIN,
+        shlex.split(helper_command),
+        cwd=PROJECT_ROOT,
         env=environment,
         text=True,
         capture_output=True,

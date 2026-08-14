@@ -57,7 +57,7 @@ def test_mcp_uses_claude_top_level_server_map_and_optional_header_helper() -> No
     assert configuration["powercontext"] == {
         "type": "http",
         "url": "${user_config.server_url}/mcp",
-        "headersHelper": "python scripts/mcp_headers.py",
+        "headersHelper": 'python "${CLAUDE_PLUGIN_ROOT}/scripts/mcp_headers.py"',
     }
 
 

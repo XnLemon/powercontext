@@ -243,13 +243,30 @@ def test_setup_claude_code_rolls_back_only_new_objects_after_verification_failur
     )
 
 
-def test_setup_claude_code_preserves_preexisting_objects_on_failure(monkeypatch) -> None:
+def test_setup_claude_code_preserves_preexisting_objects_on_failure(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "claude"
+    config_dir.mkdir()
+    settings_file = config_dir / "settings.json"
+    previous_settings = {
+        "enabledPlugins": {"powercontext@powercontext": True},
+        "pluginConfigs": {
+            "powercontext@powercontext": {"options": {"server_url": "http://127.0.0.1:7000", "capture_prompts": False}}
+        },
+    }
+    settings_file.write_text(json.dumps(previous_settings), encoding="utf-8")
     installed = [{"id": "powercontext@powercontext", "version": "0.1.0", "enabled": True}]
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
     monkeypatch.setattr(system_cli, "which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr(
         system_cli,
         "_run_claude_json",
-        Mock(side_effect=[[{"name": "powercontext"}], installed, []]),
+        Mock(
+            side_effect=[
+                [{"name": "powercontext", "source": "github", "repo": "oceanbase/powercontext", "ref": "master"}],
+                installed,
+                [],
+            ]
+        ),
     )
     run_claude = Mock()
     monkeypatch.setattr(system_cli, "_run_claude", run_claude)
@@ -263,6 +280,95 @@ def test_setup_claude_code_preserves_preexisting_objects_on_failure(monkeypatch)
         )
 
     assert [call.args[:2] for call in run_claude.call_args_list] == [("plugin", "install")]
+    assert json.loads(settings_file.read_text(encoding="utf-8")) == previous_settings
+
+
+def test_setup_claude_code_restores_a_preexisting_disabled_plugin_after_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_dir = tmp_path / "claude"
+    config_dir.mkdir()
+    settings_file = config_dir / "settings.json"
+    previous_settings = {
+        "enabledPlugins": {"powercontext@powercontext": False},
+        "pluginConfigs": {
+            "powercontext@powercontext": {"options": {"server_url": "http://127.0.0.1:7000", "capture_prompts": False}}
+        },
+        "unrelated": {"preserved": True},
+    }
+    settings_file.write_text(json.dumps(previous_settings), encoding="utf-8")
+    disabled = [{"id": "powercontext@powercontext", "version": "0.1.0", "enabled": False}]
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(system_cli, "which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        system_cli,
+        "_run_claude_json",
+        Mock(
+            side_effect=[
+                [{"name": "powercontext", "source": "github", "repo": "oceanbase/powercontext", "ref": "master"}],
+                disabled,
+                [],
+            ]
+        ),
+    )
+
+    def run_claude(*arguments: str) -> None:
+        if arguments[:2] == ("plugin", "install"):
+            changed = {
+                **previous_settings,
+                "enabledPlugins": {"powercontext@powercontext": True},
+                "pluginConfigs": {
+                    "powercontext@powercontext": {
+                        "options": {"server_url": "http://127.0.0.1:8000", "capture_prompts": True}
+                    }
+                },
+            }
+            settings_file.write_text(json.dumps(changed), encoding="utf-8")
+
+    run_claude_mock = Mock(side_effect=run_claude)
+    monkeypatch.setattr(system_cli, "_run_claude", run_claude_mock)
+
+    with pytest.raises(system_cli.SetupError):
+        system_cli.install_claude_code_plugin(
+            source="oceanbase/powercontext",
+            ref="master",
+            server_url="http://127.0.0.1:8000",
+            capture_prompts=True,
+        )
+
+    assert [call.args[:2] for call in run_claude_mock.call_args_list] == [("plugin", "install")]
+    assert json.loads(settings_file.read_text(encoding="utf-8")) == previous_settings
+
+
+@pytest.mark.parametrize(
+    "existing_marketplace",
+    [
+        {"name": "powercontext", "source": "github", "repo": "other/powercontext", "ref": "tested-ref"},
+        {"name": "powercontext", "source": "github", "repo": "oceanbase/powercontext", "ref": "other-ref"},
+    ],
+    ids=["different-repository", "different-ref"],
+)
+def test_setup_claude_code_rejects_a_conflicting_existing_marketplace_before_mutation(
+    existing_marketplace: dict[str, object],
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(system_cli, "which", lambda _name: "/usr/bin/claude")
+    run_claude_json = Mock(return_value=[existing_marketplace])
+    run_claude = Mock()
+    monkeypatch.setattr(system_cli, "_run_claude_json", run_claude_json)
+    monkeypatch.setattr(system_cli, "_run_claude", run_claude)
+
+    with pytest.raises(system_cli.SetupError, match="marketplace remove powercontext --scope user"):
+        system_cli.install_claude_code_plugin(
+            source="oceanbase/powercontext",
+            ref="tested-ref",
+            server_url="http://127.0.0.1:8000",
+            capture_prompts=True,
+        )
+
+    run_claude_json.assert_called_once_with("plugin", "marketplace", "list")
+    run_claude.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -287,7 +393,7 @@ def test_setup_claude_code_normalizes_an_mcp_url_before_installing(monkeypatch) 
         "_run_claude_json",
         Mock(
             side_effect=[
-                [{"name": "powercontext"}],
+                [{"name": "powercontext", "source": "github", "repo": "oceanbase/powercontext", "ref": "master"}],
                 [{"id": "powercontext@powercontext", "version": "0.1.0", "enabled": True}],
                 [{"id": "powercontext@powercontext", "version": "0.1.0", "enabled": True}],
             ]
