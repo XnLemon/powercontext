@@ -1,6 +1,6 @@
 ---
 title: Troubleshoot
-description: Diagnose PowerContext installation, Server, database, and Codex plugin problems.
+description: Diagnose PowerContext installation, Server, database, Codex, and Claude Code plugin problems.
 ---
 
 # Troubleshoot
@@ -17,6 +17,7 @@ the top-level result and every check include `ok` and `status`. Check the option
 
 ```bash
 powercontext doctor codex
+powercontext doctor claude-code
 ```
 
 ## Installation cannot read the Git URL
@@ -30,7 +31,7 @@ git ls-remote https://github.com/oceanbase/powercontext.git HEAD
 If this fails, configure the credential helper or SSH key used by Git, then rerun `uv tool install`. `uv` uses Git's
 credential configuration; PowerContext does not accept or store repository credentials.
 
-## `powercontext` or `codex` is not found
+## `powercontext`, `codex`, or `claude` is not found
 
 Run:
 
@@ -38,10 +39,12 @@ Run:
 uv tool dir --bin
 command -v powercontext
 command -v codex
+command -v claude
 ```
 
 Add the uv tool bin directory to `PATH` if needed. `powercontext setup codex` reports an error rather than installing a
 plugin when Codex CLI is unavailable.
+`powercontext setup claude-code` has the same fail-before-mutation behavior when Claude Code is unavailable.
 
 ## The plugin is missing or stale
 
@@ -60,6 +63,21 @@ codex plugin list --json
 
 Then start a new Codex session. Check `/hooks` if prompt recall and capture do not run.
 
+For Claude Code, run:
+
+```bash
+powercontext doctor claude-code
+powercontext setup claude-code --source oceanbase/powercontext --ref <ref>
+claude plugin list --json
+```
+
+Then start a new Claude Code session. Check `/hooks` and `/mcp`; the plugin inventory should contain one
+`UserPromptSubmit` Hook and one `powercontext` MCP Server.
+
+If setup fails while creating new user-scoped objects, it attempts to remove only the plugin and Marketplace entries
+created by that invocation. Existing entries are preserved. Correct the reported Claude CLI or repository error and
+rerun the same setup command.
+
 ## The Server check fails
 
 Start the service:
@@ -76,9 +94,9 @@ powercontext doctor --server-url http://127.0.0.1:9000
 powercontext --server-url http://127.0.0.1:9000 ready
 ```
 
-The bundled Codex plugin uses port 8000 by default. A liveness failure means the process cannot answer health
-requests, so readiness is not checked. `not_ready` with HTTP 503 means the Runtime or database cannot accept work.
-`degraded` with HTTP 200 means a configured inference capability failed while database-backed operations remain
+The bundled Codex and Claude Code plugins use port 8000 by default. A liveness failure means the process cannot answer
+health requests, so readiness is not checked. `not_ready` with HTTP 503 means the Runtime or database cannot accept
+work. `degraded` with HTTP 200 means a configured inference capability failed while database-backed operations remain
 available. Human and JSON output retain the Server's individual check statuses.
 
 ## The Server cannot open its database
@@ -120,10 +138,10 @@ powercontext capabilities
 
 `Memory extraction: disabled` means the Server has no generation model.
 
-## Codex continues when the Server is down
+## The coding agent continues when the Server is down
 
-This is expected. The prompt hook fails open so a Memory outage cannot block ordinary Codex work. Restart the Server
-to restore recall and capture; the existing database is reopened automatically.
+This is expected. Both prompt hooks fail open so a Memory outage cannot block ordinary Codex or Claude Code work.
+Restart the Server to restore recall and capture; the existing database is reopened automatically.
 
 ## Codex does not inject recalled context
 
@@ -135,3 +153,40 @@ events intentionally omit the query and prepared content.
 
 Run `powercontext capabilities` and confirm that `powercontext.prepared-context.v1` appears under Context
 versions.
+
+## Claude Code does not inject recalled context
+
+First separate installation from Server health:
+
+```bash
+powercontext doctor claude-code
+powercontext doctor
+```
+
+The first command checks the Claude CLI and enabled plugin without contacting the Server. The second checks Server
+liveness and readiness. Then inspect the Hook's single-line stderr event. Claude Code uses the same Prepared Context
+contract as Codex, with component `powercontext.claude_code.recall`:
+
+| Outcome | Action |
+| --- | --- |
+| `empty` | No relevant Memory was prepared; no action is required |
+| `authentication_failed` | Export the complete `POWERCONTEXT_CLAUDE_AUTHORIZATION` header before starting Claude Code |
+| `version_mismatch` | Install the package and plugin from the same ref, then restart both processes |
+| `server_unavailable` | Start the Server or correct `POWERCONTEXT_CLAUDE_SERVER_URL` |
+| `invalid_response` | Check for a proxy, redirect, incompatible schema, malformed JSON, or an oversized response |
+
+The diagnostics never log the token, query, scope, prepared content, or response body. Prompt capture is independent
+of recall; a capture failure cannot suppress valid context, and a recall failure cannot suppress capture.
+
+## Claude Code MCP authentication fails
+
+The Hook and MCP `headersHelper` read `POWERCONTEXT_CLAUDE_AUTHORIZATION` from the environment that starts Claude
+Code. Stop the current process, export the complete header, and start it again:
+
+```bash
+export POWERCONTEXT_CLAUDE_AUTHORIZATION="Bearer $POWERCONTEXT_LOCAL_TOKEN"
+claude
+```
+
+Do not add the token to `.mcp.json`, the Server URL, or plugin options. Use `/mcp` after restart to confirm that the
+`powercontext` Server is connected.

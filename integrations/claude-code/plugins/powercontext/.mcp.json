@@ -1,0 +1,7 @@
+{
+  "powercontext": {
+    "type": "http",
+    "url": "${user_config.server_url}/mcp",
+    "headersHelper": "python scripts/mcp_headers.py"
+  }
+}
