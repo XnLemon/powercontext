@@ -9,28 +9,35 @@ PowerContext 通过外部 Memory 插件接入 OpenClaw。插件代码由本仓�
 OpenClaw 继续负责会话身份、授权、transcript 和生命周期钩子，不需要修改
 OpenClaw 源码。
 
-## 从本地 checkout 安装
+## 从源码目录安装
 
 请使用 OpenClaw 2026.8.1-beta.2 或更高版本。更早的版本未提供本集成需要的
-Memory provider Plugin API。在 PowerContext checkout 中构建插件并链接到 OpenClaw：
+Memory provider Plugin API。在 PowerContext checkout 中构建插件，然后让 OpenClaw
+按标准的本地插件安装流程托管它：
 
 ~~~bash
 cd integrations/openclaw/plugins/memory-powercontext
 pnpm install
 pnpm build
-openclaw plugins install --link . --force
+openclaw plugins install . --force
 ~~~
 
-链接会让 OpenClaw 直接指向当前 checkout，重新构建后即可使用最新运行时。
-移除链接：
+该命令会把插件复制到 OpenClaw 的托管安装目录，并记录安装来源。源码更新后，
+重新执行 pnpm build 和安装命令即可更新运行时。移除插件：
 
 ~~~bash
 openclaw plugins uninstall memory-powercontext
 ~~~
 
-## 安装本地 npm 包
+## 安装 npm 包
 
-需要让 OpenClaw 管理一份复制后的插件时，构建本地 npm tarball：
+发布到 npm 后，使用 OpenClaw upstream 的标准 npm 插件安装方式：
+
+~~~bash
+openclaw plugins install npm:@oceanbase/openclaw-memory-powercontext
+~~~
+
+需要在未发布版本上做离线验证时，构建本地 npm tarball：
 
 ~~~bash
 cd integrations/openclaw/plugins/memory-powercontext
@@ -38,12 +45,7 @@ pnpm pack:local
 openclaw plugins install npm-pack:./artifacts/oceanbase-openclaw-memory-powercontext-0.0.1.tgz --force
 ~~~
 
-该包包含编译后的 dist/index.js 运行时和 openclaw.plugin.json。发布到 npm
-后，可以直接安装：
-
-~~~bash
-openclaw plugins install npm:@oceanbase/openclaw-memory-powercontext
-~~~
+该包包含编译后的 dist/index.js 运行时和 openclaw.plugin.json。
 
 ## 配置 Memory slot
 

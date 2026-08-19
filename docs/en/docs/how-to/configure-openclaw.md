@@ -10,27 +10,38 @@ lives in this repository, while OpenClaw continues to own session identity,
 authorization, transcripts, and lifecycle hooks. No OpenClaw source changes
 are required.
 
-## Install from a local checkout
+## Install from a source directory
 
 Use OpenClaw 2026.8.1-beta.2 or newer. Earlier releases do not expose the
 memory-provider plugin API used by this integration. From the PowerContext
-checkout, build the plugin and link it:
+checkout, build the plugin and install it through OpenClaw's normal managed
+local-plugin flow:
 
 ~~~bash
 cd integrations/openclaw/plugins/memory-powercontext
 pnpm install
 pnpm build
-openclaw plugins install --link . --force
+openclaw plugins install . --force
 ~~~
 
-The link keeps the OpenClaw installation pointed at the checkout, so rebuilding
-the plugin updates the linked runtime. Remove the link with:
+OpenClaw copies the plugin into its managed installation directory and records
+the install source. After source changes, run pnpm build and the install
+command again to update the runtime. Uninstall it with:
 
 ~~~bash
 openclaw plugins uninstall memory-powercontext
 ~~~
 
-## Install a local npm package
+## Install the npm package
+
+After publishing to npm, use OpenClaw's normal upstream npm-plugin installation
+flow:
+
+~~~bash
+openclaw plugins install npm:@oceanbase/openclaw-memory-powercontext
+~~~
+
+For offline validation of an unpublished version, build a local npm tarball:
 
 Build an npm tarball when the OpenClaw host should install a managed copy:
 
@@ -40,12 +51,8 @@ pnpm pack:local
 openclaw plugins install npm-pack:./artifacts/oceanbase-openclaw-memory-powercontext-0.0.1.tgz --force
 ~~~
 
-The package includes the compiled dist/index.js runtime and
-openclaw.plugin.json. After publishing a version to npm, install it with:
-
-~~~bash
-openclaw plugins install npm:@oceanbase/openclaw-memory-powercontext
-~~~
+The tarball includes the compiled dist/index.js runtime and
+openclaw.plugin.json.
 
 ## Configure the memory slot
 

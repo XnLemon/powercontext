@@ -23,13 +23,13 @@ pnpm install
 pnpm build
 ```
 
-Then link the package into the OpenClaw installation:
+Then install the plugin through OpenClaw's managed local-plugin flow:
 
 ```bash
-openclaw plugins install --link .
+openclaw plugins install . --force
 ```
 
-The link is local and reversible. Remove it with:
+The install is managed by OpenClaw and reversible. Remove it with:
 
 ```bash
 openclaw plugins uninstall memory-powercontext
