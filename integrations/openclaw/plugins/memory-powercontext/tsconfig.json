@@ -6,7 +6,13 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["index.ts", "api.ts", "src/**/*.ts"]
+  "include": [
+    "index.ts",
+    "api.ts",
+    "src/**/*.ts"
+  ]
 }

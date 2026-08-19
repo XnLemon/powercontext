@@ -4,11 +4,18 @@
   "description": "PowerContext-backed semantic memory with bounded recall and review-gated promotion.",
   "activation": {
     "onStartup": false,
-    "onConfigPaths": ["plugins.entries.memory-powercontext"]
+    "onConfigPaths": [
+      "plugins.entries.memory-powercontext"
+    ]
   },
   "kind": "memory",
   "contracts": {
-    "tools": ["memory_search", "memory_store", "memory_revise", "memory_retire"]
+    "tools": [
+      "memory_search",
+      "memory_store",
+      "memory_revise",
+      "memory_retire"
+    ]
   },
   "toolMetadata": {
     "memory_store": {
@@ -27,8 +34,14 @@
     "properties": {
       "endpoint": {
         "allOf": [
-          { "type": "string", "format": "uri" },
-          { "type": "string", "pattern": "^https?://" }
+          {
+            "type": "string",
+            "format": "uri"
+          },
+          {
+            "type": "string",
+            "pattern": "^https?://"
+          }
         ]
       },
       "tokenEnv": {
@@ -65,7 +78,10 @@
       },
       "scopeMode": {
         "type": "string",
-        "enum": ["agent", "project"],
+        "enum": [
+          "agent",
+          "project"
+        ],
         "default": "agent"
       }
     }

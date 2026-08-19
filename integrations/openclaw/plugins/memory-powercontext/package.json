@@ -46,8 +46,12 @@
     }
   },
   "openclaw": {
-    "extensions": ["./index.ts"],
-    "runtimeExtensions": ["./dist/index.js"],
+    "extensions": [
+      "./index.ts"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
     "compat": {
       "pluginApi": ">=2026.8.1-beta.2"
     },
