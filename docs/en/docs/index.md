@@ -16,6 +16,7 @@ read and maintain Memory in a later Codex session for the same project.
 - For an end-to-end first experience, read the [Codex quickstart](tutorials/codex-quickstart.md).
 - To install, start, update, or relocate a local service, read [Install and run](how-to/install-and-run.md).
 - To control project scope, prompt capture, or local authentication, read [Configure Codex](how-to/configure-codex.md).
+- To connect OpenClaw to the PowerContext memory backend, read [Configure OpenClaw Memory](how-to/configure-openclaw.md).
 - To configure another host, read [Configure Claude Code](how-to/configure-claude-code.md) or
   [Configure DeepSeek Harness](how-to/configure-dsh.md).
 - To understand the boundary between durable Memory and a temporary Handoff, read

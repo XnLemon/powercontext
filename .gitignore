@@ -230,3 +230,7 @@ integrations/dsh/coverage/
 integrations/dsh/*.tgz
 !integrations/dsh/plugins/powercontext/lib/
 !integrations/dsh/plugins/powercontext/lib/**
+
+# PowerContext OpenClaw plugin (Node)
+integrations/openclaw/plugins/memory-powercontext/artifacts/
+integrations/openclaw/plugins/memory-powercontext/*.tgz
