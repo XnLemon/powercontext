@@ -16,7 +16,6 @@ Codex 会话中读取并维护 Memory。
 - 想完成一次端到端体验：阅读 [Codex 快速入门](tutorials/codex-quickstart.md)。
 - 想安装、启动、升级或迁移本地服务：阅读 [安装和运行](how-to/install-and-run.md)。
 - 想调整项目 scope、提示词采集或本地鉴权：阅读 [配置 Codex](how-to/configure-codex.md)。
-- 想通过本地插件把 OpenClaw 接入 PowerContext Memory：阅读 [配置 OpenClaw Memory](how-to/configure-openclaw.md)。
 - 想配置其他宿主：阅读 [配置 Claude Code](how-to/configure-claude-code.md) 或
   [配置 DeepSeek Harness](how-to/configure-dsh.md)。
 - 想理解长期 Memory 与临时 Handoff 的适用边界：阅读[理解 Memory 和 Handoff](explanation/memory-and-handoff.md)。
