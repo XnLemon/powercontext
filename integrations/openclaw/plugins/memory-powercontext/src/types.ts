@@ -55,6 +55,18 @@ export type PreparedContext = {
   content_bytes: number;
 };
 
+export type PowerContextCapabilities = {
+  memory_extraction: boolean;
+};
+
+export function isPowerContextCapabilities(value: unknown): value is PowerContextCapabilities {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    typeof (value as Partial<PowerContextCapabilities>).memory_extraction === "boolean"
+  );
+}
+
 export function isPreparedContext(value: unknown): value is PreparedContext {
   if (!value || typeof value !== "object") {
     return false;

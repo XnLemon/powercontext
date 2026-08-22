@@ -15,7 +15,8 @@
   "files": [
     "dist",
     "openclaw.plugin.json",
-    "README.md"
+    "README.md",
+    "scripts/configure-openclaw.py"
   ],
   "exports": {
     ".": {

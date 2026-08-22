@@ -32,6 +32,9 @@ import {
   type SearchMemoryResponse,
 } from "./types.js";
 
+const DEFAULT_MEMORY_READ_LINES = 120;
+const DEFAULT_MEMORY_READ_MAX_CHARS = 12_000;
+
 export class PowerContextMemoryManager implements MemorySearchManager {
   private readonly citationScopes = new Map<string, string>();
 
@@ -40,6 +43,7 @@ export class PowerContextMemoryManager implements MemorySearchManager {
     private readonly getConfig: () => PowerContextConfig,
     private readonly client: PowerContextClient,
     private readonly isPrivateSession: (agentId: string, sessionKey: string | undefined) => boolean,
+    private readonly fallbackScopeId?: string,
   ) {}
 
   async search(
@@ -111,11 +115,13 @@ export class PowerContextMemoryManager implements MemorySearchManager {
       });
   }
 
-  async readFile(params: { relPath: string; from?: number; lines?: number }): Promise<MemoryReadResult> {
+  async readFile(params: { relPath: string; from?: number; lines?: number; scopeId?: string }): Promise<MemoryReadResult> {
     const citation = decodeCitation(params.relPath);
     const config = this.getConfig();
     const scopeId =
+      params.scopeId ??
       this.citationScopes.get(params.relPath) ??
+      this.fallbackScopeId ??
       (config.scopeMode === "agent"
         ? resolvePowerContextScope(this.agentId, config)
         : undefined);
@@ -129,16 +135,38 @@ export class PowerContextMemoryManager implements MemorySearchManager {
       citation,
     });
     const allLines = entry.text.split("\n");
+    if (allLines.at(-1) === "") {
+      allLines.pop();
+    }
     const from = Math.max(1, params.from ?? 1);
-    const count = Math.max(1, params.lines ?? allLines.length);
+    const count = Math.max(1, params.lines ?? DEFAULT_MEMORY_READ_LINES);
     const selected = allLines.slice(from - 1, from - 1 + count);
+    let includedLines = selected.length;
+    let text = selected.join("\n");
+    while (includedLines > 1 && text.length > DEFAULT_MEMORY_READ_MAX_CHARS) {
+      includedLines -= 1;
+      text = selected.slice(0, includedLines).join("\n");
+    }
+    const hardTruncated = text.length > DEFAULT_MEMORY_READ_MAX_CHARS;
+    if (hardTruncated) {
+      text = text.slice(0, DEFAULT_MEMORY_READ_MAX_CHARS);
+    }
+    const moreSourceLinesRemain = from - 1 + selected.length < allLines.length;
+    const truncated = hardTruncated || includedLines < selected.length || moreSourceLinesRemain;
+    const nextFrom =
+      !hardTruncated && truncated ? from + includedLines : undefined;
+    if (truncated && (text || hardTruncated)) {
+      text += nextFrom
+        ? `\n\n[More content available. Use from=${nextFrom} to continue.]`
+        : "\n\n[More content available. Requested excerpt exceeded the default maxChars budget.]";
+    }
     return {
-      text: selected.join("\n"),
+      text,
       path: params.relPath,
       from,
-      lines: selected.length,
-      truncated: from - 1 + selected.length < allLines.length,
-      ...(from - 1 + selected.length < allLines.length ? { nextFrom: from + selected.length } : {}),
+      lines: includedLines,
+      ...(truncated ? { truncated: true } : {}),
+      ...(nextFrom !== undefined ? { nextFrom } : {}),
     };
   }
 

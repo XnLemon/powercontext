@@ -24,23 +24,33 @@ export function createPowerContextMemoryRuntime(params: {
   getConfig: () => PowerContextConfig;
   client: PowerContextClient;
   isPrivateSession: (agentId: string, sessionKey: string | undefined) => boolean;
+  managerFor?: (agentId: string) => PowerContextMemoryManager;
+  removeManager?: (agentId: string) => void;
+  clearManagers?: () => void;
 }): MemoryPluginRuntime {
   const managers = new Map<string, PowerContextMemoryManager>();
+  const managerFor = (agentId: string) => {
+    if (params.managerFor) {
+      return params.managerFor(agentId);
+    }
+    let manager = managers.get(agentId);
+    if (!manager) {
+      manager = new PowerContextMemoryManager(
+        agentId,
+        params.getConfig,
+        params.client,
+        params.isPrivateSession,
+      );
+      managers.set(agentId, manager);
+    }
+    return manager;
+  };
   return {
     async getMemorySearchManager({ agentId, purpose }) {
       if (!params.getConfig().endpoint) {
         return { manager: null, error: "PowerContext endpoint is not configured" };
       }
-      let manager = managers.get(agentId);
-      if (!manager) {
-        manager = new PowerContextMemoryManager(
-          agentId,
-          params.getConfig,
-          params.client,
-          params.isPrivateSession,
-        );
-        managers.set(agentId, manager);
-      }
+      const manager = managerFor(agentId);
       return {
         manager,
         debug: { backend: "builtin", purpose: purpose ?? "default", managerMs: 0 },
@@ -56,10 +66,18 @@ export function createPowerContextMemoryRuntime(params: {
       return hits.filter((hit) => hit.source !== "sessions");
     },
     async closeMemorySearchManager({ agentId }) {
+      if (params.managerFor) {
+        params.removeManager?.(agentId);
+        return;
+      }
       managers.delete(agentId);
     },
     async closeAllMemorySearchManagers() {
-      managers.clear();
+      if (params.clearManagers) {
+        params.clearManagers();
+      } else {
+        managers.clear();
+      }
     },
   };
 }
