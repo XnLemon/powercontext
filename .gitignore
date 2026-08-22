@@ -234,3 +234,11 @@ integrations/dsh/*.tgz
 # PowerContext OpenClaw plugin (Node)
 integrations/openclaw/plugins/memory-powercontext/artifacts/
 integrations/openclaw/plugins/memory-powercontext/*.tgz
+
+# PowerContext Pi package (Node)
+integrations/pi/node_modules/
+integrations/pi/coverage/
+integrations/pi/*.tgz
+integrations/pi/plugins/powercontext/node_modules/
+integrations/pi/plugins/powercontext/coverage/
+integrations/pi/plugins/powercontext/*.tgz

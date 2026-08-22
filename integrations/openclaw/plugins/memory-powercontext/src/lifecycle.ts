@@ -1,3 +1,20 @@
+/*
+ * Copyright (c) 2026 OceanBase.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type { PowerContextConfig } from "./config.js";
 import { opaqueSessionId, resolvePowerContextScope } from "./config.js";
@@ -9,7 +26,7 @@ import {
   truncateUtf8,
 } from "./content.js";
 import type { PowerContextClient } from "./http.js";
-import { isPreparedContext } from "./types.js";
+import { isPowerContextCapabilities, isPreparedContext } from "./types.js";
 
 type LifecycleDependencies = {
   client: PowerContextClient;
@@ -17,15 +34,32 @@ type LifecycleDependencies = {
   isPrivateSession: (agentId: string, sessionKey: string | undefined) => boolean;
 };
 
+const MAX_SESSION_SCOPES = 32;
+
 export function registerPowerContextLifecycle(api: OpenClawPluginApi, deps: LifecycleDependencies) {
-  const sessionScopes = new Map<string, string>();
+  const sessionScopes = new Map<string, Set<string>>();
   const readAgentId = (agentId: string | undefined): string | undefined => {
     const value = agentId?.trim();
     return value || undefined;
   };
   const rememberScope = (sessionId: string | undefined, scopeId: string) => {
-    if (sessionId) {
-      sessionScopes.set(sessionId, scopeId);
+    if (!sessionId) {
+      return;
+    }
+    let scopes = sessionScopes.get(sessionId);
+    if (!scopes) {
+      scopes = new Set<string>();
+      sessionScopes.set(sessionId, scopes);
+    }
+    scopes.add(scopeId);
+    if (scopes.size > MAX_SESSION_SCOPES) {
+      const oldest = scopes.values().next().value;
+      if (oldest) {
+        scopes.delete(oldest);
+      }
+      api.logger.warn(
+        `memory-powercontext: session scope history exceeded ${MAX_SESSION_SCOPES}; oldest scope was dropped`,
+      );
     }
   };
   const resolveScope = (params: {
@@ -82,6 +116,19 @@ export function registerPowerContextLifecycle(api: OpenClawPluginApi, deps: Life
   const flush = async (scopeId: string) => {
     await deps.client.post("/v1/memory/flush", { scope_id: scopeId });
   };
+  const canExtractMemory = async () => {
+    const capabilities = await deps.client.get<unknown>("/v1/capabilities");
+    if (!isPowerContextCapabilities(capabilities)) {
+      throw new Error("PowerContext returned an invalid Capabilities payload");
+    }
+    if (!capabilities.memory_extraction) {
+      api.logger.debug?.(
+        "memory-powercontext: memory flush deferred because extraction is unavailable; captured sources remain pending",
+      );
+      return false;
+    }
+    return true;
+  };
 
   api.on("before_prompt_build", async (event, ctx) => {
     const config = deps.getConfig();
@@ -106,7 +153,7 @@ export function registerPowerContextLifecycle(api: OpenClawPluginApi, deps: Life
       });
       const prepared = await deps.client.post<unknown>("/v1/context/prepare", {
         scope_id: scopeId,
-        query: query.slice(0, 8192),
+        query: truncateUtf8(query, 8192),
         max_bytes: config.prepareMaxBytes,
       });
       if (!isPreparedContext(prepared)) {
@@ -167,11 +214,13 @@ export function registerPowerContextLifecycle(api: OpenClawPluginApi, deps: Life
           messages: event.messages,
         });
       }
-      await flush(resolveScope({
-        agentId,
-        sessionId: ctx.sessionId,
-        activeProjectKeys: ctx.activeProjectKeys,
-      }));
+      if (await canExtractMemory()) {
+        await flush(resolveScope({
+          agentId,
+          sessionId: ctx.sessionId,
+          activeProjectKeys: ctx.activeProjectKeys,
+        }));
+      }
     } catch (error) {
       api.logger.warn(`memory-powercontext: pre-compaction flush failed: ${String(error)}`);
     }
@@ -184,16 +233,34 @@ export function registerPowerContextLifecycle(api: OpenClawPluginApi, deps: Life
       return;
     }
     const config = deps.getConfig();
-    const scopeId = sessionScopes.get(event.sessionId);
+    const observedScopes = sessionScopes.get(event.sessionId);
     sessionScopes.delete(event.sessionId);
-    if (!scopeId && config.scopeMode === "project") {
+    if (!observedScopes?.size && config.scopeMode === "project") {
       api.logger.debug?.(
         "memory-powercontext: session-end flush skipped because no trusted project scope was observed",
       );
       return;
     }
     try {
-      await flush(scopeId ?? resolvePowerContextScope(agentId, config));
+      const scopes = observedScopes?.size
+        ? [...observedScopes]
+        : [resolvePowerContextScope(agentId, config)];
+      if (!(await canExtractMemory())) {
+        return;
+      }
+      const failures: unknown[] = [];
+      for (const scopeId of scopes) {
+        try {
+          await flush(scopeId);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length) {
+        api.logger.warn(
+          `memory-powercontext: session-end flush failed for ${failures.length}/${scopes.length} scope(s): ${String(failures[0])}`,
+        );
+      }
     } catch (error) {
       api.logger.warn(`memory-powercontext: session-end flush failed: ${String(error)}`);
     }
