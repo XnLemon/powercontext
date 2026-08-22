@@ -245,6 +245,8 @@ def configure_openclaw(*, executable: str, server_url: str, scope_mode: str) -> 
         {"path": "plugins.entries.memory-powercontext.hooks.allowConversationAccess", "value": True},
         {"path": "plugins.slots.memory", "value": OPENCLAW_PLUGIN_NAME},
     ]
+    if read_config_value(executable, "gateway.mode") is None:
+        settings.insert(0, {"path": "gateway.mode", "value": "local"})
     run_openclaw(executable, "config", "set", "--batch-json", json.dumps(settings, separators=(",", ":")))
     current = read_tools_allowlist(executable)
     merged = list(current)
@@ -276,6 +278,19 @@ def read_tools_allowlist(executable: str) -> list[object]:
     if not isinstance(value, list):
         raise SetupError.invalid_command_output(command, "tools.alsoAllow is not an array")
     return value
+
+
+def read_config_value(executable: str, path: str) -> object | None:
+    """Read a config value, returning ``None`` when the path is absent."""
+
+    command = [executable, "config", "get", path, "--json"]
+    completed = run_process(command, timeout=60, check=False)
+    if completed.returncode != 0:
+        return None
+    try:
+        return json.loads(completed.stdout or "null")
+    except json.JSONDecodeError as error:
+        raise SetupError.invalid_command_output(command, "invalid JSON") from error
 
 
 def run_openclaw(executable: str, *arguments: str) -> subprocess.CompletedProcess[str]:

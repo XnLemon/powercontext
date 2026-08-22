@@ -110,6 +110,8 @@ def enable(executable: str, endpoint: str, scope_mode: str) -> None:
         {"path": "plugins.entries.memory-powercontext.hooks.allowConversationAccess", "value": True},
         {"path": "plugins.slots.memory", "value": "memory-powercontext"},
     ]
+    if read_config_value(executable, "gateway.mode") is None:
+        settings.insert(0, {"path": "gateway.mode", "value": "local"})
     run_command(
         [executable, "config", "set", "--batch-json", json.dumps(settings, separators=(",", ":"))],
         timeout=60,
@@ -185,6 +187,19 @@ def read_tools_allowlist(executable: str) -> list[object]:
     if not isinstance(value, list):
         raise ConfigurationError("OpenClaw tools.alsoAllow is not an array")
     return value
+
+
+def read_config_value(executable: str, path: str) -> object | None:
+    """Read a config value, returning ``None`` when the path is absent."""
+
+    command = [executable, "config", "get", path, "--json"]
+    completed = run_command(command, timeout=60, check=False)
+    if completed.returncode != 0:
+        return None
+    try:
+        return json.loads(completed.stdout or "null")
+    except json.JSONDecodeError as error:
+        raise ConfigurationError(f"OpenClaw returned invalid JSON for {path}") from error
 
 
 def set_tools_allowlist(executable: str, *, add: bool) -> None:

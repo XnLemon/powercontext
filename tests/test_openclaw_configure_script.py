@@ -61,6 +61,34 @@ def test_allowlist_update_is_idempotent_and_preserves_unrelated_tools(monkeypatc
     assert state == ["custom_tool"]
 
 
+def test_enable_initializes_local_gateway_when_mode_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], *, timeout: int, check: bool = True) -> CompletedProcess[str]:
+        del timeout, check
+        commands.append(command)
+        if command[1:4] == ["config", "get", "gateway.mode"]:
+            return CompletedProcess(command, 1, "", "Config path not found")
+        if command[1:4] == ["config", "get", "tools.alsoAllow"]:
+            return CompletedProcess(command, 0, "[]", "")
+        if command[1:3] == ["config", "set"] and command[3] == "tools.alsoAllow":
+            return CompletedProcess(command, 0, "", "")
+        if command[1:4] == ["config", "set", "--batch-json"]:
+            settings = json.loads(command[4])
+            assert settings[0] == {"path": "gateway.mode", "value": "local"}
+            return CompletedProcess(command, 0, "", "")
+        if command[1:3] == ["gateway", "restart"]:
+            return CompletedProcess(command, 0, "", "")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(configure_openclaw, "run_command", fake_run)
+    monkeypatch.setenv("OPENCLAW_RESTART", "1")
+
+    configure_openclaw.enable("openclaw", "http://127.0.0.1:8765", "agent")
+
+    assert commands[0][1:4] == ["config", "get", "gateway.mode"]
+
+
 @pytest.mark.parametrize(
     "value",
     [
