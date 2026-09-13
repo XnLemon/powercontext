@@ -195,6 +195,15 @@ function readJsonObject(raw: Record<string, unknown>, name: string): JsonObject 
   return value as JsonObject;
 }
 
+function readOptionalJsonObject(raw: Record<string, unknown>, name: string): JsonObject | undefined {
+  const value = raw[name];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${name} must be a JSON object`);
+  }
+  return value as JsonObject;
+}
+
 function sourceId(
   operation: string,
   ctx: OpenClawPluginToolContext,
@@ -367,8 +376,10 @@ export function createHandoffContinueTool(ctx: OpenClawPluginToolContext, deps: 
           scope_id: await resolveToolScope(ctx, deps, signal),
           selection,
         };
-        if (raw.prepared !== undefined) body.prepared = readJsonObject(raw, "prepared");
-        if (raw.revision !== undefined) body.revision = readJsonObject(raw, "revision");
+        const prepared = readOptionalJsonObject(raw, "prepared");
+        const revision = readOptionalJsonObject(raw, "revision");
+        if (prepared !== undefined) body.prepared = prepared;
+        if (revision !== undefined) body.revision = revision;
         return jsonResult(await deps.client.post("/v1/handoff/continue", body, signal));
       } catch (error) {
         return workFailure(error);
@@ -410,15 +421,16 @@ export function createHandoffAcknowledgeTool(ctx: OpenClawPluginToolContext, dep
         if (!["prepared", "exact"].includes(selection)) {
           throw new Error("selection must be prepared or exact");
         }
+        const receiverChecks = readOptionalJsonObject(raw, "receiver_checks");
+        const prepared = readOptionalJsonObject(raw, "prepared");
+        const revision = readOptionalJsonObject(raw, "revision");
         const payload: JsonObject = {
           receiver,
           status,
           selection,
-          ...(raw.receiver_checks !== undefined
-            ? { receiver_checks: readJsonObject(raw, "receiver_checks") }
-            : {}),
-          ...(raw.prepared !== undefined ? { prepared: readJsonObject(raw, "prepared") } : {}),
-          ...(raw.revision !== undefined ? { revision: readJsonObject(raw, "revision") } : {}),
+          ...(receiverChecks !== undefined ? { receiver_checks: receiverChecks } : {}),
+          ...(prepared !== undefined ? { prepared } : {}),
+          ...(revision !== undefined ? { revision } : {}),
           ...(readStringParam(raw, "message") ? { message: readStringParam(raw, "message") } : {}),
         };
         const source = sourceId(

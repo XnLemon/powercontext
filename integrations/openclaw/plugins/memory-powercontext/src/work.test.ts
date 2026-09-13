@@ -154,6 +154,95 @@ describe("PowerContext work tools", () => {
     });
   });
 
+  it("treats nullable handoff inputs as omitted optional fields", async () => {
+    const { deps, requests } = fixture();
+    const revision = { family: "handoff", artifact_id: "h-1", revision: 1 };
+    const prepared = {
+      schema: "powercontext.prepared-handoff.v1",
+      scope_id: "scope-1",
+      base: null,
+      content: {
+        schema: "powercontext.handoff.v1",
+        objective: "ship it",
+        state: [{
+          text: "The implementation is ready.",
+          citations: [{ kind: "source", source_ref: { name: "handoff-boundary", source_id: "boundary" } }],
+        }],
+        disposition: "continuable",
+        next_action: null,
+        omissions: [],
+      },
+    };
+
+    await createHandoffContinueTool(context, deps)!.execute("call-1", {
+      selection: "latest",
+      prepared: null,
+      revision: null,
+    });
+    await createHandoffContinueTool(context, deps)!.execute("call-2", {
+      selection: "exact",
+      prepared: null,
+      revision,
+    });
+    await createHandoffAcknowledgeTool(context, deps)!.execute("call-3", {
+      receiver: "agent-2",
+      status: "declined",
+      selection: "exact",
+      receiver_checks: null,
+      prepared: null,
+      revision,
+      message: "The receiver is not ready yet.",
+      source_id: "receipt-exact",
+    });
+    await createHandoffAcknowledgeTool(context, deps)!.execute("call-4", {
+      receiver: "agent-2",
+      status: "declined",
+      selection: "prepared",
+      receiver_checks: null,
+      prepared,
+      revision: null,
+      message: "The receiver is not ready yet.",
+      source_id: "receipt-prepared",
+    });
+
+    expect(requests.filter(({ path }) => path === "/v1/handoff/continue")).toEqual([
+      {
+        path: "/v1/handoff/continue",
+        body: { scope_id: "scope-1", selection: "latest" },
+      },
+      {
+        path: "/v1/handoff/continue",
+        body: { scope_id: "scope-1", selection: "exact", revision },
+      },
+    ]);
+    expect(requests.filter(({ path }) => path === "/v1/work/handoffs/acknowledge")).toEqual([
+      {
+        path: "/v1/work/handoffs/acknowledge",
+        body: {
+          scope_id: "scope-1",
+          source_id: "receipt-exact",
+          receiver: "agent-2",
+          status: "declined",
+          selection: "exact",
+          revision,
+          message: "The receiver is not ready yet.",
+        },
+      },
+      {
+        path: "/v1/work/handoffs/acknowledge",
+        body: {
+          scope_id: "scope-1",
+          source_id: "receipt-prepared",
+          receiver: "agent-2",
+          status: "declined",
+          selection: "prepared",
+          prepared,
+          message: "The receiver is not ready yet.",
+        },
+      },
+    ]);
+  });
+
   it("does not expose work tools outside private sessions", () => {
     const { deps } = fixture();
     const publicDeps = { ...deps, isPrivateSession: () => false };
