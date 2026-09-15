@@ -12,8 +12,7 @@
     "test": "node --import tsx --test tests/*.test.ts",
     "types:check": "next typegen && tsc --noEmit",
     "verify:export": "tsx scripts/verify-static-export.ts",
-    "lint": "oxlint",
-    "test": "tsx --test tests/content.test.ts"
+    "lint": "oxlint"
   },
   "dependencies": {
     "fumadocs-core": "16.15.4",
